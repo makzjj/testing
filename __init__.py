@@ -1,1 +1,1 @@
-"""BioBot Robot Arm Tester package."""
+"""Utility functions package."""
