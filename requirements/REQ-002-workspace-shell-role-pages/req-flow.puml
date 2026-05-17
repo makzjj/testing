@@ -1,0 +1,24 @@
+@startuml
+title REQ-002 Workspace Shell And Role Pages - Main Flow
+skinparam shadowing false
+
+start
+:Launch selector;
+:Choose valid project;
+if (Project context available?) then (yes)
+  :Create ProjectWorkspaceWindow;
+  :Build navigation,\nlive session,\npage stack,\nand fixed console;
+  :Activate Overview;
+  :Render overview summaries;
+  :Keep console and session visible;
+  if (User changes page?) then (yes)
+    :Switch stacked page only;
+    :Preserve shell-level session and console;
+  endif
+  :Close workspace;
+  :Show selector again;
+else (no)
+  :Show blocking error message;
+endif
+stop
+@enduml

@@ -1,0 +1,65 @@
+@startuml
+title REQ-002 Workspace Shell And Role Pages - Architecture
+skinparam shadowing false
+skinparam packageStyle rectangle
+
+actor User
+
+package "Entry Layer" {
+  [main.py] as MainEntry
+  [ProgramSelectorWindow] as Selector
+}
+
+package "Project Context" {
+  [project_loader] as Loader
+  [ProjectDefinition] as ProjectDefinition
+}
+
+package "Workspace Shell" {
+  [ProjectWorkspaceWindow] as Workspace
+  [WorkspaceNavigationWidget] as Navigation
+  [LiveSessionPanel] as Session
+  [ConsolePanel] as Console
+  [WorkspacePageStack] as PageStack
+}
+
+package "Role Pages" {
+  [OverviewPage] as OverviewPage
+  [FirmwarePage] as FirmwarePage
+  [MechanicalPage] as MechanicalPage
+  [ApplicationProductionPage] as ApplicationPage
+  [SettingsPage] as SettingsPage
+}
+
+package "Transition Layer" {
+  [WorkspaceRuntimeBridge] as Bridge
+  [Existing dialogs and runtime hooks] as LegacyHooks
+}
+
+User --> Selector : choose project
+MainEntry --> Selector : create + show
+Selector --> Loader : load_available_projects()
+Loader --> ProjectDefinition : build typed project
+Selector --> Workspace : open(project_definition)
+
+Workspace --> Navigation
+Workspace --> Session
+Workspace --> Console
+Workspace --> PageStack
+
+PageStack --> OverviewPage
+PageStack --> FirmwarePage
+PageStack --> MechanicalPage
+PageStack --> ApplicationPage
+PageStack --> SettingsPage
+
+Workspace --> Bridge : request transitional data/actions
+Bridge --> LegacyHooks : use narrow adapters
+
+note right of Workspace
+Phase 2 changes the top-level runtime shape:
+- selector opens the workspace shell
+- shell owns routing and layout
+- legacy logic is bridged, not promoted
+end note
+@enduml

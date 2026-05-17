@@ -1,0 +1,38 @@
+@startuml
+title REQ-001 Project Selection Foundation - Architecture
+skinparam shadowing false
+skinparam packageStyle rectangle
+
+actor User
+
+package "Desktop Application" {
+  [main.py] as MainEntry
+  [ProgramSelectorWindow] as Selector
+  [project_loader] as Loader
+  [ProjectDefinition / ProjectLoadResult] as Models
+  [MainWindow] as RuntimeWindow
+}
+
+folder "project_configs/" {
+  file "ACCuESS.yaml" as AccessYaml
+  file "ML2.0.yaml" as Ml20Yaml
+}
+
+User --> Selector : choose project
+MainEntry --> Selector : create + show
+Selector --> Loader : load_available_projects()
+Loader --> AccessYaml : read YAML
+Loader --> Ml20Yaml : read YAML
+Loader --> Models : build typed metadata
+Selector --> RuntimeWindow : selected project context
+
+note right of Loader
+Phase 1 consumes minimal metadata:
+- project
+- system.axes
+- features
+- ui
+
+Extra sections remain extension-safe.
+end note
+@enduml

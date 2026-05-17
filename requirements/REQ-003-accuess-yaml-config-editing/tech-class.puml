@@ -1,0 +1,66 @@
+@startuml
+class ProjectDefinition {
+  name: str
+  display_name: str
+  config_path: Path
+  system_axes: int | None
+  features: ProjectFeatures
+  ui: ProjectUiConfig
+}
+
+class ConfigDocument {
+  raw_data: dict
+  source_path: Path
+  project_name: str
+  version: str | None
+}
+
+class ConfigEditorModel {
+  sections: list[ConfigSectionModel]
+  source_path: Path
+  project_name: str
+  version: str | None
+}
+
+class ConfigSectionModel {
+  section_key: str
+  title: str
+  fields: list[ConfigFieldModel]
+}
+
+class ConfigFieldModel {
+  path: str
+  label: str
+  value: object
+  value_type: str
+  editable: bool
+  children: list[ConfigFieldModel]
+}
+
+class LiveHardwareFieldValue {
+  path: str
+  label: str
+  value: object
+  status_text: str
+  highlight_tone: str
+}
+
+class SavePlan {
+  target_version: str
+  target_path: Path
+  requires_confirmation: bool
+  warning_text: str
+}
+
+class SaveResult {
+  saved_path: Path
+  saved_version: str
+  message: str
+}
+
+ConfigEditorModel "1" o-- "*" ConfigSectionModel
+ConfigSectionModel "1" o-- "*" ConfigFieldModel
+ConfigFieldModel "0..1" --> LiveHardwareFieldValue
+ConfigDocument --> ProjectDefinition
+SaveResult --> ConfigDocument
+@enduml

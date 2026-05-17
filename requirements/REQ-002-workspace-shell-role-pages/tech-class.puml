@@ -1,0 +1,81 @@
+@startuml
+title REQ-002 Workspace Shell And Role Pages - Core Classes
+skinparam shadowing false
+
+class ProjectDefinition {
+  +name: str
+  +display_name: str
+  +config_path: Path
+  +system_axes: int?
+  +features: ProjectFeatures
+  +ui: ProjectUiConfig
+}
+
+class WorkspacePageDefinition {
+  +route_id: str
+  +label: str
+  +enabled: bool
+  +order: int
+}
+
+class WorkspaceSessionState {
+  +project_name: str
+  +connection_text: str
+  +session_text: str
+  +active_page: str
+  +alerts_text: str?
+}
+
+class ProjectWorkspaceWindow {
+  +project_definition: ProjectDefinition
+  +set_active_page(route_id: str)
+  +append_console(message: str)
+  +update_session_state(state: WorkspaceSessionState)
+}
+
+class WorkspaceNavigationWidget {
+  +set_items(items: list[WorkspacePageDefinition])
+  +set_active(route_id: str)
+}
+
+class LiveSessionPanel {
+  +update_state(state: WorkspaceSessionState)
+}
+
+class ConsolePanel {
+  +append_line(message: str)
+  +clear()
+}
+
+abstract class WorkspacePageBase {
+  +route_id: str
+  +refresh()
+}
+
+class OverviewPage
+class FirmwarePage
+class MechanicalPage
+class ApplicationProductionPage
+class SettingsPage
+
+class WorkspaceRuntimeBridge {
+  +open_serial_monitor()
+  +open_zposs_plot()
+  +get_session_snapshot()
+  +get_node_summary()
+}
+
+ProjectWorkspaceWindow *-- WorkspaceNavigationWidget
+ProjectWorkspaceWindow *-- LiveSessionPanel
+ProjectWorkspaceWindow *-- ConsolePanel
+ProjectWorkspaceWindow *-- ProjectDefinition
+WorkspaceNavigationWidget o-- WorkspacePageDefinition
+LiveSessionPanel o-- WorkspaceSessionState
+OverviewPage --|> WorkspacePageBase
+FirmwarePage --|> WorkspacePageBase
+MechanicalPage --|> WorkspacePageBase
+ApplicationProductionPage --|> WorkspacePageBase
+SettingsPage --|> WorkspacePageBase
+ProjectWorkspaceWindow ..> WorkspaceRuntimeBridge
+ProjectWorkspaceWindow ..> WorkspacePageBase
+@enduml

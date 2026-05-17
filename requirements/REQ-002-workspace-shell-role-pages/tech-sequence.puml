@@ -1,0 +1,29 @@
+@startuml
+title REQ-002 Workspace Shell And Role Pages - Selector to Workspace Sequence
+skinparam shadowing false
+
+actor User
+participant "ProgramSelectorWindow" as Selector
+participant "ProjectWorkspaceWindow" as Workspace
+participant "WorkspaceNavigationWidget" as Navigation
+participant "WorkspacePageStack" as PageStack
+participant "LiveSessionPanel" as Session
+participant "ConsolePanel" as Console
+participant "WorkspaceRuntimeBridge" as Bridge
+
+User -> Selector : select valid project + Open
+Selector -> Workspace : create(project_definition)
+Workspace -> Navigation : set first-level items
+Workspace -> PageStack : register overview/firmware/mechanical/application/settings pages
+Workspace -> Session : update_state(initial session)
+Workspace -> Console : initialize console panel
+Workspace -> Bridge : get_session_snapshot()
+Bridge --> Workspace : WorkspaceSessionState
+Workspace -> PageStack : show_page("overview")
+Workspace -> User : show workspace shell
+User -> Navigation : select "mechanical"
+Navigation -> Workspace : page_selected("mechanical")
+Workspace -> PageStack : show_page("mechanical")
+Workspace -> Session : keep shell-level state visible
+Workspace -> Console : keep shell-level console visible
+@enduml

@@ -1,0 +1,23 @@
+project:
+  name: ML2.0
+  display_name: ML2.0
+  config_version: 1
+
+system:
+  axes: 10
+  nghmi: true
+
+features:
+  firmware_tools: true
+  mechanical_tools: true
+  application_tools: true
+  stress_test: true
+  integration_test: true
+
+ui:
+  workspace: main_window
+  notes: Placeholder ML2.0 project config until the real YAML definition is available.
+
+robot:
+  axis_count: 10
+  hmi_type: NGHMI

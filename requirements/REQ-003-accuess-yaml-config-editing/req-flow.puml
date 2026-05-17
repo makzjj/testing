@@ -1,0 +1,30 @@
+@startuml
+start
+:Select ACCuESS project;
+:Open Project Config page;
+:Load YAML from backend service;
+if (YAML syntax valid?) then (yes)
+  :Render sections and nested fields;
+else (no)
+  :Repair syntax or show blocking error;
+endif
+:Read live hardware values;
+:Compare live values with YAML fields;
+if (Mismatch detected?) then (yes)
+  :Show read-only Actual indicator;
+else (no)
+  :Show no extra live indicator;
+endif
+:User edits values;
+if (Save requested?) then (yes)
+  :Check version change;
+  if (Version updated?) then (yes)
+    :Save as <project_name>_<version>.yaml;
+  else (no)
+    :Request explicit version confirmation/update;
+    :Save versioned YAML;
+  endif
+  :Update active config path;
+endif
+stop
+@enduml

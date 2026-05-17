@@ -1,0 +1,31 @@
+@startuml
+skinparam componentStyle rectangle
+
+component "ProgramSelectorWindow" as Selector
+component "project_loader" as Loader
+component "ConfigSchemaAdapter" as Schema
+component "ProjectWorkspaceWindow" as Shell
+component "WorkspaceRuntimeBridge" as Bridge
+component "ConfigEditorService" as Editor
+component "ConfigSaveService" as Saver
+component "RawProjectConfigReader" as Reader
+component "LiveHardwareOverlayProvider" as Overlay
+component "Project Config Page" as Page
+database "YAML Files" as Disk
+component "Runtime Live Data" as Runtime
+
+Selector --> Loader
+Loader --> Schema
+Loader --> Disk
+Selector --> Shell
+Shell --> Bridge
+Bridge --> Reader
+Reader --> Disk
+Bridge --> Editor
+Bridge --> Saver
+Editor --> Schema
+Page --> Bridge
+Bridge --> Overlay
+Overlay --> Runtime
+Saver --> Disk
+@enduml

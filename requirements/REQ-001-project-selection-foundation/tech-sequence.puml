@@ -1,0 +1,23 @@
+@startuml
+title REQ-001 Project Selection Foundation - Startup and Handoff Sequence
+skinparam shadowing false
+
+actor User
+participant "main.py" as MainEntry
+participant "ProgramSelectorWindow" as Selector
+participant "project_loader" as Loader
+database "project_configs/*.yaml" as Configs
+participant "MainWindow" as RuntimeWindow
+
+User -> MainEntry : launch application
+MainEntry -> Selector : create selector
+Selector -> Loader : load_available_projects()
+Loader -> Configs : discover project files
+Loader -> Configs : parse YAML
+Loader --> Selector : ProjectLoadResult
+Selector -> User : show valid projects in dropdown
+User -> Selector : select project + click Open
+Selector -> RuntimeWindow : attach selected_project_definition\nattach selected_project_config
+Selector -> Selector : hide()
+RuntimeWindow -> User : show existing runtime window
+@enduml

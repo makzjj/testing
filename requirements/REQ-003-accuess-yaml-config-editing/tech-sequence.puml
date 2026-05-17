@@ -1,0 +1,42 @@
+@startuml
+actor Engineer
+participant "Project Config Page" as Page
+participant "WorkspaceRuntimeBridge" as Bridge
+participant "ConfigEditorService" as Editor
+participant "ConfigSaveService" as Saver
+participant "RawProjectConfigReader" as Reader
+participant "YAML File" as Disk
+participant "LiveHardwareOverlayProvider" as Overlay
+participant "Runtime Data" as Runtime
+
+Engineer -> Page : Open page
+Page -> Bridge : get_config_editor_model()
+Bridge -> Reader : load()
+Reader -> Disk : read YAML
+Disk --> Reader : raw data
+Reader --> Bridge : raw data
+Bridge -> Editor : build editor model
+Editor --> Bridge : ConfigEditorModel
+Bridge --> Page : editable sections
+
+Page -> Bridge : get_live_hardware_overlays()
+Bridge -> Overlay : collect_live_values()
+Overlay -> Runtime : read runtime state
+Runtime --> Overlay : live values
+Overlay --> Bridge : mismatch-only overlays
+Bridge --> Page : Actual indicators for mismatches only
+
+Engineer -> Page : Save changes
+Page -> Bridge : save_config_changes(payload, version, confirmed)
+Bridge -> Editor : apply_edit_payload(...)
+Bridge -> Saver : prepare_save(...)
+alt version unchanged
+  Saver --> Bridge : SavePlan(requires confirmation)
+  Bridge --> Page : confirmation required
+else version ready
+  Saver -> Disk : write <project_name>_<version>.yaml
+  Disk --> Saver : saved
+  Saver --> Bridge : SaveResult
+  Bridge --> Page : saved path + refresh (YAML values only)
+end
+@enduml

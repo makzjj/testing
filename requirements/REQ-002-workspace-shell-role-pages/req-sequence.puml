@@ -1,0 +1,23 @@
+@startuml
+title REQ-002 Workspace Shell And Role Pages - User Sequence
+skinparam shadowing false
+
+actor User
+participant "ProgramSelectorWindow" as Selector
+participant "ProjectWorkspaceWindow" as Workspace
+participant "WorkspaceNavigationWidget" as Navigation
+participant "WorkspacePageStack" as PageStack
+participant "ConsolePanel" as Console
+
+User -> Selector : select project and click Open
+Selector -> Workspace : create(project_definition)
+Workspace -> Navigation : build first-level routes
+Workspace -> PageStack : build pages
+Workspace -> PageStack : show Overview
+Workspace -> Console : initialize fixed console
+Workspace -> User : show workspace shell
+User -> Navigation : choose Application / Production
+Navigation -> Workspace : page_selected("application")
+Workspace -> PageStack : show page("application")
+Workspace -> Console : keep existing console state
+@enduml

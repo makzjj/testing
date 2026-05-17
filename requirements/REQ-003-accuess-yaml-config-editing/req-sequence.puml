@@ -1,0 +1,29 @@
+@startuml
+actor Engineer
+participant "Project Config Page" as Page
+participant "WorkspaceRuntimeBridge" as Bridge
+participant "Config Service" as Config
+participant "Disk YAML" as Disk
+participant "Runtime Data" as Runtime
+
+Engineer -> Page : Open Project Config
+Page -> Bridge : request config model
+Bridge -> Config : load current YAML
+Config -> Disk : read file
+Disk --> Config : raw YAML
+Config --> Bridge : editable config model
+Bridge --> Page : section data
+
+Page -> Bridge : request live hardware values
+Bridge -> Runtime : read live values
+Runtime --> Bridge : live values
+Bridge --> Page : mismatch-only Actual indicators
+
+Engineer -> Page : Save changes
+Page -> Bridge : submit edited config
+Bridge -> Config : validate + version check + save
+Config -> Disk : write <project_name>_<version>.yaml
+Disk --> Config : saved path
+Config --> Bridge : save result
+Bridge --> Page : success + active file path
+@enduml

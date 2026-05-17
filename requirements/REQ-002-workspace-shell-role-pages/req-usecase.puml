@@ -1,0 +1,38 @@
+@startuml
+title REQ-002 Workspace Shell And Role Pages - Use Cases
+left to right direction
+skinparam shadowing false
+
+actor "Platform User" as User
+actor "Platform Developer" as Developer
+
+rectangle "Phase 2 Workspace" {
+  usecase "Open selected\nproject workspace" as UC1
+  usecase "Navigate first-level\nrole pages" as UC2
+  usecase "Review overview\nsummaries" as UC3
+  usecase "Access firmware\nmodules" as UC4
+  usecase "Access mechanical\nmodules" as UC5
+  usecase "Access application /\nproduction modules" as UC6
+  usecase "Review settings\nmetadata" as UC7
+  usecase "Monitor live session\nand console" as UC8
+}
+
+User --> UC1
+User --> UC2
+User --> UC3
+User --> UC4
+User --> UC5
+User --> UC6
+User --> UC7
+User --> UC8
+
+Developer --> UC1
+Developer --> UC2
+Developer --> UC8
+
+UC2 .> UC3 : includes
+UC2 .> UC4 : includes
+UC2 .> UC5 : includes
+UC2 .> UC6 : includes
+UC2 .> UC7 : includes
+@enduml

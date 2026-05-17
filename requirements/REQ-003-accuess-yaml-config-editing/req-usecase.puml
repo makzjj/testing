@@ -1,0 +1,23 @@
+@startuml
+left to right direction
+
+actor "Engineer" as Engineer
+rectangle "ACCuESS Config Workspace" {
+  usecase "Open Project Config" as UC1
+  usecase "View Full YAML Sections" as UC2
+  usecase "Edit YAML Values" as UC3
+  usecase "Save Versioned YAML" as UC4
+  usecase "Reveal YAML File" as UC5
+  usecase "Compare Live Hardware Values" as UC6
+}
+
+Engineer --> UC1
+Engineer --> UC2
+Engineer --> UC3
+Engineer --> UC4
+Engineer --> UC5
+Engineer --> UC6
+
+UC4 .> UC3 : includes
+UC6 .> UC2 : extends
+@enduml

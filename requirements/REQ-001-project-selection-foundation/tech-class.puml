@@ -1,0 +1,43 @@
+@startuml
+title REQ-001 Project Selection Foundation - Core Data Model
+skinparam shadowing false
+
+class ProjectDefinition {
+  +name: str
+  +display_name: str
+  +config_path: Path
+  +system_axes: int?
+  +features: ProjectFeatures
+  +ui: ProjectUiConfig
+}
+
+class ProjectFeatures {
+  +firmware_tools: bool
+  +mechanical_tools: bool
+  +application_tools: bool
+  +stress_test: bool
+  +integration_test: bool
+}
+
+class ProjectUiConfig {
+  +workspace: str?
+  +notes: str?
+}
+
+class ValidationIssue {
+  +path: Path
+  +severity: str
+  +message: str
+  +field: str?
+}
+
+class ProjectLoadResult {
+  +valid_projects: list[ProjectDefinition]
+  +invalid_projects: list[ValidationIssue]
+}
+
+ProjectDefinition *-- ProjectFeatures
+ProjectDefinition *-- ProjectUiConfig
+ProjectLoadResult o-- ProjectDefinition
+ProjectLoadResult o-- ValidationIssue
+@enduml

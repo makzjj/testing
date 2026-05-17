@@ -1,0 +1,153 @@
+project:
+  name: ACCuESS
+  display_name: ACCuESS
+  config_version: 0.0.0.4
+features:
+  firmware_tools: true
+  mechanical_tools: true
+  application_tools: true
+  stress_test: true
+  integration_test: true
+ui:
+  workspace: main_window
+  notes: Initial Phase 1 YAML scaffold based on the legacy ACCuESS XML config.
+robot system configuration:
+  axes number: 5
+  mcu: true
+communication configuration:
+serial_port:
+  name: COM11
+  baudrate: 115200
+mcu configuration:
+  firmware version: 0.0.1.6
+  hardware info: S32K148_12012025
+  node id: 1
+robot arm configuration:
+  axes:
+    ya:
+      node_id: 3
+      node_type: 1
+      node_config: 2
+      sw_standby_position: 21.01
+      sw_range_max:
+      sw_counts_per_unit: 16384.0
+      sw_encodercount_max: 819200
+      sw_standby_encodercount: 341660
+      fw_safety_pwm_max: 980
+      fw_safety_velocity_max:
+      fw_safety_encodercount_max: 819300
+      fw_motor_deadband_default: 130
+      fw_motor_pos_targetoffset: 150
+      fw_version:
+      pos_kp: 900.0
+      pos_ki: 0.0001
+      pos_kd: 100.0
+      vel_kp: 0.08
+      vel_ki: 0.0
+      vel_kd: 0.0
+      manual_rotate_feature: false
+    yb:
+      node_id: 4
+      node_type: 1
+      node_config: 2
+      sw_standby_position: 21.01
+      sw_range_max:
+      sw_counts_per_unit: 16384.0
+      sw_encodercount_max: 819200
+      sw_standby_encodercount: 341660
+      fw_safety_pwm_max: 980
+      fw_safety_velocity_max:
+      fw_safety_encodercount_max: 819300
+      fw_motor_deadband_default: 130
+      fw_motor_pos_targetoffset: 150
+      fw_version:
+      pos_kp: 900.0
+      pos_ki: 0.0001
+      pos_kd: 100.0
+      vel_kp: 0.08
+      vel_ki: 0.0
+      vel_kd: 0.0
+      manual_rotate_feature: false
+    rs:
+      node_id: 6
+      node_type: 1
+      node_config: 2
+      sw_standby_position: 20
+      sw_range_max:
+      sw_counts_per_unit: 1066.67
+      sw_encodercount_max: 64000
+      sw_standby_encodercount: 32000
+      fw_safety_pwm_max: 980
+      fw_safety_velocity_max:
+      fw_safety_encodercount_max: 64100
+      fw_motor_deadband_default: 100
+      fw_motor_pos_targetoffset: 120
+      fw_version:
+      pos_kp: 800.0
+      pos_ki: 0.0001
+      pos_kd: 90.0
+      vel_kp: 0.08
+      vel_ki: 0.0
+      vel_kd: 0.0
+      manual_rotate_feature: false
+    rp:
+      node_id: 8
+      node_type: 1
+      node_config: 2
+      sw_standby_position: 70
+      sw_range_max: 140
+      sw_counts_per_unit: 2684.49
+      sw_encodercount_max: 375828
+      sw_standby_encodercount: 192746
+      fw_safety_pwm_max: 980
+      fw_safety_velocity_max:
+      fw_safety_encodercount_max: 375928
+      fw_motor_deadband_default: 236
+      fw_motor_pos_targetoffset: 256
+      fw_version:
+      pos_kp: 800.0
+      pos_ki: 0.0
+      pos_kd: 150.0
+      vel_kp: 0.8
+      vel_ki: 0.25
+      vel_kd: 0.0
+      manual_rotate_feature: true
+      manual_rotate_pwm: 500
+      manual_rotate_report_time: 100
+    rn:
+      node_id: 12
+      node_type: 1
+      node_config: 2
+      sw_standby_position: 70
+      sw_range_max: 140
+      sw_counts_per_unit: 34979.8
+      sw_encodercount_max: 4897172
+      sw_standby_encodercount: 2447753
+      fw_safety_pwm_max: 980
+      fw_safety_velocity_max:
+      fw_safety_encodercount_max: 4897272
+      fw_motor_deadband_default: 40
+      fw_motor_pos_targetoffset: 120
+      fw_version:
+      pos_kp: 900.0
+      pos_ki: 0.002
+      pos_kd: 100.0
+      vel_kp: 0.18
+      vel_ki: 0.0
+      vel_kd: 0.0
+      manual_rotate_feature: false
+  sensors:
+    tof:
+      node_id: 9
+      reverse: true
+    zposs:
+      node_id: 5
+      reverse: false
+command list:
+geometry:
+  ya_min_y: 15.3
+  yb_min_y: 15.3
+  distance_limit_ya_yb: 5.85
+calibration:
+  probe_transducer_distance: 44.59
+  origin_y: -5.0
