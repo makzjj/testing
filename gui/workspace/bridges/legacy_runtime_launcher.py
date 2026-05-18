@@ -18,7 +18,6 @@ class LegacyRuntimeLauncher:
 
     def __init__(self, project_definition: ProjectDefinition) -> None:
         self._project_definition = project_definition
-        self._window = None  # Keep for backward compatibility
         self._main_window = None  # The actual MainWindow instance
         self._central_widget = None  # The extracted central widget
 
@@ -53,10 +52,12 @@ class LegacyRuntimeLauncher:
             
             # Get the central widget which contains all the Runtime UI
             self._central_widget = main_window.centralWidget()
+            if self._central_widget is None:
+                raise RuntimeError("MainWindow failed to create a central widget")
             self._main_window = main_window
 
         # Return the central widget for embedding in the RuntimePage layout
-        return self._central_widget if self._central_widget is not None else self._main_window
+        return self._central_widget
 
     def current_window(self):
         """Return the current runtime window when it exists."""
@@ -85,4 +86,3 @@ class LegacyRuntimeLauncher:
         """Reset the cached window reference when the runtime closes."""
         self._main_window = None
         self._central_widget = None
-        self._window = None
