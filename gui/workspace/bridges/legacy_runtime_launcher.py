@@ -6,6 +6,7 @@ from PyQt6.QtCore import Qt
 from typing import TYPE_CHECKING
 
 from myconfig.project_models import ProjectDefinition
+from ..constants import WORKSPACE_TITLE_PREFIX
 
 if TYPE_CHECKING:
     from PyQt6.QtWidgets import QWidget
@@ -32,6 +33,7 @@ class LegacyRuntimeLauncher:
             from gui.main_window import MainWindow
 
             self._window = MainWindow()
+            self._window.destroyed.connect(self._on_destroyed)
             self._window.selected_project_name = self._project_definition.display_name
             self._window.selected_project_config = str(self._project_definition.config_path)
             self._window.selected_project_definition = self._project_definition

@@ -13,7 +13,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication, QComboBox, QPushButton, QSizePolicy
 
 from gui.program_selector_window import ProgramSelectorWindow
-from gui.workspace.constants import ROUTE_FIRMWARE, ROUTE_PROJECT_CONFIG
+from gui.workspace.constants import ROUTE_FIRMWARE, ROUTE_PROJECT_CONFIG, ROUTE_RUNTIME
 from gui.workspace.models import SelectionField, SelectionOption
 from gui.workspace.shell.project_workspace_window import ProjectWorkspaceWindow
 from gui.workspace.widgets import NavigationButton, NavigationPanel, SelectorFieldGrid, VisibleSelector, WorkspaceTopBar
@@ -147,6 +147,47 @@ mcu:
             self.assertGreaterEqual(toolbar.findChildren(NavigationButton)[0].height(), 30)
             self.assertEqual(window._current_route_id, ROUTE_FIRMWARE)
             self.assertEqual(window.live_session_panel.page_value.text(), "Firmware")
+            self.assertFalse(window._bridge.has_live_runtime)
+
+    def test_workspace_open_does_not_create_runtime_until_runtime_page_is_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "demo.yaml"
+            config_path.write_text(
+                """
+project:
+  name: demo
+  display_name: Demo
+system:
+  axes: 4
+features:
+  firmware_tools: true
+  mechanical_tools: true
+  application_tools: true
+ui:
+  workspace: phase2_shell
+""".strip(),
+                encoding="utf-8",
+            )
+
+            project = ProjectDefinition(
+                name="demo",
+                display_name="Demo",
+                config_path=config_path,
+                system_axes=4,
+                features=ProjectFeatures(firmware_tools=True, mechanical_tools=True, application_tools=True),
+                ui=ProjectUiConfig(workspace="phase2_shell"),
+            )
+
+            window = ProjectWorkspaceWindow(project)
+            window.show()
+            self._app.processEvents()
+
+            self.assertFalse(window._bridge.has_live_runtime)
+
+            window.set_active_page(ROUTE_RUNTIME)
+            self._app.processEvents()
+
+            self.assertTrue(window._bridge.has_live_runtime)
 
     def test_project_config_reload_enables_feature_gated_navigation_from_current_editor_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

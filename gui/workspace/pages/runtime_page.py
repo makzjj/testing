@@ -13,12 +13,24 @@ class RuntimePage(QWidget):
     def __init__(self, bridge: WorkspaceRuntimeBridge) -> None:
         super().__init__()
         self._bridge = bridge
+        self._runtime_widget: QWidget | None = None
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(self._bridge.get_runtime_widget(self), 1)
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(0)
 
     def refresh(self) -> None:
-        """Ensure the shared runtime widget remains attached to this page."""
+        """Create and attach the shared runtime widget when the page becomes active."""
+        self._ensure_runtime_widget()
+
+    def _ensure_runtime_widget(self) -> QWidget:
+        """Attach the shared runtime widget lazily to avoid eager native window creation."""
+        if self._runtime_widget is None:
+            self._runtime_widget = self._bridge.get_runtime_widget(self)
+            self._layout.addWidget(self._runtime_widget, 1)
+            return self._runtime_widget
+
         self._bridge.get_runtime_widget(self)
+        if self._layout.indexOf(self._runtime_widget) == -1:
+            self._layout.addWidget(self._runtime_widget, 1)
+        return self._runtime_widget
