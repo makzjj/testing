@@ -231,10 +231,7 @@ class MainWindow(QMainWindow):
         system_layout.addWidget(self.create_logo_panel(), 0)
         main_layout.addWidget(system_group, 0)
 
-        # ================= LOWER ROW: DEBUG 70% + CONSOLE 30% =================
-        lower_layout = QHBoxLayout()
-        lower_layout.setSpacing(8)
-
+        # ================= MIDDLE ROW: DEBUG SECTION (full width) =================
         debug_group = QGroupBox("Debug")
         debug_layout = QVBoxLayout(debug_group)
         debug_layout.setContentsMargins(8, 8, 8, 8)
@@ -261,11 +258,12 @@ class MainWindow(QMainWindow):
         viz_layout.addWidget(self.viz_stack)
         debug_body_layout.addWidget(viz_group, 4)
 
-        debug_layout.addLayout(debug_body_layout, 0) # Changed stretch from 1 to 0
+        debug_layout.addLayout(debug_body_layout, 0)
         debug_layout.addStretch(1) # Add stretch at bottom to push boxes up
-        lower_layout.addWidget(debug_group, 7)
-        lower_layout.addWidget(self.create_console_box(), 3)
-        main_layout.addLayout(lower_layout, 1)
+        main_layout.addWidget(debug_group, 1)
+
+        # ================= BOTTOM ROW: CONSOLE SECTION (full width) =================
+        main_layout.addWidget(self.create_console_box(), 1)
 
         # Initialize default visualization
         self.update_motion_node_label()
