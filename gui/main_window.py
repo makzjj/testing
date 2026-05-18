@@ -260,10 +260,10 @@ class MainWindow(QMainWindow):
 
         debug_layout.addLayout(debug_body_layout, 0)
         debug_layout.addStretch(1) # Add stretch at bottom to push boxes up
-        main_layout.addWidget(debug_group, 1)
+        main_layout.addWidget(debug_group, 7)
 
         # ================= BOTTOM ROW: CONSOLE SECTION (full width) =================
-        main_layout.addWidget(self.create_console_box(), 1)
+        main_layout.addWidget(self.create_console_box(), 3)
 
         # Initialize default visualization
         self.update_motion_node_label()
