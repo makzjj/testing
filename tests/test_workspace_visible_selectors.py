@@ -76,6 +76,7 @@ mcu:
             window.show()
             self._app.processEvents()
 
+            # Hidden combo boxes may exist inside composite visible selectors; assert only on rendered dropdowns.
             shell_dropdowns = [combo for combo in window.findChildren(QComboBox) if combo.isVisible()]
             self.assertGreaterEqual(len(shell_dropdowns), 1)
             self.assertTrue(all(combo.objectName() == "AxisSelectorCombo" for combo in shell_dropdowns))
