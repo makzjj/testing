@@ -244,22 +244,25 @@ class MainWindow(QMainWindow):
         debug_body_layout.setSpacing(8)
 
         self.motor_control_box = self.create_motor_control_box()
-        self.motor_control_box.setMaximumHeight(280)
+        # Set minimum height instead of maximum to prevent squishing
+        self.motor_control_box.setMinimumHeight(220)
+        # Remove fixed maximum height to allow expansion in full-screen
         debug_body_layout.addWidget(self.motor_control_box, 3)
         
         # Link Node combos (inverse)
         self.target_node_id_combo.currentIndexChanged.connect(self._sync_motion_node_to_command)
 
         viz_group = QGroupBox("Visualization")
-        viz_group.setMaximumHeight(280)
+        # Set minimum height instead of maximum to prevent squishing
+        viz_group.setMinimumHeight(220)
+        # Remove fixed maximum height to allow expansion in full-screen
         viz_layout = QVBoxLayout(viz_group)
         viz_layout.setContentsMargins(8, 8, 8, 8)
         self.viz_stack = QStackedWidget()
         viz_layout.addWidget(self.viz_stack)
         debug_body_layout.addWidget(viz_group, 4)
 
-        debug_layout.addLayout(debug_body_layout, 0)
-        debug_layout.addStretch(1) # Add stretch at bottom to push boxes up
+        debug_layout.addLayout(debug_body_layout, 1)
         main_layout.addWidget(debug_group, 7)
 
         # ================= BOTTOM ROW: CONSOLE SECTION (full width) =================

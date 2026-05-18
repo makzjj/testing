@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from PyQt6.QtWidgets import QVBoxLayout, QWidget
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QVBoxLayout, QWidget, QScrollArea
 
 from ..bridges import WorkspaceRuntimeBridge
 
@@ -14,6 +15,7 @@ class RuntimePage(QWidget):
         super().__init__()
         self._bridge = bridge
         self._runtime_widget: QWidget | None = None
+        self._scroll_area: QScrollArea | None = None
 
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
@@ -27,7 +29,15 @@ class RuntimePage(QWidget):
         """Attach and return the shared runtime widget lazily to avoid eager native window creation."""
         if self._runtime_widget is None:
             self._runtime_widget = self._bridge.get_runtime_widget(self)
-
-        if self._layout.indexOf(self._runtime_widget) == -1:
-            self._layout.addWidget(self._runtime_widget, 1)
+            
+            # Create scroll area to wrap the runtime widget
+            self._scroll_area = QScrollArea()
+            self._scroll_area.setWidget(self._runtime_widget)
+            self._scroll_area.setWidgetResizable(True)
+            self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            self._scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            
+            # Add scroll area to layout
+            self._layout.addWidget(self._scroll_area, 1)
+        
         return self._runtime_widget
