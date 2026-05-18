@@ -18,61 +18,71 @@ class LegacyRuntimeLauncher:
 
     def __init__(self, project_definition: ProjectDefinition) -> None:
         self._project_definition = project_definition
-        self._window = None
+        self._window = None  # Keep for backward compatibility
+        self._main_window = None  # The actual MainWindow instance
+        self._central_widget = None  # The extracted central widget
 
     def has_window(self) -> bool:
         """Return whether a shared runtime widget instance currently exists."""
-        return self._window is not None
+        return self._main_window is not None
 
     def open_window(self) -> "QWidget":
         """Create or return the shared runtime widget without opening a new top-level window."""
         return self.ensure_runtime_widget()
 
     def ensure_runtime_widget(self, parent: "QWidget | None" = None) -> "QWidget":
-        """Create and attach the shared runtime widget to the workspace when needed."""
-        if self._window is None:
+        """Create and attach the shared runtime widget to the workspace when needed.
+        
+        This method creates a MainWindow and returns its central widget for embedding
+        in the workspace. The MainWindow is kept alive as a reference to maintain
+        the runtime state and timers.
+        """
+        if self._main_window is None:
             from gui.main_window import MainWindow
 
-            self._window = MainWindow()
-            self._window.destroyed.connect(self._on_destroyed)
-            self._window.selected_project_name = self._project_definition.display_name
-            self._window.selected_project_config = str(self._project_definition.config_path)
-            self._window.selected_project_definition = self._project_definition
-            self._window.setWindowTitle(f"{WORKSPACE_TITLE_PREFIX} - {self._project_definition.display_name} (Runtime)")
+            # Create MainWindow - it will initialize all runtime systems
+            main_window = MainWindow()
+            main_window.destroyed.connect(self._on_destroyed)
+            main_window.selected_project_name = self._project_definition.display_name
+            main_window.selected_project_config = str(self._project_definition.config_path)
+            main_window.selected_project_definition = self._project_definition
+            
+            # Hide the MainWindow so it doesn't appear as a separate window
+            # We'll use its central widget in the workspace instead
+            main_window.hide()
+            
+            # Get the central widget which contains all the Runtime UI
+            self._central_widget = main_window.centralWidget()
+            self._main_window = main_window
 
-        if parent is not None:
-            if self._window.parent() is not parent:
-                self._window.setParent(parent)
-            self._window.setWindowFlag(Qt.WindowType.Widget, True)
-            self._window.show()
-
-        return self._window
+        # Return the central widget for embedding in the RuntimePage layout
+        return self._central_widget if self._central_widget is not None else self._main_window
 
     def current_window(self):
         """Return the current runtime window when it exists."""
-        return self._window
+        return self._main_window
 
     def update_config_path(self, config_path) -> None:
         """Keep the legacy runtime aligned with the latest active config file."""
-        if self._window is None:
+        if self._main_window is None:
             return
-        self._window.selected_project_config = str(config_path)
+        self._main_window.selected_project_config = str(config_path)
 
     def update_project_definition(self, project_definition: ProjectDefinition) -> None:
         """Keep the legacy runtime metadata aligned with the latest active project definition."""
         self._project_definition = project_definition
-        if self._window is None:
+        if self._main_window is None:
             return
 
-        if hasattr(self._window, "selected_project_name"):
-            self._window.selected_project_name = project_definition.display_name
-        if hasattr(self._window, "selected_project_definition"):
-            self._window.selected_project_definition = project_definition
-        if hasattr(self._window, "selected_project_config"):
-            self._window.selected_project_config = str(project_definition.config_path)
-        if hasattr(self._window, "setWindowTitle"):
-            self._window.setWindowTitle(f"{WORKSPACE_TITLE_PREFIX} - {project_definition.display_name} (Current Runtime)")
+        if hasattr(self._main_window, "selected_project_name"):
+            self._main_window.selected_project_name = project_definition.display_name
+        if hasattr(self._main_window, "selected_project_definition"):
+            self._main_window.selected_project_definition = project_definition
+        if hasattr(self._main_window, "selected_project_config"):
+            self._main_window.selected_project_config = str(project_definition.config_path)
 
     def _on_destroyed(self, *_args) -> None:
         """Reset the cached window reference when the runtime closes."""
+        self._main_window = None
+        self._central_widget = None
         self._window = None
