@@ -96,20 +96,20 @@ class WorkspaceSnapshotFactory:
         """Build overview runtime alerts."""
         if has_live_runtime:
             return [
-                "Current runtime is open while migration continues.",
-                "Console and session stay in the new shell.",
+                "Runtime panel is active in this workspace window.",
+                "Serial and hardware state are shared across shell panels.",
             ]
 
         return [
             "Runtime disconnected.",
-            "Open from Quick actions.",
+            "Open from Quick actions to activate the runtime panel.",
         ]
 
     def build_quick_actions(self) -> list[ActionItem]:
         """Build shared quick actions used by overview and settings."""
         return [
-            ActionItem("open_legacy_runtime", "Open Current Runtime", "Open the current runtime window"),
-            ActionItem("focus_legacy_runtime", "Focus Runtime", "Bring the runtime window to front"),
+            ActionItem("open_legacy_runtime", "Open Runtime", "Open the in-workspace runtime panel"),
+            ActionItem("focus_legacy_runtime", "Focus Runtime", "Switch to the in-workspace runtime panel"),
             ActionItem("refresh_workspace", "Refresh", "Reload session and summary data"),
             ActionItem("log_project_context", "Log Context", "Write project context to console"),
         ]
@@ -257,7 +257,7 @@ class WorkspaceSnapshotFactory:
     def build_configuration_actions(self) -> list[ActionItem]:
         """Build settings action rows."""
         return [
-            ActionItem("open_legacy_runtime", "Open runtime", "Open the current runtime window"),
+            ActionItem("open_legacy_runtime", "Open runtime", "Open the in-workspace runtime panel"),
             ActionItem("refresh_workspace", "Refresh shell", "Refresh shell summaries from project config"),
             ActionItem("log_project_context", "Log context", "Write the selected project metadata into the console"),
         ]

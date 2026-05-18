@@ -212,13 +212,11 @@ class WorkspaceRuntimeBridge:
         """Execute one focused shell action and return a console message."""
         if action_id == "open_legacy_runtime":
             self._runtime_launcher.open_window()
-            return f"Opened current runtime for {self._project_definition.display_name}"
+            return f"Opened runtime panel for {self._project_definition.display_name}"
 
         if action_id == "focus_legacy_runtime":
-            if self._runtime_launcher.has_window():
-                self._runtime_launcher.open_window()
-                return "Focused existing runtime window"
-            return "No runtime window is open yet"
+            self._runtime_launcher.open_window()
+            return "Focused runtime panel"
 
         if action_id == "refresh_workspace":
             self._config_reader.invalidate()
@@ -229,6 +227,10 @@ class WorkspaceRuntimeBridge:
             return f"Project context: {self._project_definition.display_name} ({self.project_config_path})"
 
         return f"Unknown action requested: {action_id}"
+
+    def get_runtime_widget(self, parent=None):
+        """Return the shared runtime widget attached to the provided parent."""
+        return self._runtime_launcher.ensure_runtime_widget(parent)
 
     @property
     def project_definition(self) -> ProjectDefinition:

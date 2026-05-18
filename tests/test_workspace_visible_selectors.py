@@ -127,13 +127,13 @@ mcu:
             self._app.processEvents()
 
             self.assertIsNone(window.findChild(NavigationPanel))
-            self.assertEqual(window.page_stack.count(), 4)
+            self.assertEqual(window.page_stack.count(), 5)
 
             toolbar = window.findChild(WorkspaceTopBar)
             self.assertIsNotNone(toolbar)
 
             nav_labels = [button.text() for button in toolbar.findChildren(NavigationButton)]
-            self.assertEqual(nav_labels, ["Firmware", "Mechanical", "Application", "Project Config"])
+            self.assertEqual(nav_labels, ["Firmware", "Mechanical", "Application", "Runtime", "Project Config"])
 
             menu_labels = [action.text() for action in toolbar.settings_menu.actions() if action.isEnabled()]
             self.assertEqual(toolbar.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Maximum)

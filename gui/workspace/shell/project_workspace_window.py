@@ -14,9 +14,10 @@ from ..constants import (
     ROUTE_FIRMWARE,
     ROUTE_MECHANICAL,
     ROUTE_PROJECT_CONFIG,
+    ROUTE_RUNTIME,
     WORKSPACE_TITLE_PREFIX,
 )
-from ..pages import ApplicationProductionPage, FirmwarePage, MechanicalPage, ProjectConfigPage
+from ..pages import ApplicationProductionPage, FirmwarePage, MechanicalPage, ProjectConfigPage, RuntimePage
 from ..widgets import ConsolePanel, LiveSessionPanel, WorkspaceBackdrop, WorkspaceTopBar
 from .workspace_page_registry import build_navigation_items, get_route_label
 from .workspace_page_stack import WorkspacePageStack
@@ -115,6 +116,7 @@ class ProjectWorkspaceWindow(QMainWindow):
             ROUTE_FIRMWARE: FirmwarePage(self._bridge),
             ROUTE_MECHANICAL: MechanicalPage(self._bridge),
             ROUTE_APPLICATION: ApplicationProductionPage(self._bridge),
+            ROUTE_RUNTIME: RuntimePage(self._bridge),
         }
 
         for route_id, page in self._pages.items():
@@ -125,6 +127,8 @@ class ProjectWorkspaceWindow(QMainWindow):
                 page.config_path_changed.connect(self.top_bar.update_config_path)
             if hasattr(page, "project_definition_changed"):
                 page.project_definition_changed.connect(self._handle_project_definition_changed)
+            if hasattr(page, "action_requested"):
+                page.action_requested.connect(self._handle_action)
 
     def set_active_page(self, route_id: str, log_route_change: bool = True) -> None:
         """Switch the visible first-level page and refresh shell state."""
@@ -148,6 +152,8 @@ class ProjectWorkspaceWindow(QMainWindow):
 
     def _handle_action(self, action_id: str) -> None:
         """Handle one page-originated action in a shell-owned way."""
+        if action_id in {"open_legacy_runtime", "focus_legacy_runtime"}:
+            self.set_active_page(ROUTE_RUNTIME, log_route_change=False)
         message = self._bridge.run_action(action_id)
         self.console_panel.append_line(message)
         if action_id == "refresh_workspace":

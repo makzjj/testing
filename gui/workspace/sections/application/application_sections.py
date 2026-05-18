@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import QHBoxLayout, QLineEdit, QPushButton, QProgressBar
 
 from ...bridges import WorkspaceRuntimeBridge
@@ -122,6 +123,8 @@ class ControllerProfileSection(PanelFrame):
 class TestRunSetupSection(PanelFrame):
     """Test run setup module."""
 
+    action_requested = pyqtSignal(str)
+
     def __init__(self, bridge: WorkspaceRuntimeBridge) -> None:
         super().__init__("Test run setup", "")
         self._bridge = bridge
@@ -177,6 +180,8 @@ class TestRunSetupSection(PanelFrame):
         for label in ("Open runtime", "Export report", "Stop all"):
             button = QPushButton(label)
             button.setProperty("tone", "secondary")
+            if label == "Open runtime":
+                button.clicked.connect(lambda: self.action_requested.emit("open_legacy_runtime"))
             actions.addWidget(button)
 
         actions.addStretch(1)

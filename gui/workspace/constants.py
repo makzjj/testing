@@ -12,6 +12,7 @@ ROUTE_PROJECT_CONFIG = "project_config"
 ROUTE_FIRMWARE = "firmware"
 ROUTE_MECHANICAL = "mechanical"
 ROUTE_APPLICATION = "application"
+ROUTE_RUNTIME = "runtime"
 ROUTE_SETTINGS = "settings"
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -22,5 +23,6 @@ NAVIGATION_ITEMS = (
     (ROUTE_FIRMWARE, "Firmware", "Protocol and debug"),
     (ROUTE_MECHANICAL, "Mechanical", "Motion and observation"),
     (ROUTE_APPLICATION, "Application", "Integration and setup"),
+    (ROUTE_RUNTIME, "Runtime", "Live runtime controls and monitoring"),
     (ROUTE_PROJECT_CONFIG, "Project Config", "YAML editor and feature flags"),
 )

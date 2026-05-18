@@ -10,7 +10,7 @@ from ..constants import WORKSPACE_TITLE_PREFIX
 
 
 class LegacyRuntimeLauncher:
-    """Creates and reuses the current legacy main window on demand."""
+    """Creates and reuses one shared legacy runtime widget on demand."""
 
     def __init__(self, project_definition: ProjectDefinition) -> None:
         self._project_definition = project_definition
@@ -21,7 +21,11 @@ class LegacyRuntimeLauncher:
         return self._window is not None
 
     def open_window(self):
-        """Open or focus the current legacy runtime window."""
+        """Create or return the shared runtime widget without opening a new top-level window."""
+        return self.ensure_runtime_widget()
+
+    def ensure_runtime_widget(self, parent=None):
+        """Create and attach the shared runtime widget to the workspace when needed."""
         if self._window is None:
             from gui.main_window import MainWindow
 
@@ -30,12 +34,13 @@ class LegacyRuntimeLauncher:
             self._window.selected_project_config = str(self._project_definition.config_path)
             self._window.selected_project_definition = self._project_definition
             self._window.setWindowTitle(f"{WORKSPACE_TITLE_PREFIX} - {self._project_definition.display_name} (Current Runtime)")
-            self._window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-            self._window.destroyed.connect(self._on_destroyed)
 
-        self._window.show()
-        self._window.raise_()
-        self._window.activateWindow()
+        if parent is not None:
+            if self._window.parent() is not parent:
+                self._window.setParent(parent)
+            self._window.setWindowFlag(Qt.WindowType.Widget, True)
+            self._window.show()
+
         return self._window
 
     def current_window(self):
