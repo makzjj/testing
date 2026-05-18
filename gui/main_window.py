@@ -272,7 +272,7 @@ class MainWindow(QMainWindow):
 
     def create_system_status_panel(self):
         group = QGroupBox("Status")
-        group.setMinimumWidth(340) 
+        # Remove setMinimumWidth to allow responsive sizing
         layout = QVBoxLayout(group)
         layout.setContentsMargins(6, 4, 6, 6)
         layout.setSpacing(3)
@@ -302,14 +302,14 @@ class MainWindow(QMainWindow):
 
     def create_communication_panel(self):
         group = QGroupBox("Communication")
-        group.setMinimumWidth(200) 
+        # Remove setMinimumWidth to allow responsive sizing
         layout = QGridLayout(group)
         layout.setContentsMargins(6, 4, 6, 6)
         layout.setHorizontalSpacing(6)
         layout.setVerticalSpacing(3)
 
         self.port_combo = QComboBox()
-        self.port_combo.setMinimumWidth(120)
+        # Remove setMinimumWidth to allow responsive sizing
         self.refresh_ports()
 
         self.baud_combo = QComboBox()
@@ -330,7 +330,7 @@ class MainWindow(QMainWindow):
 
     def create_nodes_summary_panel(self):
         group = QGroupBox("Robot Arm Nodes")
-        group.setFixedWidth(760) # Keep same width as before
+        # Remove setFixedWidth(760) to allow responsive sizing based on parent container
         layout = QVBoxLayout(group)
         layout.setContentsMargins(6, 4, 6, 6)
         layout.setSpacing(2)
@@ -348,7 +348,7 @@ class MainWindow(QMainWindow):
         pixmap = QPixmap(resource_path("resources/biobot_logo.png"))
         logo_label.setPixmap(pixmap.scaledToHeight(44, Qt.TransformationMode.SmoothTransformation))
         logo_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        logo_label.setFixedWidth(115)
+        # Remove setFixedWidth to allow responsive sizing
         return logo_label
 
     def create_console_box(self):
@@ -385,15 +385,15 @@ class MainWindow(QMainWindow):
 
         # Very compact setup
         port_label = QLabel("Serial Port:")
-        port_label.setFixedWidth(70)
+        port_label.setMaximumWidth(70)
 
         self.port_combo = QComboBox()
-        self.port_combo.setFixedWidth(140)
+        self.port_combo.setMaximumWidth(140)
         self.refresh_ports()
 
         # Baud rate selection
         baud_label = QLabel("Baud Rate:")
-        baud_label.setFixedWidth(60)
+        baud_label.setMaximumWidth(60)
 
         self.baud_combo = QComboBox()
         self.baud_combo.addItems(["115200", "230400","345600"])
@@ -402,7 +402,7 @@ class MainWindow(QMainWindow):
 
         self.connect_btn = QPushButton("Connect")
         self.connect_btn.setCheckable(True)
-        self.connect_btn.setFixedWidth(100)
+        self.connect_btn.setMaximumWidth(100)
         self.connect_btn.clicked.connect(self.toggle_connection)
 
         logo_label = QLabel()
@@ -516,11 +516,12 @@ class MainWindow(QMainWindow):
 
         cmd_layout = QHBoxLayout()
         self.command_combo = QComboBox()
-        self.command_combo.setMinimumWidth(220)
+        # Remove setMinimumWidth to allow responsive sizing
         self.command_combo.addItems(list(COMMANDS.keys()))
 
         self.target_node_id_combo = QComboBox()
-        self.target_node_id_combo.setFixedWidth(90)
+        # Reduce setFixedWidth from 90 to allow wrapping in compact layouts
+        self.target_node_id_combo.setMaximumWidth(90)
         for i in range(1, 18):
             self.target_node_id_combo.addItem(f"Node {i:02d}", i)
         default_index = self.target_node_id_combo.findData(0x10)
@@ -528,7 +529,8 @@ class MainWindow(QMainWindow):
             self.target_node_id_combo.setCurrentIndex(default_index)
 
         self.send_btn = QPushButton("Send")
-        self.send_btn.setFixedWidth(80)
+        # Reduce setFixedWidth from 80 to allow responsive sizing
+        self.send_btn.setMaximumWidth(80)
         self.send_btn.clicked.connect(self.send_command)
 
         self.stop_btn = QPushButton("STOP Motor")
@@ -562,7 +564,8 @@ class MainWindow(QMainWindow):
         # Row 1: Target Node and Main Actions
         top_row = QHBoxLayout()
         self.motion_node_combo = QComboBox()
-        self.motion_node_combo.setFixedWidth(100)
+        # Reduce setFixedWidth to allow wrapping
+        self.motion_node_combo.setMaximumWidth(100)
         for i in range(2, 18):
             self.motion_node_combo.addItem(f"Node {i:02d}", i)
         self.motion_node_combo.currentIndexChanged.connect(self.update_motion_node_label)
@@ -594,14 +597,14 @@ class MainWindow(QMainWindow):
         # CPD
         config_layout.addWidget(QLabel("CPD:"), 0, 0)
         self.counts_per_degree_input = QLineEdit("2684.49")
-        self.counts_per_degree_input.setFixedWidth(70)
+        self.counts_per_degree_input.setMaximumWidth(70)
         self.counts_per_degree_input.textChanged.connect(self.update_active_panel_cpd)
         config_layout.addWidget(self.counts_per_degree_input, 0, 1)
         
         # Threshold
         config_layout.addWidget(QLabel("Threshold:"), 0, 2)
         self.threshold_input = QLineEdit("1500")
-        self.threshold_input.setFixedWidth(60)
+        self.threshold_input.setMaximumWidth(60)
         config_layout.addWidget(self.threshold_input, 0, 3)
 
         # LogPos and Interval
@@ -611,15 +614,15 @@ class MainWindow(QMainWindow):
         
         config_layout.addWidget(QLabel("Intv(ms):"), 1, 2)
         self.auto_interval_input = QLineEdit("300")
-        self.auto_interval_input.setFixedWidth(60)
+        self.auto_interval_input.setMaximumWidth(60)
         config_layout.addWidget(self.auto_interval_input, 1, 3)
 
         # Start Pos and Offset
         config_layout.addWidget(QLabel("Start:"), 2, 0)
         self.start_pos_input = QLineEdit("26844") # 10 deg
-        self.start_pos_input.setFixedWidth(70)
+        self.start_pos_input.setMaximumWidth(70)
         self.start_angle_input = QLineEdit("10.0")
-        self.start_angle_input.setFixedWidth(50)
+        self.start_angle_input.setMaximumWidth(50)
         self.start_pos_input.textEdited.connect(self.sync_start_count_to_angle)
         self.start_angle_input.textEdited.connect(self.sync_start_angle_to_count)
         
@@ -638,9 +641,9 @@ class MainWindow(QMainWindow):
         # End Pos and Offset
         config_layout.addWidget(QLabel("End:"), 3, 0)
         self.end_pos_input = QLineEdit("295293") # 110 deg
-        self.end_pos_input.setFixedWidth(70)
+        self.end_pos_input.setMaximumWidth(70)
         self.end_angle_input = QLineEdit("110.0")
-        self.end_angle_input.setFixedWidth(50)
+        self.end_angle_input.setMaximumWidth(50)
         self.end_pos_input.textEdited.connect(self.sync_end_count_to_angle)
         self.end_angle_input.textEdited.connect(self.sync_end_angle_to_count)
         
@@ -674,7 +677,7 @@ class MainWindow(QMainWindow):
         vel_row = QHBoxLayout()
         vel_row.addWidget(QLabel("Velocity:"))
         self.velocity_input = QLineEdit("-20")
-        self.velocity_input.setFixedWidth(50)
+        self.velocity_input.setMaximumWidth(50)
         vel_row.addWidget(self.velocity_input)
         init_layout.addLayout(vel_row)
         
