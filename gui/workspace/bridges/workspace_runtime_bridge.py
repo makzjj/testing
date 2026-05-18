@@ -7,6 +7,7 @@ import os
 import subprocess
 import webbrowser
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from myconfig.config_editor_service import ConfigEditorService
 from myconfig.config_models import ConfigEditorModel, LiveHardwareFieldValue, SavePlan, SaveResult
@@ -21,6 +22,9 @@ from .raw_project_config_reader import RawProjectConfigReader
 from .workspace_snapshot_factory import WorkspaceSnapshotFactory
 
 _ALLOWED_CONFIG_SUFFIXES = {".yaml", ".yml"}
+
+if TYPE_CHECKING:
+    from PyQt6.QtWidgets import QWidget
 
 
 class WorkspaceRuntimeBridge:
@@ -228,7 +232,7 @@ class WorkspaceRuntimeBridge:
 
         return f"Unknown action requested: {action_id}"
 
-    def get_runtime_widget(self, parent=None):
+    def get_runtime_widget(self, parent: "QWidget | None" = None) -> "QWidget":
         """Return the shared runtime widget attached to the provided parent."""
         return self._runtime_launcher.ensure_runtime_widget(parent)
 

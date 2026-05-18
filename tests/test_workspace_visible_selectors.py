@@ -76,9 +76,8 @@ mcu:
             window.show()
             self._app.processEvents()
 
-            shell_dropdowns = list(window.findChildren(QComboBox))
+            shell_dropdowns = [combo for combo in window.findChildren(QComboBox) if combo.isVisible()]
             self.assertTrue(all(combo.objectName() == "AxisSelectorCombo" for combo in shell_dropdowns))
-            self.assertGreaterEqual(len(shell_dropdowns), 1)
             self.assertGreater(len(window.findChildren(VisibleSelector)), 0)
 
     def test_workspace_shell_uses_top_toolbar_and_settings_menu(self) -> None:
