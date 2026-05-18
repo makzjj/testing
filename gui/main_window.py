@@ -478,13 +478,8 @@ class MainWindow(QMainWindow):
         table.setColumnCount(len(headers))
         table.setHorizontalHeaderLabels(headers)
 
-        # Set each column to interactive resizing (manual control)
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-
-        # Define fixed column widths for good alignment
-        col_widths = [145, 120, 220, 140, 110]
-        for i, w in enumerate(col_widths):
-            table.setColumnWidth(i, w)
+        # Use Stretch mode to make columns adapt to available width instead of forcing minimum widths
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
 
         # Table styling
         table.verticalHeader().setVisible(False)
