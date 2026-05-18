@@ -62,7 +62,7 @@ def resource_path(relative_path):
 def get_timestamp():
     return QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss.zzz")
 
-def get_light_theme(self):
+def get_light_theme():
     return """
         QWidget { background-color: #FFFFFF; color: #000000; font-family: Segoe UI; font-size: 10pt; }
         QPushButton { background-color: #F0F0F0; border: 1px solid #C0C0C0; padding: 4px 10px; border-radius: 4px; }
@@ -78,7 +78,7 @@ def get_light_theme(self):
         }
     """
 
-def get_dark_theme(self):
+def get_dark_theme():
     return """
         QWidget { background-color: #1E1E1E; color: #DCDCDC; font-family: Segoe UI; font-size: 10pt; }
         QPushButton { background-color: #333; border: 1px solid #555; padding: 4px 10px; border-radius: 4px; color: #EEE; }
@@ -759,7 +759,29 @@ class MainWindow(QMainWindow):
             
         self.viz_stack.setCurrentWidget(self.motor_panels[node_id])
 
-    def _sync_command_node_to_motion(self):
+    def _ensure_motor_panel_exists(self, node_id):
+        """Ensure motor panel is created for the given node_id if it doesn't exist."""
+        if node_id is None:
+            return False
+        
+        if node_id not in self.motor_panels:
+            try:
+                panel = MotorAnimationModule(node_id)
+                self.viz_stack.addWidget(panel)
+                self.motor_panels[node_id] = panel
+                # Initial CPD sync
+                try:
+                    cpd = float(self.counts_per_degree_input.text())
+                    panel.set_counts_per_degree(cpd)
+                except ValueError:
+                    pass
+                self.log(f"✅ Motor panel initialized for Node {node_id:02d}")
+                return True
+            except Exception as e:
+                self.log(f"⚠️ Failed to create motor panel for Node {node_id:02d}: {e}")
+                return False
+        return True
+
         node_id = self.motion_node_combo.currentData()
         idx = self.target_node_id_combo.findData(node_id)
         if idx >= 0 and self.target_node_id_combo.currentIndex() != idx:
@@ -794,7 +816,9 @@ class MainWindow(QMainWindow):
         test_all_btn = QPushButton("Test All Nodes")
         test_all_btn.clicked.connect(self.test_all_connected_nodes)
         config_btn = QPushButton("Motor Config")
+        config_btn.clicked.connect(self.on_motor_config_clicked)
         export_btn = QPushButton("Export Logs")
+        export_btn.clicked.connect(self.on_export_logs_clicked)
 
         self.monitor_btn = QPushButton("Serial Monitor")
         self.monitor_btn.clicked.connect(self.monitor_dialog.show)
@@ -870,12 +894,15 @@ class MainWindow(QMainWindow):
             self.disconnect_serial()
 
     def toggle_theme(self):
-        if self.theme == "light":
-            self.theme = "dark"
-            self.setStyleSheet(get_dark_theme())
-        else:
-            self.theme = "light"
-            self.setStyleSheet(get_light_theme())
+        try:
+            if self.theme == "light":
+                self.theme = "dark"
+                self.setStyleSheet(get_dark_theme())
+            else:
+                self.theme = "light"
+                self.setStyleSheet(get_light_theme())
+        except Exception as e:
+            self.log(f"⚠️ Theme toggle failed: {e}")
 
     def connect_serial(self):
         # Get the original port name from userData, not display text
@@ -1630,6 +1657,20 @@ class MainWindow(QMainWindow):
 
     def init_motor(self):
         node_id = self.motion_node_combo.currentData()
+        
+        if node_id is None:
+            self.log("⚠️ No target node selected for Init Motor")
+            self.init_status_lbl.setText("Error: No node selected")
+            self.init_status_lbl.setStyleSheet("color: red; font-weight: bold;")
+            return
+        
+        # Ensure motor panel exists before starting state machine
+        if not self._ensure_motor_panel_exists(node_id):
+            self.log(f"❌ Cannot initialize motor for Node {node_id:02d} - panel creation failed")
+            self.init_status_lbl.setText("Error: Panel creation failed")
+            self.init_status_lbl.setStyleSheet("color: red; font-weight: bold;")
+            return
+        
         self.init_state[node_id] = 1 # Step 1: Sent C9
         self.init_signals[node_id] = set() # Reset signals
         
@@ -1658,7 +1699,24 @@ class MainWindow(QMainWindow):
             self._send_single_node_command(node_id, "Disable LogPos", [0xE4, 0x3D, 0x00, 0x00])
 
     def toggle_auto_move(self):
+        node_id = self.motion_node_combo.currentData()
+        
         if self.auto_move_btn.isChecked():
+            # Ensure motor panel exists before starting auto move
+            if node_id is None:
+                self.log("⚠️ No target node selected for Auto Move")
+                self.auto_move_btn.blockSignals(True)
+                self.auto_move_btn.setChecked(False)
+                self.auto_move_btn.blockSignals(False)
+                return
+            
+            if not self._ensure_motor_panel_exists(node_id):
+                self.log(f"❌ Cannot start Auto Move for Node {node_id:02d} - panel creation failed")
+                self.auto_move_btn.blockSignals(True)
+                self.auto_move_btn.setChecked(False)
+                self.auto_move_btn.blockSignals(False)
+                return
+            
             self.auto_move_btn.setText("Stop Auto Move")
             self.auto_move_btn.setStyleSheet("background-color: #FF4444; color: white;")
             self.start_offset_lbl.setText("0")
@@ -1667,7 +1725,6 @@ class MainWindow(QMainWindow):
             # State: 1 = moving to start, 2 = moving to end
             self.auto_move_state = 1
             self.is_first_auto_move_check = True # Skip threshold check for the very first packet
-            node_id = self.motion_node_combo.currentData()
             self.m_tpos_done_sent[node_id] = False
             
             self.send_tpos_to_start()
@@ -1739,7 +1796,61 @@ class MainWindow(QMainWindow):
         self.toggle_auto_move()
         QMessageBox.warning(self, "Auto-move Error", msg)
 
-    def send_auto_move_command(self):
+    def on_motor_config_clicked(self):
+        """Handle Motor Config button click - show motor configuration parameters."""
+        node_id = self.motion_node_combo.currentData()
+        if node_id is None:
+            QMessageBox.warning(self, "Motor Config", "Please select a target node first.")
+            return
+        
+        # Create info message showing current motor parameters
+        cpd_text = self.counts_per_degree_input.text()
+        velocity_text = self.velocity_input.text()
+        start_pos = self.start_pos_input.text()
+        end_pos = self.end_pos_input.text()
+        
+        msg = f"""Motor Configuration for Node {node_id:02d}:
+
+Counts Per Degree: {cpd_text}
+Velocity: {velocity_text}%
+Start Position: {start_pos}
+End Position: {end_pos}
+
+Use the input fields in the UI to modify these parameters."""
+        
+        QMessageBox.information(self, f"Motor Config - Node {node_id:02d}", msg)
+        self.log(f"ℹ️ Motor Config dialog shown for Node {node_id:02d}")
+
+    def on_export_logs_clicked(self):
+        """Handle Export Logs button click - save runtime logs to file."""
+        try:
+            # Get the current timestamp for filename
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # Get log content from log_box
+            log_content = self.log_box.toPlainText()
+            
+            if not log_content:
+                QMessageBox.warning(self, "Export Logs", "No logs to export.")
+                return
+            
+            # Determine save path
+            project_dir = Path.home() / "BioBot" / "logs"
+            project_dir.mkdir(parents=True, exist_ok=True)
+            
+            log_file = project_dir / f"runtime_log_{timestamp}.txt"
+            
+            # Write logs to file
+            with open(log_file, 'w', encoding='utf-8') as f:
+                f.write(log_content)
+            
+            self.log(f"✅ Runtime logs exported to: {log_file}")
+            QMessageBox.information(self, "Export Logs", f"Logs exported successfully to:\n{log_file}")
+        except Exception as e:
+            self.log(f"❌ Failed to export logs: {e}")
+            QMessageBox.critical(self, "Export Logs Error", f"Failed to export logs:\n{e}")
+
         if not self.auto_move_btn.isChecked():
             return
 
@@ -1785,15 +1896,18 @@ class MainWindow(QMainWindow):
         self.log(f"✅ Node {node_id:02d}: Scanning time is {elapsed:.2f}s at velocity {self.scan_target_velocity}% from {start_deg:.2f}(degree) to {end_deg:.2f}(degree).")
         self.is_scanning_continue = False
 
-    def on_tpos_received(self, node_id, tpos_data):
+     def on_tpos_received(self, node_id, tpos_data):
         """Update animation and handle loop logic."""
         if not tpos_data or not isinstance(tpos_data, tuple):
             return
         
         type_char, pos = tpos_data
         
+        # Ensure motor panel exists before processing TPOS data
         if node_id not in self.motor_panels:
-            return
+            if not self._ensure_motor_panel_exists(node_id):
+                # Log but don't block - state machines still need to run
+                return
 
         panel = self.motor_panels[node_id]
         self.last_positions[node_id] = pos
