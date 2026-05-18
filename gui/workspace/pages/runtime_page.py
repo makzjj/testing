@@ -24,7 +24,7 @@ class RuntimePage(QWidget):
         self._ensure_runtime_widget()
 
     def _ensure_runtime_widget(self) -> QWidget:
-        """Attach the shared runtime widget lazily to avoid eager native window creation."""
+        """Attach and return the shared runtime widget lazily to avoid eager native window creation."""
         if self._runtime_widget is None:
             self._runtime_widget = self._bridge.get_runtime_widget(self)
 
