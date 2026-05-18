@@ -38,6 +38,7 @@ class LegacyRuntimeLauncher:
             self._window.selected_project_name = self._project_definition.display_name
             self._window.selected_project_config = str(self._project_definition.config_path)
             self._window.selected_project_definition = self._project_definition
+            self._window.setWindowTitle(f"{WORKSPACE_TITLE_PREFIX} - {self._project_definition.display_name} (Runtime)")
 
         if parent is not None:
             if self._window.parent() is not parent:
