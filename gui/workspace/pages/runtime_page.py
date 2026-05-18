@@ -27,10 +27,9 @@ class RuntimePage(QWidget):
         """Attach the shared runtime widget lazily to avoid eager native window creation."""
         if self._runtime_widget is None:
             self._runtime_widget = self._bridge.get_runtime_widget(self)
-            self._layout.addWidget(self._runtime_widget, 1)
-            return self._runtime_widget
+        else:
+            self._bridge.get_runtime_widget(self)
 
-        self._bridge.get_runtime_widget(self)
         if self._layout.indexOf(self._runtime_widget) == -1:
             self._layout.addWidget(self._runtime_widget, 1)
         return self._runtime_widget

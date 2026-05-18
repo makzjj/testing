@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt
 from typing import TYPE_CHECKING
+
+from PyQt6.QtCore import Qt
 
 from myconfig.project_models import ProjectDefinition
 from ..constants import WORKSPACE_TITLE_PREFIX
