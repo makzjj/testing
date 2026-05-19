@@ -1,7 +1,9 @@
 # serial_conn/app_protocol_handler.py
 """Dedicated handler for application-level protocol logic and packet dispatch."""
+from datetime import datetime
 from data.binary_cmd_parser import decode_command, parse_get_interrupt
 from serial_conn.packet_parser import parse_uart_rx_packets
+from serial_conn.firmware_log_parser import FirmwareLogParser
 from myconfig.constants import BCMD_GET_NODE_ID, BCMD_ZPOSS
 
 class AppProtocolHandler:
@@ -23,11 +25,13 @@ class AppProtocolHandler:
             'test_finished': func(node_id)
             'node_version': func(node_id, version)
             'mcu_version': func(version)
+            'firmware_log': func(log_entry)  # NEW: Firmware semantic logs
             'log': func(msg)
             'packet_error': func(status)
         """
         self.rx_buffer = bytearray()
         self.callbacks = callbacks or {}
+        self.firmware_log_parser = FirmwareLogParser()
 
     def _trigger(self, event, *args, **kwargs):
         """Helper to safely trigger a callback."""
@@ -119,6 +123,22 @@ class AppProtocolHandler:
         elif pkt_type == "direct_uart":
             payload = pkt.get("raw_payload", [])
             if payload:
+                # NEW: Try to parse as firmware semantic log first
+                payload_bytes = bytes(payload)
+                try:
+                    text = payload_bytes.decode('utf-8', errors='ignore').strip()
+                    if text and self.firmware_log_parser.is_firmware_log(text):
+                        parsed_log = self.firmware_log_parser.parse_log_line(
+                            text,
+                            datetime.now()
+                        )
+                        if parsed_log:
+                            self._trigger('firmware_log', parsed_log)
+                            return  # Handled as firmware log
+                except Exception:
+                    pass
+                
+                # Fall through to standard protocol handling
                 cmd = payload[0]
                 params = payload[1:]
                 
