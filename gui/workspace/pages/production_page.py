@@ -168,7 +168,7 @@ class _TestControlSection(PanelFrame):
     def selected_node(self) -> tuple[int, str]:
         selected = self._combo.currentData()
         if not isinstance(selected, tuple) or len(selected) != 2:
-            return 3, "X"
+            return _ML20_NODES[0]
         node_id, node_name = selected
         return int(node_id), str(node_name)
 
