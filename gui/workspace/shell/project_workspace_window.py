@@ -190,7 +190,7 @@ class ProjectWorkspaceWindow(QMainWindow):
         self.set_active_page(self._resolve_available_route(preferred_route), log_route_change=log_route_change)
 
     def _resolve_available_route(self, preferred_route: str | None) -> str:
-        """Resolve the best currently enabled route, preferring the requested route and Production."""
+        """Resolve the best enabled route by preference: requested, Production, Firmware, then first enabled."""
         enabled_routes = [item.route_id for item in self._navigation_items if item.enabled]
         if preferred_route in enabled_routes:
             return preferred_route

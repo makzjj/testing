@@ -75,7 +75,7 @@ class ProductionPage(BaseWorkspacePage):
         self.console_message.emit(f"[Production] Placeholder test completed for Node {node_id} {node_name}")
 
     def _handle_stop_test(self) -> None:
-        node_id, _node_name = self.test_control_section.selected_node()
+        node_id, _ = self.test_control_section.selected_node()
         self.node_status_section.set_node_status(node_id, "Aborted")
         self.result_summary_section.set_result("ABORTED", "Operator stopped the placeholder test.")
         self.progress_section.append_step("Placeholder test aborted")
