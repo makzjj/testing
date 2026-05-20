@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QListWidget, QPushButton, QTableWidgetItem
 
 from ..bridges import WorkspaceRuntimeBridge
@@ -40,6 +40,8 @@ class ProductionPage(BaseWorkspacePage):
         self.test_control_section = _TestControlSection()
         self.result_summary_section = _ResultSummarySection()
         self.progress_section = _TestProgressSection()
+        self._pending_result_timer: QTimer | None = None
+        self._active_node: tuple[int, str] | None = None
 
         self.test_control_section.run_requested.connect(self._handle_run_test)
         self.test_control_section.stop_requested.connect(self._handle_stop_test)
@@ -62,20 +64,24 @@ class ProductionPage(BaseWorkspacePage):
         self.connection_section.set_status(serial_connected=False, mcu_connected=False)
 
     def _handle_run_test(self) -> None:
+        self._cancel_pending_completion()
         node_id, node_name = self.test_control_section.selected_node()
+        self._active_node = (node_id, node_name)
         self.node_status_section.set_node_status(node_id, "Testing")
         self.result_summary_section.set_result("TESTING", "Running placeholder test flow.")
         self.progress_section.append_step(f"Started placeholder test for Node {node_id} {node_name}")
         self.console_message.emit(f"[Production] Started placeholder test for Node {node_id} {node_name}")
 
         # TODO(Phase 2): invoke ProductionTestController and route UART/CAN test commands.
-        self.node_status_section.set_node_status(node_id, "PASS (placeholder)")
-        self.result_summary_section.set_result("PASS", "Placeholder test completed.")
-        self.progress_section.append_step(f"Completed placeholder test for Node {node_id} {node_name}")
-        self.console_message.emit(f"[Production] Placeholder test completed for Node {node_id} {node_name}")
+        self._pending_result_timer = QTimer(self)
+        self._pending_result_timer.setSingleShot(True)
+        self._pending_result_timer.timeout.connect(self._complete_placeholder_test)
+        self._pending_result_timer.start(900)
 
     def _handle_stop_test(self) -> None:
         node_id, _ = self.test_control_section.selected_node()
+        self._cancel_pending_completion()
+        self._active_node = None
         self.node_status_section.set_node_status(node_id, "Aborted")
         self.result_summary_section.set_result("ABORTED", "Operator stopped the placeholder test.")
         self.progress_section.append_step("Placeholder test aborted")
@@ -83,6 +89,7 @@ class ProductionPage(BaseWorkspacePage):
 
     def _handle_clear_result(self) -> None:
         self._reset_result_only()
+        self._active_node = None
         self.console_message.emit("[Production] Cleared result summary and progress")
 
     def _reset_result_only(self) -> None:
@@ -93,6 +100,23 @@ class ProductionPage(BaseWorkspacePage):
                 "2. Waiting for Run Test",
             ]
         )
+
+    def _complete_placeholder_test(self) -> None:
+        if self._active_node is None:
+            return
+        node_id, node_name = self._active_node
+        self.node_status_section.set_node_status(node_id, "PASS (placeholder)")
+        self.result_summary_section.set_result("PASS", "Placeholder test completed.")
+        self.progress_section.append_step(f"Completed placeholder test for Node {node_id} {node_name}")
+        self.console_message.emit(f"[Production] Placeholder test completed for Node {node_id} {node_name}")
+        self._cancel_pending_completion()
+        self._active_node = None
+
+    def _cancel_pending_completion(self) -> None:
+        if self._pending_result_timer is not None:
+            self._pending_result_timer.stop()
+            self._pending_result_timer.deleteLater()
+            self._pending_result_timer = None
 
 
 class _ConnectionStatusSection(PanelFrame):
@@ -107,8 +131,8 @@ class _ConnectionStatusSection(PanelFrame):
         mcu_text = "● Connected" if mcu_connected else "○ Not Connected"
         self._detail_list = DetailListWidget(
             [
-                _detail_item("Serial Connection", serial_text),
-                _detail_item("MCU Master", mcu_text),
+                DetailItem("Serial Connection", serial_text),
+                DetailItem("MCU Master", mcu_text),
             ]
         )
         self.body_layout.addWidget(self._detail_list)
@@ -203,7 +227,3 @@ class _TestProgressSection(PanelFrame):
 
     def append_step(self, step: str) -> None:
         self._list.addItem(step)
-
-
-def _detail_item(label: str, value: str) -> DetailItem:
-    return DetailItem(label, value)
