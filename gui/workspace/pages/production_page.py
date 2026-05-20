@@ -24,6 +24,7 @@ _ML20_NODES: list[tuple[int, str]] = [
     (11, "NGActuator"),
     (12, "Z"),
 ]
+_PLACEHOLDER_TEST_DURATION_MS = 900
 
 
 class ProductionPage(BaseWorkspacePage):
@@ -76,7 +77,7 @@ class ProductionPage(BaseWorkspacePage):
         self._pending_result_timer = QTimer(self)
         self._pending_result_timer.setSingleShot(True)
         self._pending_result_timer.timeout.connect(self._complete_placeholder_test)
-        self._pending_result_timer.start(900)
+        self._pending_result_timer.start(_PLACEHOLDER_TEST_DURATION_MS)
 
     def _handle_stop_test(self) -> None:
         node_id, _ = self.test_control_section.selected_node()
