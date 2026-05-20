@@ -232,8 +232,10 @@ ui:
             )
 
             mechanical_button = next(
-                button for button in window.top_bar.findChildren(NavigationButton) if button.text() == "Mechanical"
+                (button for button in window.top_bar.findChildren(NavigationButton) if button.text() == "Mechanical"),
+                None,
             )
+            self.assertIsNotNone(mechanical_button)
             self.assertFalse(mechanical_button.isEnabled())
 
             mechanical_widget._checkbox.setChecked(True)

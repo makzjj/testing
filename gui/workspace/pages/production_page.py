@@ -58,7 +58,7 @@ class ProductionPage(BaseWorkspacePage):
         self._refresh_connection_status()
 
     def _refresh_connection_status(self) -> None:
-        # TODO(phase2): replace placeholder transport state with real bridge/runtime connectivity.
+        # TODO(Phase 2): replace placeholder transport state with real bridge/runtime connectivity.
         self.connection_section.set_status(serial_connected=False, mcu_connected=False)
 
     def _handle_run_test(self) -> None:
@@ -68,7 +68,7 @@ class ProductionPage(BaseWorkspacePage):
         self.progress_section.append_step(f"Started placeholder test for Node {node_id} {node_name}")
         self.console_message.emit(f"[Production] Started placeholder test for Node {node_id} {node_name}")
 
-        # TODO(phase2): invoke ProductionTestController and route UART/CAN test commands.
+        # TODO(Phase 2): invoke ProductionTestController and route UART/CAN test commands.
         self.node_status_section.set_node_status(node_id, "PASS (placeholder)")
         self.result_summary_section.set_result("PASS", "Placeholder test completed.")
         self.progress_section.append_step(f"Completed placeholder test for Node {node_id} {node_name}")
