@@ -225,11 +225,11 @@ class MainWindow(QMainWindow):
         system_layout.setContentsMargins(6, 4, 6, 6)
         system_layout.setSpacing(6)
 
-        system_layout.addWidget(self.create_system_status_panel(), 2)
+        system_layout.addWidget(self.create_system_status_panel(), 1)
         system_layout.addWidget(self.create_communication_panel(), 1)
-        system_layout.addWidget(self.create_nodes_summary_panel(), 7)
+        system_layout.addWidget(self.create_nodes_summary_panel(), 8)
         system_layout.addWidget(self.create_logo_panel(), 0)
-        main_layout.addWidget(system_group, 0)
+        main_layout.addWidget(system_group, 2)
 
         # ================= MIDDLE ROW: DEBUG SECTION (full width) =================
         debug_group = QGroupBox("Debug")
@@ -263,10 +263,10 @@ class MainWindow(QMainWindow):
         debug_body_layout.addWidget(viz_group, 4)
 
         debug_layout.addLayout(debug_body_layout, 1)
-        main_layout.addWidget(debug_group, 7)
+        main_layout.addWidget(debug_group, 4)
 
         # ================= BOTTOM ROW: CONSOLE SECTION (full width) =================
-        main_layout.addWidget(self.create_console_box(), 3)
+        main_layout.addWidget(self.create_console_box(), 4)
 
         # Initialize default visualization
         self.update_motion_node_label()
@@ -469,9 +469,9 @@ class MainWindow(QMainWindow):
 
         # Define headers matching update_node_status_table()
         headers = [
-            "Node (Connected)",  # 02 ✅ Connected
-            "Firmware Version",  # from GET_VERSION (0xC8)
-            "Serial Number (UUID)",  # from GET_UUID (0xE0)
+            "Node",  # 02 ✅ Connected
+            "Firmware",  # from GET_VERSION (0xC8)
+            "Serial(UUID)",  # from GET_UUID (0xE0)
             "Node Type",  # from GET_NODETYPE (0xCD)
             "Status",  # from GET_INTERRUPT (0xD8)
         ]
@@ -492,12 +492,14 @@ class MainWindow(QMainWindow):
                 background-color: #fafafa;
                 alternate-background-color: #f3f3f3;
                 gridline-color: #cccccc;
-                font-size: 12px;
+                font-size: 11px;
             }
             QHeaderView::section {
                 background-color: #dcdcdc;
                 font-weight: bold;
+                font-size: 10px;
                 border: 1px solid #b0b0b0;
+                padding: 2px;
             }
         """)
 
@@ -795,6 +797,7 @@ class MainWindow(QMainWindow):
         test_all_btn.clicked.connect(self.test_all_connected_nodes)
         config_btn = QPushButton("Motor Config")
         export_btn = QPushButton("Export Logs")
+        export_btn.clicked.connect(self.save_runtime_console_log)
 
         self.monitor_btn = QPushButton("Serial Monitor")
         self.monitor_btn.clicked.connect(self.monitor_dialog.show)
@@ -818,6 +821,153 @@ class MainWindow(QMainWindow):
 
         return layout
 
+    def save_runtime_console_log(self) -> None:
+        """Save Runtime Console logs to a .csv file."""
+        from PyQt6.QtWidgets import QFileDialog
+        from PyQt6.QtCore import QDateTime
+        import os
+        import csv
+        import re
+
+        """default_name = QDateTime.currentDateTime().toString("'runtime-log-'yyyyMMdd-HHmmss'.log'")
+        selected_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Runtime Console Log",
+            default_name,
+            "Log Files (*.log);;Text Files (*.txt);;All Files (*.*)",
+        )
+        
+        if not selected_path:
+            return
+            
+        try:
+            with open(selected_path, "w", encoding="utf-8") as file_handle:
+                file_handle.write(self.log_box.toPlainText())
+            self.log(f"💾 Runtime console log saved to {os.path.basename(selected_path)}")
+            
+        except Exception as e:
+            self.log(f"❌ Failed to save runtime console log: {e}")"""
+
+        raw_text = self.log_box.toPlainText()
+        if not raw_text.strip():
+            return
+
+        current_time = QDateTime.currentDateTime().toString("yyyyMMdd-HHmmss")
+        default_filename = f"runtime-log-{current_time}.csv"
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Sequence Logs as CSV",
+            default_filename,
+            "CSV Files (*.csv);;All Files (*)"
+        )
+
+        if not file_path:
+            return
+
+        # --- EMOJI STRIPPING REGEX PATTERN ---
+        # This covers standard emojis, transport/map symbols, and miscellaneous pictographs
+        emoji_pattern = re.compile(
+            r'[\U00010000-\U0010ffff]'  # 4-byte emojis (like 💾, 📅, 🔍, ⚙️)
+            r'|[\u2600-\u27BF]'  # 3-byte miscellaneous symbols/dingbats (like ⏱️, ✅, ➡️)
+            r'|[\u2300-\u23FF]'  # Technical symbols (like watch faces)
+        )
+
+        try:
+            with open(file_path, mode='w', newline='', encoding='utf-8') as csv_file:
+                writer = csv.writer(csv_file)
+                # 1. Write the official headers
+                writer.writerow(["Timestamp", "Category", "Target Node", "Action/Cmd", "Data / Message"])
+                # 2. Visual Padding Row to stretch columns and prevent clipping in Excel
+                writer.writerow([
+                    " " * 15,  # Width padding for Timestamp
+                    " " * 20,  # Width padding for Category
+                    " " * 12,  # Width padding for Target Node
+                    " " * 20,  # Width padding for Action/Cmd
+                    " " * 65  # Deep width padding for Data / Message payloads
+                ])
+
+                for line in raw_text.splitlines():
+                    if not line.strip():
+                        continue
+
+                    # --- STRIP EMOJIS AND CLEAN WHITESPACE ---
+                    # Remove emojis and strip any resulting double/leading spaces
+                    line = emoji_pattern.sub('', line).strip()
+
+                    if line.startswith("[") and "]" in line:
+                        parts = line.split("]", 1)
+                        timestamp = parts[0].replace("[", "").strip()
+                        message = parts[1].strip()
+
+                        category = "System"
+                        node_id = "N/A"
+                        action_cmd = "Info"
+                        data_msg = message
+
+                        if message.startswith("TX"):
+                            category = "Transmit (TX)"
+                            cmd_match = re.search(r"TX\[(.*?)\]", message)
+                            action_cmd = cmd_match.group(1) if cmd_match else "TX"
+                            node_match = re.search(r"Node\s+([0-9A-Fa-f]+)", message)
+
+                            if node_match:
+                                node_id = node_match.group(1)
+                            if ":" in message:
+                                data_msg = message.split(":", 1)[1].strip()
+
+                        elif message.startswith("RX"):
+                            category = "Receive (RX)"
+                            action_cmd = "CAN Frame"
+                            from_match = re.search(r"From:([0-9A-Fa-f]+)", message)
+                            if from_match:
+                                node_id = from_match.group(1)
+                            cmd_val_match = re.search(r"Cmd:([0-9A-Fa-f]+)", message)
+                            params_match = re.search(r"Params:\[(.*?)\]", message)
+                            cmd_str = f"Cmd {cmd_val_match.group(1)}" if cmd_val_match else ""
+                            param_str = f"Params: [{params_match.group(1)}]" if params_match else ""
+                            data_msg = f"{cmd_str} {param_str}".strip()
+
+                        elif message.startswith("Decoded"):
+                            category = "Data Decode"
+                            type_match = re.search(r"Decoded\s+\[(.*?)\]", message)
+                            action_cmd = f"Decoded {type_match.group(1)}" if type_match else "Decode"
+                            if "=" in message:
+                                data_msg = message.split("=", 1)[1].strip()
+
+                        elif "Node" in message and any(
+                            x in message for x in ["timed out", "detected", "responded"]):
+                            category = "Node State Change"
+                            node_match = re.search(r"Node\s+([0-9A-Fa-f]+)", message)
+                            if node_match:
+                                node_id = node_match.group(1)
+                            action_cmd = "Timeout" if "timed out" in message else "Discovery"
+
+                        elif "Scheduled" in message:
+                            category = "Scheduler"
+                            node_match = re.search(r"Node\s+([0-9A-Fa-f]+)", message)
+                            if node_match:
+                                node_id = node_match.group(1)
+                            cmd_match = re.search(r"Scheduled\s+([A-Z_]+)", message)
+                            action_cmd = cmd_match.group(1) if cmd_match else "Schedule Task"
+
+                        # 3. Forced Alignment Formatting
+                        writer.writerow([
+                            f'="{timestamp}"',
+                            category,
+                            f'="{node_id}"',
+                            action_cmd,
+                            data_msg
+                        ])
+
+                    else:
+                        # For lines that don't match the standard [timestamp] block
+                        writer.writerow(["", "System Log", f'="N/A"', "Console Event", line])
+
+            print(f"Emoji-free CSV log exported to {os.path.basename(file_path)}")
+
+        except Exception as e:
+            print(f"Failed to save CSV log: {e}")
 
     def setup_timers(self):
         self.timer = QTimer()
