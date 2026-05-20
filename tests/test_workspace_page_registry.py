@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from gui.workspace.constants import ROUTE_APPLICATION, ROUTE_FIRMWARE, ROUTE_MECHANICAL, ROUTE_PROJECT_CONFIG
+from gui.workspace.constants import ROUTE_APPLICATION, ROUTE_FIRMWARE, ROUTE_MECHANICAL, ROUTE_PRODUCTION, ROUTE_PROJECT_CONFIG
 from gui.workspace.shell.workspace_page_registry import build_navigation_items, get_route_label
 from myconfig.project_models import ProjectDefinition, ProjectFeatures, ProjectUiConfig
 
@@ -32,6 +32,7 @@ class WorkspacePageRegistryTests(unittest.TestCase):
         self.assertTrue(item_map[ROUTE_FIRMWARE].enabled)
         self.assertFalse(item_map[ROUTE_MECHANICAL].enabled)
         self.assertTrue(item_map[ROUTE_APPLICATION].enabled)
+        self.assertTrue(item_map[ROUTE_PRODUCTION].enabled)
         self.assertEqual(get_route_label(items, ROUTE_PROJECT_CONFIG), "Project Config")
 
 

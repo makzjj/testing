@@ -13,7 +13,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication, QComboBox, QPushButton, QSizePolicy
 
 from gui.program_selector_window import ProgramSelectorWindow
-from gui.workspace.constants import ROUTE_FIRMWARE, ROUTE_PROJECT_CONFIG, ROUTE_RUNTIME
+from gui.workspace.constants import ROUTE_FIRMWARE, ROUTE_PRODUCTION, ROUTE_PROJECT_CONFIG, ROUTE_RUNTIME
 from gui.workspace.models import SelectionField, SelectionOption
 from gui.workspace.shell.project_workspace_window import ProjectWorkspaceWindow
 from gui.workspace.widgets import NavigationButton, NavigationPanel, SelectorFieldGrid, VisibleSelector, WorkspaceTopBar
@@ -128,13 +128,13 @@ mcu:
             self._app.processEvents()
 
             self.assertIsNone(window.findChild(NavigationPanel))
-            self.assertEqual(window.page_stack.count(), 5)
+            self.assertEqual(window.page_stack.count(), 6)
 
             toolbar = window.findChild(WorkspaceTopBar)
             self.assertIsNotNone(toolbar)
 
             nav_labels = [button.text() for button in toolbar.findChildren(NavigationButton)]
-            self.assertEqual(nav_labels, ["Firmware", "Mechanical", "Application", "Runtime", "Project Config"])
+            self.assertEqual(nav_labels, ["Production", "Firmware", "Mechanical", "Application", "Runtime", "Project Config"])
 
             menu_labels = [action.text() for action in toolbar.settings_menu.actions() if action.isEnabled()]
             self.assertEqual(toolbar.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Maximum)
@@ -147,8 +147,8 @@ mcu:
             self.assertEqual(len(window.live_session_panel.findChildren(QPushButton)), 0)
             self.assertLess(window.console_panel.geometry().top(), window.live_session_panel.geometry().top())
             self.assertGreaterEqual(toolbar.findChildren(NavigationButton)[0].height(), 30)
-            self.assertEqual(window._current_route_id, ROUTE_FIRMWARE)
-            self.assertEqual(window.live_session_panel.page_value.text(), "Firmware")
+            self.assertEqual(window._current_route_id, ROUTE_PRODUCTION)
+            self.assertEqual(window.live_session_panel.page_value.text(), "Production")
             self.assertFalse(window._bridge.has_live_runtime)
 
     def test_workspace_open_does_not_create_runtime_until_runtime_page_is_requested(self) -> None:
@@ -231,7 +231,10 @@ ui:
                 if getattr(widget, "_field", None) is not None and widget._field.path[-1] == "mechanical_tools"
             )
 
-            self.assertFalse(window.top_bar.findChildren(NavigationButton)[1].isEnabled())
+            mechanical_button = next(
+                button for button in window.top_bar.findChildren(NavigationButton) if button.text() == "Mechanical"
+            )
+            self.assertFalse(mechanical_button.isEnabled())
 
             mechanical_widget._checkbox.setChecked(True)
             project_page.header_panel._reload_button.click()

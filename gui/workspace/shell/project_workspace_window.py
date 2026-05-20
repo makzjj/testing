@@ -13,11 +13,12 @@ from ..constants import (
     ROUTE_APPLICATION,
     ROUTE_FIRMWARE,
     ROUTE_MECHANICAL,
+    ROUTE_PRODUCTION,
     ROUTE_PROJECT_CONFIG,
     ROUTE_RUNTIME,
     WORKSPACE_TITLE_PREFIX,
 )
-from ..pages import ApplicationProductionPage, FirmwarePage, MechanicalPage, ProjectConfigPage, RuntimePage
+from ..pages import ApplicationProductionPage, FirmwarePage, MechanicalPage, ProductionPage, ProjectConfigPage, RuntimePage
 from ..widgets import ConsolePanel, LiveSessionPanel, WorkspaceBackdrop, WorkspaceTopBar
 from .workspace_page_registry import build_navigation_items, get_route_label
 from .workspace_page_stack import WorkspacePageStack
@@ -32,7 +33,7 @@ class ProjectWorkspaceWindow(QMainWindow):
         self._bridge = WorkspaceRuntimeBridge(project_definition)
         self._navigation_items = build_navigation_items(project_definition)
         self._pages: dict[str, object] = {}
-        self._current_route_id = self._resolve_available_route(ROUTE_FIRMWARE)
+        self._current_route_id = self._resolve_available_route(ROUTE_PRODUCTION)
         self._settings_labels = {
             "auto_node_scan": "Auto node scan",
             "restore_last_project": "Restore last project",
@@ -113,6 +114,7 @@ class ProjectWorkspaceWindow(QMainWindow):
 
         self._pages = {
             ROUTE_PROJECT_CONFIG: ProjectConfigPage(self._bridge, self._handle_action, initial_state),
+            ROUTE_PRODUCTION: ProductionPage(self._bridge),
             ROUTE_FIRMWARE: FirmwarePage(self._bridge),
             ROUTE_MECHANICAL: MechanicalPage(self._bridge),
             ROUTE_APPLICATION: ApplicationProductionPage(self._bridge),
@@ -188,10 +190,12 @@ class ProjectWorkspaceWindow(QMainWindow):
         self.set_active_page(self._resolve_available_route(preferred_route), log_route_change=log_route_change)
 
     def _resolve_available_route(self, preferred_route: str | None) -> str:
-        """Resolve the best currently enabled route, preferring the requested route and Firmware."""
+        """Resolve the best currently enabled route, preferring the requested route and Production."""
         enabled_routes = [item.route_id for item in self._navigation_items if item.enabled]
         if preferred_route in enabled_routes:
             return preferred_route
+        if ROUTE_PRODUCTION in enabled_routes:
+            return ROUTE_PRODUCTION
         if ROUTE_FIRMWARE in enabled_routes:
             return ROUTE_FIRMWARE
         if enabled_routes:

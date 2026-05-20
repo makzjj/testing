@@ -1,0 +1,209 @@
+"""Production page implementation (Phase 1 placeholder shell)."""
+
+from __future__ import annotations
+
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QListWidget, QPushButton, QTableWidgetItem
+
+from ..bridges import WorkspaceRuntimeBridge
+from ..models import DetailItem
+from ..widgets import DetailListWidget, LabeledControl, PanelFrame, SimpleTableWidget
+from ..widgets.layout_utils import clear_layout
+from .base_page import BaseWorkspacePage
+
+_ML20_NODES: list[tuple[int, str]] = [
+    (1, "MCU Master"),
+    (3, "X"),
+    (4, "Y"),
+    (5, "V"),
+    (6, "H"),
+    (7, "NZ"),
+    (8, "RZ"),
+    (9, "PZ"),
+    (10, "HMI"),
+    (11, "NGActuator"),
+    (12, "Z"),
+]
+
+
+class ProductionPage(BaseWorkspacePage):
+    """Operator-focused Production page for placeholder node testing."""
+
+    console_message = pyqtSignal(str)
+
+    def __init__(self, bridge: WorkspaceRuntimeBridge) -> None:
+        super().__init__("Production", "Simple node-based quality control testing.")
+        self._bridge = bridge
+
+        self.connection_section = _ConnectionStatusSection()
+        self.node_status_section = _NodeStatusSection()
+        self.test_control_section = _TestControlSection()
+        self.result_summary_section = _ResultSummarySection()
+        self.progress_section = _TestProgressSection()
+
+        self.test_control_section.run_requested.connect(self._handle_run_test)
+        self.test_control_section.stop_requested.connect(self._handle_stop_test)
+        self.test_control_section.clear_requested.connect(self._handle_clear_result)
+
+        self.add_full_width(self.connection_section)
+        self.add_row(self.node_status_section, self.test_control_section)
+        self.add_full_width(self.result_summary_section)
+        self.add_full_width(self.progress_section)
+
+        self._reset_result_only()
+        self._refresh_connection_status()
+
+    def refresh(self) -> None:
+        """Refresh lightweight placeholder status without resetting operator state."""
+        self._refresh_connection_status()
+
+    def _refresh_connection_status(self) -> None:
+        # TODO(phase2): replace placeholder transport state with real bridge/runtime connectivity.
+        self.connection_section.set_status(serial_connected=False, mcu_connected=False)
+
+    def _handle_run_test(self) -> None:
+        node_id, node_name = self.test_control_section.selected_node()
+        self.node_status_section.set_node_status(node_id, "Testing")
+        self.result_summary_section.set_result("TESTING", "Running placeholder test flow.")
+        self.progress_section.append_step(f"Started placeholder test for Node {node_id} {node_name}")
+        self.console_message.emit(f"[Production] Started placeholder test for Node {node_id} {node_name}")
+
+        # TODO(phase2): invoke ProductionTestController and route UART/CAN test commands.
+        self.node_status_section.set_node_status(node_id, "PASS (placeholder)")
+        self.result_summary_section.set_result("PASS", "Placeholder test completed.")
+        self.progress_section.append_step(f"Completed placeholder test for Node {node_id} {node_name}")
+        self.console_message.emit(f"[Production] Placeholder test completed for Node {node_id} {node_name}")
+
+    def _handle_stop_test(self) -> None:
+        node_id, _node_name = self.test_control_section.selected_node()
+        self.node_status_section.set_node_status(node_id, "Aborted")
+        self.result_summary_section.set_result("ABORTED", "Operator stopped the placeholder test.")
+        self.progress_section.append_step("Placeholder test aborted")
+        self.console_message.emit("[Production] Test aborted")
+
+    def _handle_clear_result(self) -> None:
+        self._reset_result_only()
+        self.console_message.emit("[Production] Cleared result summary and progress")
+
+    def _reset_result_only(self) -> None:
+        self.result_summary_section.set_result("READY", "No test has been run yet.")
+        self.progress_section.reset_steps(
+            [
+                "1. Waiting for node selection",
+                "2. Waiting for Run Test",
+            ]
+        )
+
+
+class _ConnectionStatusSection(PanelFrame):
+    def __init__(self) -> None:
+        super().__init__("Connection Status", "")
+        self._detail_list = DetailListWidget([])
+        self.body_layout.addWidget(self._detail_list)
+
+    def set_status(self, *, serial_connected: bool, mcu_connected: bool) -> None:
+        clear_layout(self.body_layout)
+        serial_text = "● Connected" if serial_connected else "○ Disconnected"
+        mcu_text = "● Connected" if mcu_connected else "○ Not Connected"
+        self._detail_list = DetailListWidget(
+            [
+                _detail_item("Serial Connection", serial_text),
+                _detail_item("MCU Master", mcu_text),
+            ]
+        )
+        self.body_layout.addWidget(self._detail_list)
+
+
+class _NodeStatusSection(PanelFrame):
+    def __init__(self) -> None:
+        super().__init__("Node Status", "")
+        rows = [[str(node_id), node_name, "Not Tested"] for node_id, node_name in _ML20_NODES]
+        self._row_by_node_id = {node_id: row_index for row_index, (node_id, _name) in enumerate(_ML20_NODES)}
+        self.table = SimpleTableWidget(["Node ID", "Node Name", "Status"], rows)
+        self.body_layout.addWidget(self.table)
+
+    def set_node_status(self, node_id: int, status: str) -> None:
+        row_index = self._row_by_node_id.get(node_id)
+        if row_index is None:
+            return
+        item = QTableWidgetItem(status)
+        item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        self.table.setItem(row_index, 2, item)
+
+
+class _TestControlSection(PanelFrame):
+    run_requested = pyqtSignal()
+    stop_requested = pyqtSignal()
+    clear_requested = pyqtSignal()
+
+    def __init__(self) -> None:
+        super().__init__("Test Control", "")
+        self._combo = QComboBox()
+        self._combo.setObjectName("AxisSelectorCombo")
+        for node_id, node_name in _ML20_NODES:
+            self._combo.addItem(f"Node {node_id} - {node_name}", (node_id, node_name))
+        self.body_layout.addWidget(LabeledControl("Selected Node", self._combo))
+
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 0, 0, 0)
+        button_row.setSpacing(8)
+
+        run_button = QPushButton("Run Test")
+        run_button.setProperty("tone", "primary")
+        run_button.clicked.connect(self.run_requested.emit)
+        button_row.addWidget(run_button)
+
+        stop_button = QPushButton("Stop")
+        stop_button.setProperty("tone", "danger")
+        stop_button.clicked.connect(self.stop_requested.emit)
+        button_row.addWidget(stop_button)
+
+        self.body_layout.addLayout(button_row)
+
+        clear_button = QPushButton("Clear Result")
+        clear_button.setProperty("tone", "secondary")
+        clear_button.clicked.connect(self.clear_requested.emit)
+        self.body_layout.addWidget(clear_button)
+
+    def selected_node(self) -> tuple[int, str]:
+        selected = self._combo.currentData()
+        if not isinstance(selected, tuple) or len(selected) != 2:
+            return 3, "X"
+        node_id, node_name = selected
+        return int(node_id), str(node_name)
+
+
+class _ResultSummarySection(PanelFrame):
+    def __init__(self) -> None:
+        super().__init__("Result Summary", "")
+        self._status_label = QLabel("READY")
+        self._status_label.setObjectName("MetricValue")
+        self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.body_layout.addWidget(self._status_label)
+
+        self._reason_label = QLabel("Reason: No test has been run yet.")
+        self._reason_label.setObjectName("DetailValue")
+        self._reason_label.setWordWrap(True)
+        self.body_layout.addWidget(self._reason_label)
+
+    def set_result(self, status: str, reason: str) -> None:
+        self._status_label.setText(status)
+        self._reason_label.setText(f"Reason: {reason}")
+
+
+class _TestProgressSection(PanelFrame):
+    def __init__(self) -> None:
+        super().__init__("Test Progress", "")
+        self._list = QListWidget()
+        self.body_layout.addWidget(self._list)
+
+    def reset_steps(self, steps: list[str]) -> None:
+        self._list.clear()
+        self._list.addItems(steps)
+
+    def append_step(self, step: str) -> None:
+        self._list.addItem(step)
+
+
+def _detail_item(label: str, value: str) -> DetailItem:
+    return DetailItem(label, value)

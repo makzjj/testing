@@ -9,6 +9,7 @@ PRODUCT_NAME = "BioBot Robot Arm Tester"
 WORKSPACE_TITLE_PREFIX = "BBS Test Platform"
 
 ROUTE_PROJECT_CONFIG = "project_config"
+ROUTE_PRODUCTION = "production"
 ROUTE_FIRMWARE = "firmware"
 ROUTE_MECHANICAL = "mechanical"
 ROUTE_APPLICATION = "application"
@@ -20,6 +21,7 @@ RESOURCES_DIR = PROJECT_ROOT / "resources"
 BRAND_IMAGE_PATH = RESOURCES_DIR / "biobot_logo.png"
 
 NAVIGATION_ITEMS = (
+    (ROUTE_PRODUCTION, "Production", "Simple node-based quality control testing"),
     (ROUTE_FIRMWARE, "Firmware", "Protocol and debug"),
     (ROUTE_MECHANICAL, "Mechanical", "Motion and observation"),
     (ROUTE_APPLICATION, "Application", "Integration and setup"),
