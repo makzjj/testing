@@ -53,6 +53,13 @@ class _FakeRuntimeWindow(QObject):
         super().__init__()
         self.backend_client = _FakeBackendClient(connected=connected)
         self.mcu_version = mcu_version
+        self._selected_port = "COM11"
+        self._selected_baud = "115200"
+        self.node_status = {
+            2: {"connected": False},
+            3: {"connected": False},
+            8: {"connected": False},
+        }
 
 
 class _FakeBridge:
@@ -71,6 +78,61 @@ class _FakeBridge:
             return False, False
         serial_connected = runtime_window.backend_client.is_connected()
         return serial_connected, serial_connected
+
+    def get_runtime_communication_model(self, *, create_if_missing: bool = False) -> dict:
+        runtime_window = self.get_runtime_window(create_if_missing=create_if_missing)
+        if runtime_window is None:
+            return {
+                "ports": [],
+                "selected_port": None,
+                "baud_rates": ["115200", "230400", "345600"],
+                "selected_baud": "115200",
+                "connected": False,
+            }
+        return {
+            "ports": [{"label": "COM11 ✅ (Valid)", "value": "COM11"}],
+            "selected_port": runtime_window._selected_port,
+            "baud_rates": ["115200", "230400", "345600"],
+            "selected_baud": runtime_window._selected_baud,
+            "connected": runtime_window.backend_client.is_connected(),
+        }
+
+    def connect_runtime_serial(self, *, port: str, baud_rate: int) -> bool:
+        runtime_window = self.get_runtime_window(create_if_missing=True)
+        if runtime_window is None:
+            return False
+        runtime_window._selected_port = port
+        runtime_window._selected_baud = str(baud_rate)
+        runtime_window.backend_client._connected = True
+        return True
+
+    def disconnect_runtime_serial(self) -> None:
+        runtime_window = self.get_runtime_window(create_if_missing=True)
+        if runtime_window is None:
+            return
+        runtime_window.backend_client._connected = False
+
+    def get_runtime_robot_nodes(self, *, create_if_missing: bool = False) -> dict:
+        runtime_window = self.get_runtime_window(create_if_missing=create_if_missing)
+        if runtime_window is None:
+            return {"connected_nodes": [], "rows": []}
+        rows = []
+        connected_nodes = []
+        for node_id, status in runtime_window.node_status.items():
+            if not status.get("connected", False):
+                continue
+            connected_nodes.append(node_id)
+            rows.append(
+                {
+                    "node_id": node_id,
+                    "node": f"Node {node_id:02d} ✅ Connected",
+                    "firmware": str(status.get("firmware", "")),
+                    "uuid": str(status.get("uuid", "")),
+                    "node_type": str(status.get("type", "")),
+                    "status": str(status.get("interrupt", "")),
+                }
+            )
+        return {"connected_nodes": sorted(connected_nodes), "rows": rows}
 
 
 class ProductionTestControllerTests(unittest.TestCase):
@@ -213,6 +275,33 @@ class ProductionPageWorkflowTests(unittest.TestCase):
         self.assertEqual(page.node_status_section.table.item(6, 2).text(), "Pass")
         self.assertEqual(page.result_summary_section._status_label.text(), "PASS")
         self.assertIn("Node 8 RZ responded successfully.", page.result_summary_section._reason_label.text())
+
+    def test_production_page_shows_communication_card_controls(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        self.assertGreaterEqual(page.communication_section._port_combo.count(), 1)
+        self.assertGreaterEqual(page.communication_section._baud_combo.count(), 1)
+        self.assertEqual(page.communication_section._connect_button.text(), "Disconnect")
+
+    def test_production_page_shows_runtime_robot_nodes_and_syncs_dropdown(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        runtime_window.node_status[8] = {
+            "connected": True,
+            "firmware": "v1.0.0",
+            "uuid": "123456",
+            "type": "RZ",
+            "interrupt": "OK",
+        }
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        self.assertIn("Connected nodes: 8", page.robot_nodes_section._connected_label.text())
+        self.assertEqual(page.robot_nodes_section._table.item(0, 0).text(), "Node 08 ✅ Connected")
+        page.robot_nodes_section._handle_cell_clicked(0, 0)
+        selected_node_id, _selected_name = page.test_control_section.selected_node()
+        self.assertEqual(selected_node_id, 8)
 
 
 class ProductionParameterControllerTests(unittest.TestCase):

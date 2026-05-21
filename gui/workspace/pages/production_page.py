@@ -2,8 +2,16 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import QComboBox, QFileDialog, QHBoxLayout, QLabel, QListWidget, QPushButton, QTableWidgetItem
+from PyQt6.QtCore import QTimer, Qt, pyqtSignal
+from PyQt6.QtWidgets import (
+    QComboBox,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QPushButton,
+    QTableWidgetItem,
+)
 
 from ..bridges import WorkspaceRuntimeBridge
 from ..models import DetailItem
@@ -58,7 +66,8 @@ class ProductionPage(BaseWorkspacePage):
         super().__init__("Production", "Simple node-based quality control testing.")
         self._bridge = bridge
 
-        self.connection_section = _ConnectionStatusSection()
+        self.communication_section = _CommunicationSection()
+        self.robot_nodes_section = _RobotArmNodesSection()
         self.node_status_section = _NodeStatusSection()
         self.test_control_section = _TestControlSection()
         self.uuid_section = _UuidCsvSection()
@@ -73,6 +82,9 @@ class ProductionPage(BaseWorkspacePage):
         self.uuid_section.load_csv_requested.connect(self._handle_load_uuid_csv)
         self.uuid_section.write_requested.connect(self._handle_write_uuid)
         self.uuid_section.verify_requested.connect(self._handle_verify_uuid)
+        self.communication_section.connect_requested.connect(self._handle_connect_requested)
+        self.communication_section.disconnect_requested.connect(self._handle_disconnect_requested)
+        self.robot_nodes_section.node_selected.connect(self._handle_runtime_node_selected)
         self._test_controller.log_message.connect(self.console_message.emit)
         self._test_controller.test_started.connect(self._handle_test_started)
         self._test_controller.test_passed.connect(self._handle_test_passed)
@@ -83,22 +95,66 @@ class ProductionPage(BaseWorkspacePage):
         self._parameter_controller.verification_finished.connect(self._handle_uuid_verification_finished)
         self._uuid_operation: str | None = None
 
-        self.add_full_width(self.connection_section)
+        self.add_row(self.communication_section, self.robot_nodes_section)
         self.add_row(self.node_status_section, self.test_control_section)
         self.add_full_width(self.uuid_section)
         self.add_full_width(self.result_summary_section)
         self.add_full_width(self.progress_section)
 
+        self._runtime_poll_timer = QTimer(self)
+        self._runtime_poll_timer.setInterval(1000)
+        self._runtime_poll_timer.timeout.connect(self._refresh_runtime_panels)
+        self._runtime_poll_timer.start()
+
         self._reset_result_only()
-        self._refresh_connection_status()
+        self._refresh_runtime_panels()
 
     def refresh(self) -> None:
         """Refresh lightweight status without resetting operator state."""
+        self._refresh_runtime_panels()
+
+    def _refresh_runtime_panels(self) -> None:
         self._refresh_connection_status()
+        self._refresh_robot_nodes()
 
     def _refresh_connection_status(self) -> None:
-        serial_connected, mcu_connected = self._bridge.get_runtime_connection_state()
-        self.connection_section.set_status(serial_connected=serial_connected, mcu_connected=mcu_connected)
+        communication_model = self._bridge.get_runtime_communication_model(create_if_missing=False)
+        serial_connected = bool(communication_model.get("connected", False))
+        self.communication_section.set_model(communication_model)
+        if serial_connected:
+            selected_port = communication_model.get("selected_port") or "Unknown"
+            self.communication_section.set_status_text(f"● Connected ({selected_port})")
+        else:
+            self.communication_section.set_status_text("○ Disconnected")
+
+    def _refresh_robot_nodes(self) -> None:
+        nodes_model = self._bridge.get_runtime_robot_nodes(create_if_missing=False)
+        self.robot_nodes_section.set_nodes(nodes_model)
+
+    def _handle_connect_requested(self, port: str, baud_rate: int) -> None:
+        if not port:
+            self.console_message.emit("[Production] Select a serial port before connecting.")
+            self._refresh_runtime_panels()
+            return
+        connected = self._bridge.connect_runtime_serial(port=port, baud_rate=baud_rate)
+        if connected:
+            self.console_message.emit(f"[Production] Connected to {port} @ {baud_rate}")
+        else:
+            self.console_message.emit(f"[Production] Failed to connect to {port} @ {baud_rate}")
+        self._refresh_runtime_panels()
+
+    def _handle_disconnect_requested(self) -> None:
+        self._bridge.disconnect_runtime_serial()
+        self.console_message.emit("[Production] Disconnected serial communication")
+        self._refresh_runtime_panels()
+
+    def _handle_runtime_node_selected(self, node_id: int) -> None:
+        combo = self.test_control_section._combo
+        for index in range(combo.count()):
+            data = combo.itemData(index)
+            if isinstance(data, tuple) and len(data) == 2 and int(data[0]) == node_id:
+                combo.setCurrentIndex(index)
+                return
 
     def _handle_run_test(self) -> None:
         try:
@@ -236,6 +292,131 @@ class _ConnectionStatusSection(PanelFrame):
         super().__init__("Connection Status", "")
         self._detail_list = DetailListWidget([])
         self.body_layout.addWidget(self._detail_list)
+
+
+class _CommunicationSection(PanelFrame):
+    connect_requested = pyqtSignal(str, int)
+    disconnect_requested = pyqtSignal()
+
+    def __init__(self) -> None:
+        super().__init__("Communication", "")
+        self._port_combo = QComboBox()
+        self._baud_combo = QComboBox()
+        self._connect_button = QPushButton("Connect")
+        self._status_label = QLabel("○ Disconnected")
+        self._status_label.setObjectName("DetailValue")
+        self._connected = False
+
+        self.body_layout.addWidget(LabeledControl("Serial Port", self._port_combo))
+        self.body_layout.addWidget(LabeledControl("Baud Rate", self._baud_combo))
+        self._connect_button.clicked.connect(self._handle_toggle)
+        self.body_layout.addWidget(self._connect_button)
+        self.body_layout.addWidget(self._status_label)
+
+    def set_model(self, model: dict) -> None:
+        current_port = str(self._port_combo.currentData() or "")
+        ports = model.get("ports", [])
+        self._port_combo.blockSignals(True)
+        self._port_combo.clear()
+        for port_info in ports:
+            label = str(port_info.get("label", ""))
+            value = str(port_info.get("value", ""))
+            self._port_combo.addItem(label, value)
+
+        selected_port = str(model.get("selected_port") or current_port)
+        if selected_port:
+            for index in range(self._port_combo.count()):
+                if str(self._port_combo.itemData(index) or "") == selected_port:
+                    self._port_combo.setCurrentIndex(index)
+                    break
+        self._port_combo.blockSignals(False)
+
+        selected_baud = str(model.get("selected_baud", "115200"))
+        baud_rates = [str(rate) for rate in model.get("baud_rates", ["115200", "230400", "345600"])]
+        self._baud_combo.blockSignals(True)
+        self._baud_combo.clear()
+        self._baud_combo.addItems(baud_rates)
+        self._baud_combo.setCurrentText(selected_baud)
+        self._baud_combo.blockSignals(False)
+
+        self._connected = bool(model.get("connected", False))
+        self._connect_button.setText("Disconnect" if self._connected else "Connect")
+        self._port_combo.setEnabled(not self._connected)
+        self._baud_combo.setEnabled(not self._connected)
+
+    def set_status_text(self, text: str) -> None:
+        self._status_label.setText(text)
+        if text.startswith("●"):
+            self._status_label.setStyleSheet("color: green; font-weight: bold;")
+        else:
+            self._status_label.setStyleSheet("color: #808080; font-weight: bold;")
+
+    def _handle_toggle(self) -> None:
+        if self._connected:
+            self.disconnect_requested.emit()
+            return
+        port = str(self._port_combo.currentData() or "")
+        try:
+            baud_rate = int(self._baud_combo.currentText())
+        except ValueError:
+            baud_rate = 115200
+        self.connect_requested.emit(port, baud_rate)
+
+
+class _RobotArmNodesSection(PanelFrame):
+    node_selected = pyqtSignal(int)
+
+    def __init__(self) -> None:
+        super().__init__("Robot Arm Nodes", "")
+        self._connected_label = QLabel("Connected nodes: None")
+        self._connected_label.setObjectName("DetailValue")
+        self._headers = ["Node", "Firmware", "Serial(UUID)", "Node Type", "Status"]
+        self._table = SimpleTableWidget(self._headers, [])
+        self._row_node_ids: list[int] = []
+        self._table.cellClicked.connect(self._handle_cell_clicked)
+        self.body_layout.addWidget(self._connected_label)
+        self.body_layout.addWidget(self._table)
+
+    def set_nodes(self, nodes_model: dict) -> None:
+        connected_nodes = [int(node_id) for node_id in nodes_model.get("connected_nodes", [])]
+        rows = list(nodes_model.get("rows", []))
+        if connected_nodes:
+            self._connected_label.setText(f"Connected nodes: {', '.join(str(node) for node in connected_nodes)}")
+            self._connected_label.setStyleSheet("color: green; font-weight: bold;")
+        else:
+            self._connected_label.setText("Connected nodes: None")
+            self._connected_label.setStyleSheet("color: red; font-weight: bold;")
+
+        if self._table is not None:
+            self.body_layout.removeWidget(self._table)
+            self._table.deleteLater()
+
+        self._row_node_ids = []
+        table_rows: list[list[str]] = []
+        for row in rows:
+            node_id = int(row.get("node_id", 0))
+            self._row_node_ids.append(node_id)
+            table_rows.append(
+                [
+                    str(row.get("node", "")),
+                    str(row.get("firmware", "")),
+                    str(row.get("uuid", "")),
+                    str(row.get("node_type", "")),
+                    str(row.get("status", "")),
+                ]
+            )
+
+        if not table_rows:
+            table_rows = [["No connected nodes", "", "", "", ""]]
+
+        self._table = SimpleTableWidget(self._headers, table_rows)
+        self._table.cellClicked.connect(self._handle_cell_clicked)
+        self.body_layout.addWidget(self._table)
+
+    def _handle_cell_clicked(self, row: int, _column: int) -> None:
+        if row < 0 or row >= len(self._row_node_ids):
+            return
+        self.node_selected.emit(self._row_node_ids[row])
 
     def set_status(self, *, serial_connected: bool, mcu_connected: bool) -> None:
         clear_layout(self.body_layout)
