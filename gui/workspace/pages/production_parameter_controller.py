@@ -15,9 +15,10 @@ UUID_READ_PARAM = 0x3F
 UUID_WRITE_PARAM = 0x3D
 UUID_RESPONSE_PARAM = 0x3A
 UUID_VERIFY_TIMEOUT_MS = 3000
-UUID_MAX_VALUE = 0xFFFFFFFFFF
+UUID_MAX_40BIT_VALUE = 0xFFFFFFFFFF
 UUID_DECIMAL_LENGTH = 10
 UUID_DECIMAL_FORMAT = "1YYWWNNRRR"
+UUID_DECIMAL_FORMAT_DESCRIPTION = "Prefix-Year-Week-Node-RunningNumber"
 MIN_TESTABLE_NODE_ID = 3
 MAX_TESTABLE_NODE_ID = 12
 
@@ -62,7 +63,7 @@ def parse_uuid_value(value: object) -> int:
 
     if parsed < 0:
         raise ValueError("UUID must be non-negative.")
-    if parsed > UUID_MAX_VALUE:
+    if parsed > UUID_MAX_40BIT_VALUE:
         raise ValueError("UUID exceeds 5-byte command encoding range.")
     return parsed
 
@@ -70,7 +71,11 @@ def parse_uuid_value(value: object) -> int:
 def validate_uuid_format(uuid_int: int, node_id: int) -> tuple[bool, str]:
     text = f"{uuid_int:d}"
     if len(text) != UUID_DECIMAL_LENGTH:
-        return False, f"Decimal UUID must be exactly {UUID_DECIMAL_LENGTH} digits in format {UUID_DECIMAL_FORMAT}."
+        return (
+            False,
+            f"Decimal UUID must be exactly {UUID_DECIMAL_LENGTH} digits in format "
+            f"{UUID_DECIMAL_FORMAT} ({UUID_DECIMAL_FORMAT_DESCRIPTION}).",
+        )
     if text[0] != "1":
         return False, "Decimal UUID must start with prefix digit 1."
     expected_node_code = f"{node_id:02d}"
@@ -205,7 +210,7 @@ class ProductionParameterController(QObject):
         if backend_client is None or not backend_client.is_connected():
             return False, "Serial port not connected."
 
-        self.log_message.emit("[Production] Writing UUID")
+        self.log_message.emit("[Production] Writing UUIDs")
         try:
             for row in self._rows:
                 payload = build_uuid_write_payload(row.uuid_int)
@@ -354,7 +359,7 @@ class ProductionParameterController(QObject):
 
         cmd = int(packet.get("cmd", -1))
         if cmd != UUID_COMMAND:
-            self._finish_verify_failure("UUID response does not contain command 0xE0.")
+            self._finish_verify_failure(f"UUID response does not contain command {UUID_COMMAND:#04x}.")
             return
 
         params = packet.get("params")
