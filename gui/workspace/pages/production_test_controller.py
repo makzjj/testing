@@ -88,9 +88,7 @@ class ProductionTestController(QObject):
 
         try:
             command_name = str(profile.get("command_name", _DEFAULT_COMMAND_NAME))
-            command_bytes = list(
-                backend_client.get_command_bytes(command_name, list(profile.get("command_bytes", _DEFAULT_COMMAND_BYTES)))
-            )
+            command_bytes = list(backend_client.get_command_bytes(command_name, profile.get("command_bytes", _DEFAULT_COMMAND_BYTES)))
             payload = backend_client.send_command_bytes(node_id, command_bytes)
         except Exception as exc:
             self._clear_active_state()
@@ -211,7 +209,6 @@ class ProductionTestController(QObject):
             "decoded_key": _DEFAULT_DECODED_KEY,
             **profile,
         }
-        merged_profile["command_bytes"] = list(merged_profile.get("command_bytes", _DEFAULT_COMMAND_BYTES))
         return merged_profile
 
     def _resolve_timeout_ms(self, profile: dict[str, object]) -> int:
