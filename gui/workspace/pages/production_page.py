@@ -11,20 +11,39 @@ from ..widgets import DetailListWidget, LabeledControl, PanelFrame, SimpleTableW
 from ..widgets.layout_utils import clear_layout
 from .base_page import BaseWorkspacePage
 
-_ML20_NODES: list[tuple[int, str]] = [
-    (1, "MCU Master"),
-    (3, "X"),
-    (4, "Y"),
-    (5, "V"),
-    (6, "H"),
-    (7, "NZ"),
-    (8, "RZ"),
-    (9, "PZ"),
-    (10, "HMI"),
-    (11, "NGActuator"),
-    (12, "Z"),
-]
+# TODO(Phase 2/3): move ML 2.0 node mapping to project-config/model-aware constants.
+# TODO(Phase 2/3): replace old hardcoded node lists in legacy pages with model-aware config.
+# TODO(Phase 2/3): align ML2.0.yaml-driven node identities when config integration is prioritized.
+ML20_NODE_MAP: dict[int, str] = {
+    1: "MCU Master",
+    3: "X",
+    4: "Y",
+    5: "V",
+    6: "H",
+    7: "NZ",
+    8: "RZ",
+    9: "PZ",
+    10: "HMI",
+    11: "NGActuator",
+    12: "Z",
+}
+_ML20_NODE_ORDER: tuple[int, ...] = (1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
 _PLACEHOLDER_TEST_DURATION_MS = 900
+
+
+def get_ml20_node_name(node_id: int) -> str:
+    """Return the ML 2.0 display name for one node id."""
+    return ML20_NODE_MAP.get(node_id, f"Node {node_id}")
+
+
+def get_ml20_status_nodes() -> list[tuple[int, str]]:
+    """Return all status-listed ML 2.0 nodes including MCU master."""
+    return [(node_id, get_ml20_node_name(node_id)) for node_id in _ML20_NODE_ORDER]
+
+
+def get_ml20_testable_nodes() -> list[tuple[int, str]]:
+    """Return Production-selectable ML 2.0 test nodes (currently excluding Node 1 MCU Master)."""
+    return [(node_id, get_ml20_node_name(node_id)) for node_id in _ML20_NODE_ORDER if node_id != 1]
 
 
 class ProductionPage(BaseWorkspacePage):
@@ -142,8 +161,9 @@ class _ConnectionStatusSection(PanelFrame):
 class _NodeStatusSection(PanelFrame):
     def __init__(self) -> None:
         super().__init__("Node Status", "")
-        rows = [[str(node_id), node_name, "Not Tested"] for node_id, node_name in _ML20_NODES]
-        self._row_by_node_id = {node_id: row_index for row_index, (node_id, _name) in enumerate(_ML20_NODES)}
+        status_nodes = get_ml20_status_nodes()
+        rows = [[str(node_id), node_name, "Not Tested"] for node_id, node_name in status_nodes]
+        self._row_by_node_id = {node_id: row_index for row_index, (node_id, _name) in enumerate(status_nodes)}
         self.table = SimpleTableWidget(["Node ID", "Node Name", "Status"], rows)
         self.body_layout.addWidget(self.table)
 
@@ -165,7 +185,7 @@ class _TestControlSection(PanelFrame):
         super().__init__("Test Control", "")
         self._combo = QComboBox()
         self._combo.setObjectName("AxisSelectorCombo")
-        for node_id, node_name in _ML20_NODES:
+        for node_id, node_name in get_ml20_testable_nodes():
             self._combo.addItem(f"Node {node_id} - {node_name}", (node_id, node_name))
         self.body_layout.addWidget(LabeledControl("Selected Node", self._combo))
 
@@ -193,7 +213,8 @@ class _TestControlSection(PanelFrame):
     def selected_node(self) -> tuple[int, str]:
         selected = self._combo.currentData()
         if not isinstance(selected, tuple) or len(selected) != 2:
-            return _ML20_NODES[0]
+            fallback_nodes = get_ml20_testable_nodes()
+            return fallback_nodes[0]
         node_id, node_name = selected
         return int(node_id), str(node_name)
 

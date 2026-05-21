@@ -191,6 +191,59 @@ ui:
 
             self.assertTrue(window._bridge.has_live_runtime)
 
+    def test_production_page_uses_ml20_node_map_for_table_and_dropdown(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "demo.yaml"
+            config_path.write_text(
+                """
+project:
+  name: demo
+  display_name: Demo
+features:
+  firmware_tools: true
+  mechanical_tools: true
+  application_tools: true
+ui:
+  workspace: phase2_shell
+""".strip(),
+                encoding="utf-8",
+            )
+
+            project = ProjectDefinition(
+                name="demo",
+                display_name="Demo",
+                config_path=config_path,
+                features=ProjectFeatures(firmware_tools=True, mechanical_tools=True, application_tools=True),
+                ui=ProjectUiConfig(workspace="phase2_shell"),
+            )
+
+            window = ProjectWorkspaceWindow(project)
+            window.show()
+            self._app.processEvents()
+            window.set_active_page(ROUTE_PRODUCTION)
+            self._app.processEvents()
+
+            production_page = window._pages[ROUTE_PRODUCTION]
+            node_table = production_page.node_status_section.table
+            dropdown = production_page.test_control_section._combo
+
+            table_names = [node_table.item(row, 1).text() for row in range(node_table.rowCount())]
+            table_node_ids = [node_table.item(row, 0).text() for row in range(node_table.rowCount())]
+            dropdown_text = [dropdown.itemText(index) for index in range(dropdown.count())]
+
+            self.assertEqual(
+                table_node_ids,
+                ["1", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"],
+            )
+            self.assertEqual(
+                table_names,
+                ["MCU Master", "X", "Y", "V", "H", "NZ", "RZ", "PZ", "HMI", "NGActuator", "Z"],
+            )
+            self.assertIn("Node 7 - NZ", dropdown_text)
+            self.assertIn("Node 11 - NGActuator", dropdown_text)
+            self.assertNotIn("Node 1 - MCU Master", dropdown_text)
+            self.assertFalse(any(name in table_names for name in ["Ya", "Yb", "Nd", "Rs", "Rp", "Rn"]))
+
     def test_project_config_reload_enables_feature_gated_navigation_from_current_editor_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "demo.yaml"
