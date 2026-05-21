@@ -14,6 +14,8 @@ from .base_page import BaseWorkspacePage
 # TODO(Phase 2/3): move ML 2.0 node mapping to project-config/model-aware constants.
 # TODO(Phase 2/3): replace old hardcoded node lists in legacy pages with model-aware config.
 # TODO(Phase 2/3): align ML2.0.yaml-driven node identities when config integration is prioritized.
+# Fixed Phase 1 ML 2.0 production node identity map.
+# Note: Node 2 is not part of the currently expected ML 2.0 production routing set.
 ML20_NODE_MAP: dict[int, str] = {
     1: "MCU Master",
     3: "X",
@@ -85,7 +87,12 @@ class ProductionPage(BaseWorkspacePage):
 
     def _handle_run_test(self) -> None:
         self._cancel_pending_completion()
-        node_id, node_name = self.test_control_section.selected_node()
+        try:
+            node_id, node_name = self.test_control_section.selected_node()
+        except RuntimeError as exc:
+            self.result_summary_section.set_result("READY", str(exc))
+            self.console_message.emit(f"[Production] {exc}")
+            return
         self._active_node = (node_id, node_name)
         self.node_status_section.set_node_status(node_id, "Testing")
         self.result_summary_section.set_result("TESTING", "Running placeholder test flow.")
@@ -99,7 +106,12 @@ class ProductionPage(BaseWorkspacePage):
         self._pending_result_timer.start(_PLACEHOLDER_TEST_DURATION_MS)
 
     def _handle_stop_test(self) -> None:
-        node_id, _ = self.test_control_section.selected_node()
+        try:
+            node_id, _ = self.test_control_section.selected_node()
+        except RuntimeError as exc:
+            self.result_summary_section.set_result("ABORTED", str(exc))
+            self.console_message.emit(f"[Production] {exc}")
+            return
         self._cancel_pending_completion()
         self._active_node = None
         self.node_status_section.set_node_status(node_id, "Aborted")
@@ -216,7 +228,7 @@ class _TestControlSection(PanelFrame):
             fallback_nodes = get_ml20_testable_nodes()
             if fallback_nodes:
                 return fallback_nodes[0]
-            return 1, get_ml20_node_name(1)
+            raise RuntimeError("No ML 2.0 testable nodes configured for Production.")
         node_id, node_name = selected
         return int(node_id), str(node_name)
 
