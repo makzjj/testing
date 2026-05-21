@@ -27,7 +27,7 @@ ML20_NODE_MAP: dict[int, str] = {
     11: "NGActuator",
     12: "Z",
 }
-_ML20_NODE_ORDER: tuple[int, ...] = (1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+_ML20_NODE_ORDER: tuple[int, ...] = tuple(ML20_NODE_MAP)
 _PLACEHOLDER_TEST_DURATION_MS = 900
 
 
