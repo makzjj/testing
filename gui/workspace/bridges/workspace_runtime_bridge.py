@@ -9,6 +9,7 @@ import webbrowser
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from myconfig.constants import NODE_ID_MAPPING
 from myconfig.config_editor_service import ConfigEditorService
 from myconfig.config_models import ConfigEditorModel, LiveHardwareFieldValue, SavePlan, SaveResult
 from myconfig.config_save_service import ConfigSaveService
@@ -252,6 +253,122 @@ class WorkspaceRuntimeBridge:
         serial_connected = bool(backend_client and backend_client.is_connected())
         mcu_connected = serial_connected
         return serial_connected, mcu_connected
+
+    def get_runtime_communication_model(self, *, create_if_missing: bool = False) -> dict:
+        """Return Runtime communication UI model from the shared runtime window."""
+        runtime_window = self.get_runtime_window(create_if_missing=create_if_missing)
+        if runtime_window is None:
+            return {
+                "ports": [],
+                "selected_port": None,
+                "baud_rates": ["115200", "230400", "345600"],
+                "selected_baud": "115200",
+                "connected": False,
+            }
+
+        if hasattr(runtime_window, "refresh_ports"):
+            runtime_window.refresh_ports()
+
+        ports: list[dict[str, str]] = []
+        selected_port = None
+        port_combo = getattr(runtime_window, "port_combo", None)
+        if port_combo is not None:
+            for index in range(port_combo.count()):
+                port_text = str(port_combo.itemText(index))
+                port_value = port_combo.itemData(index)
+                ports.append({"label": port_text, "value": str(port_value or "")})
+            selected_data = port_combo.currentData()
+            selected_port = str(selected_data) if selected_data else None
+
+        baud_rates: list[str] = []
+        selected_baud = "115200"
+        baud_combo = getattr(runtime_window, "baud_combo", None)
+        if baud_combo is not None:
+            baud_rates = [str(baud_combo.itemText(index)) for index in range(baud_combo.count())]
+            selected_baud = str(baud_combo.currentText() or selected_baud)
+
+        backend_client = getattr(runtime_window, "backend_client", None)
+        connected = bool(backend_client and backend_client.is_connected())
+        return {
+            "ports": ports,
+            "selected_port": selected_port,
+            "baud_rates": baud_rates or ["115200", "230400", "345600"],
+            "selected_baud": selected_baud,
+            "connected": connected,
+        }
+
+    def connect_runtime_serial(self, *, port: str, baud_rate: int) -> bool:
+        """Connect Runtime serial transport using existing Runtime logic."""
+        runtime_window = self.get_runtime_window(create_if_missing=True)
+        if runtime_window is None:
+            return False
+
+        if hasattr(runtime_window, "refresh_ports"):
+            runtime_window.refresh_ports()
+
+        port_combo = getattr(runtime_window, "port_combo", None)
+        if port_combo is not None:
+            for index in range(port_combo.count()):
+                if str(port_combo.itemData(index) or "") == str(port):
+                    port_combo.setCurrentIndex(index)
+                    break
+
+        baud_combo = getattr(runtime_window, "baud_combo", None)
+        if baud_combo is not None:
+            baud_combo.setCurrentText(str(baud_rate))
+        if hasattr(runtime_window, "on_baud_rate_changed"):
+            runtime_window.on_baud_rate_changed(str(baud_rate))
+        if hasattr(runtime_window, "connect_serial"):
+            runtime_window.connect_serial()
+
+        backend_client = getattr(runtime_window, "backend_client", None)
+        connected = bool(backend_client and backend_client.is_connected())
+        connect_btn = getattr(runtime_window, "connect_btn", None)
+        if connect_btn is not None:
+            connect_btn.setChecked(connected)
+        return connected
+
+    def disconnect_runtime_serial(self) -> None:
+        """Disconnect Runtime serial transport using existing Runtime logic."""
+        runtime_window = self.get_runtime_window(create_if_missing=True)
+        if runtime_window is None:
+            return
+        if hasattr(runtime_window, "disconnect_serial"):
+            runtime_window.disconnect_serial()
+        connect_btn = getattr(runtime_window, "connect_btn", None)
+        if connect_btn is not None:
+            connect_btn.setChecked(False)
+
+    def get_runtime_robot_nodes(self, *, create_if_missing: bool = False) -> dict:
+        """Return Runtime detected robot-node summary and table rows."""
+        runtime_window = self.get_runtime_window(create_if_missing=create_if_missing)
+        if runtime_window is None:
+            return {"connected_nodes": [], "rows": []}
+
+        node_status = getattr(runtime_window, "node_status", {}) or {}
+        connected_nodes = sorted(
+            node_id for node_id, status in node_status.items() if 2 <= int(node_id) <= 17 and status.get("connected", False)
+        )
+        rows: list[dict[str, str | int]] = []
+        for node_id in connected_nodes:
+            status = node_status.get(node_id, {})
+            node_name = NODE_ID_MAPPING.get(node_id, "")
+            node_display = f"{node_name}({node_id:02d}) ✅ Connected" if node_name else f"{node_id:02d} ✅ Connected"
+            if node_id in [5, 9, 10, 16, 17]:
+                interrupt_status = "N/A"
+            else:
+                interrupt_status = str(status.get("interrupt", "") or "")
+            rows.append(
+                {
+                    "node_id": node_id,
+                    "node": node_display,
+                    "firmware": str(status.get("firmware", "") or ""),
+                    "uuid": str(status.get("uuid", "") or ""),
+                    "node_type": str(status.get("type", "") or ""),
+                    "status": interrupt_status,
+                }
+            )
+        return {"connected_nodes": connected_nodes, "rows": rows}
 
     @property
     def project_definition(self) -> ProjectDefinition:
