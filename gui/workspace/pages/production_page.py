@@ -387,31 +387,36 @@ class _RobotArmNodesSection(PanelFrame):
             self._connected_label.setText("Connected nodes: None")
             self._connected_label.setStyleSheet("color: red; font-weight: bold;")
 
-        if self._table is not None:
-            self.body_layout.removeWidget(self._table)
-            self._table.deleteLater()
-
         self._row_node_ids = []
-        table_rows: list[list[str]] = []
+        self._table.clearSpans()
         for row in rows:
             node_id = int(row.get("node_id", 0))
             self._row_node_ids.append(node_id)
-            table_rows.append(
-                [
-                    str(row.get("node", "")),
-                    str(row.get("firmware", "")),
-                    str(row.get("uuid", "")),
-                    str(row.get("node_type", "")),
-                    str(row.get("status", "")),
-                ]
-            )
+        if not rows:
+            self._table.setRowCount(1)
+            for column in range(len(self._headers)):
+                empty_item = QTableWidgetItem("")
+                empty_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                self._table.setItem(0, column, empty_item)
+            message_item = QTableWidgetItem("No connected nodes")
+            message_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self._table.setItem(0, 0, message_item)
+            self._table.setSpan(0, 0, 1, len(self._headers))
+            return
 
-        if not table_rows:
-            table_rows = [["No connected nodes", "", "", "", ""]]
-
-        self._table = SimpleTableWidget(self._headers, table_rows)
-        self._table.cellClicked.connect(self._handle_cell_clicked)
-        self.body_layout.addWidget(self._table)
+        self._table.setRowCount(len(rows))
+        for row_index, row in enumerate(rows):
+            values = [
+                str(row.get("node", "")),
+                str(row.get("firmware", "")),
+                str(row.get("uuid", "")),
+                str(row.get("node_type", "")),
+                str(row.get("status", "")),
+            ]
+            for column_index, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                self._table.setItem(row_index, column_index, item)
 
     def _handle_cell_clicked(self, row: int, _column: int) -> None:
         if row < 0 or row >= len(self._row_node_ids):
