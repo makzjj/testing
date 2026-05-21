@@ -18,7 +18,7 @@ from ..models import DetailItem
 from ..widgets import DetailListWidget, LabeledControl, PanelFrame, SimpleTableWidget
 from ..widgets.layout_utils import clear_layout
 from .base_page import BaseWorkspacePage
-from .production_parameter_controller import ProductionParameterController
+from .production_parameter_controller import ProductionParameterController, UuidCsvRow
 from .production_test_controller import ProductionTestController
 
 # TODO(Phase 2/3): move ML 2.0 node mapping to project-config/model-aware constants.
@@ -40,6 +40,7 @@ ML20_NODE_MAP: dict[int, str] = {
     12: "Z",
 }
 _ML20_NODE_ORDER: tuple[int, ...] = tuple(ML20_NODE_MAP)
+RUNTIME_POLL_INTERVAL_MS = 1000
 
 
 def get_ml20_node_name(node_id: int) -> str:
@@ -102,7 +103,7 @@ class ProductionPage(BaseWorkspacePage):
         self.add_full_width(self.progress_section)
 
         self._runtime_poll_timer = QTimer(self)
-        self._runtime_poll_timer.setInterval(1000)
+        self._runtime_poll_timer.setInterval(RUNTIME_POLL_INTERVAL_MS)
         self._runtime_poll_timer.timeout.connect(self._refresh_runtime_panels)
         self._runtime_poll_timer.start()
 
@@ -569,7 +570,7 @@ class _UuidCsvSection(PanelFrame):
     def set_file_path(self, path: str) -> None:
         self._file_label.setText(f"Selected CSV: {path}")
 
-    def set_preview_rows(self, rows) -> None:
+    def set_preview_rows(self, rows: list[UuidCsvRow]) -> None:
         if self._preview_table is not None:
             self.body_layout.removeWidget(self._preview_table)
             self._preview_table.deleteLater()
