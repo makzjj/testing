@@ -81,6 +81,7 @@ class ProductionPage(BaseWorkspacePage):
         self._test_controller.test_aborted.connect(self._handle_test_aborted)
         self._parameter_controller.log_message.connect(self.console_message.emit)
         self._parameter_controller.verification_finished.connect(self._handle_uuid_verification_finished)
+        self._uuid_operation: str | None = None
 
         self.add_full_width(self.connection_section)
         self.add_row(self.node_status_section, self.test_control_section)
@@ -143,31 +144,57 @@ class ProductionPage(BaseWorkspacePage):
             self._refresh_connection_status()
 
     def _handle_write_uuid(self) -> None:
-        self.result_summary_section.set_result("WRITING UUID", "Sending UUID write commands to selected nodes.")
-        success, message = self._parameter_controller.write_loaded_uuids()
+        try:
+            node_id, node_name = self.test_control_section.selected_node()
+        except RuntimeError as exc:
+            self.result_summary_section.set_result("READY", str(exc))
+            self.console_message.emit(f"[Production] {exc}")
+            return
+
+        self._uuid_operation = "write"
+        self.result_summary_section.set_result("WRITING UUID", f"Writing UUID to Node {node_id} {node_name}.")
+        success, message = self._parameter_controller.write_loaded_uuid(node_id, node_name)
         if success:
-            self.result_summary_section.set_result("PASS", message)
-            self.progress_section.append_step("Queued UUID write commands")
+            self.progress_section.append_step(f"Started UUID write + read-back verification for Node {node_id} {node_name}")
         else:
+            self._uuid_operation = None
             self.result_summary_section.set_result("FAIL", message)
-            self.progress_section.append_step("Failed to write UUID commands")
+            self.progress_section.append_step(f"Failed to write UUID for Node {node_id} {node_name}")
             self.console_message.emit(f"[Production] {message}")
         self._refresh_connection_status()
 
     def _handle_verify_uuid(self) -> None:
-        self.result_summary_section.set_result("VERIFYING UUID", "Reading UUID values for verification.")
-        started = self._parameter_controller.verify_loaded_uuids()
+        try:
+            node_id, node_name = self.test_control_section.selected_node()
+        except RuntimeError as exc:
+            self.result_summary_section.set_result("READY", str(exc))
+            self.console_message.emit(f"[Production] {exc}")
+            return
+
+        self._uuid_operation = "verify"
+        self.result_summary_section.set_result("READING UUID", f"Reading and verifying UUID for Node {node_id} {node_name}.")
+        started = self._parameter_controller.verify_loaded_uuid(node_id, node_name)
         if started:
-            self.progress_section.append_step("Started UUID read-back verification")
+            self.progress_section.append_step(f"Started UUID read/verify for Node {node_id} {node_name}")
+        else:
+            self._uuid_operation = None
         self._refresh_connection_status()
 
     def _handle_uuid_verification_finished(self, passed: bool, reason: str) -> None:
+        operation = self._uuid_operation
+        self._uuid_operation = None
         if passed:
             self.result_summary_section.set_result("PASS", reason)
-            self.progress_section.append_step("UUID verification passed")
+            if operation == "write":
+                self.progress_section.append_step("UUID write + read-back verification passed")
+            else:
+                self.progress_section.append_step("UUID verification passed")
         else:
             self.result_summary_section.set_result("FAIL", reason)
-            self.progress_section.append_step("UUID verification failed")
+            if operation == "write":
+                self.progress_section.append_step("UUID write + read-back verification failed")
+            else:
+                self.progress_section.append_step("UUID verification failed")
 
     def _reset_result_only(self) -> None:
         self.result_summary_section.set_result("READY", "No test has been run yet.")
@@ -320,15 +347,19 @@ class _UuidCsvSection(PanelFrame):
         load_button.clicked.connect(self.load_csv_requested.emit)
         button_row.addWidget(load_button)
 
-        write_button = QPushButton("Write UUID")
+        verify_button = QPushButton("Verify Current UUID")
+        verify_button.setProperty("tone", "primary")
+        verify_button.clicked.connect(self.verify_requested.emit)
+        button_row.addWidget(verify_button)
+
+        write_button = QPushButton("Write UUID to PCB")
         write_button.setProperty("tone", "secondary")
         write_button.clicked.connect(self.write_requested.emit)
         button_row.addWidget(write_button)
 
-        verify_button = QPushButton("Verify/Read UUID")
-        verify_button.setProperty("tone", "secondary")
-        verify_button.clicked.connect(self.verify_requested.emit)
-        button_row.addWidget(verify_button)
+        self.load_button = load_button
+        self.verify_button = verify_button
+        self.write_button = write_button
 
         self.body_layout.addLayout(button_row)
 

@@ -226,8 +226,8 @@ class ProductionParameterControllerTests(unittest.TestCase):
         self.assertEqual(build_uuid_read_payload(), [0xE0, 0x3F])
         self.assertEqual(build_uuid_write_payload(1234567890), [0xE0, 0x3D, 0x00, 0x49, 0x96, 0x02, 0xD2])
         self.assertEqual(validate_uuid_format(1223306010, 6), (True, ""))
-        invalid_valid, invalid_message = validate_uuid_format(1223305010, 6)
-        self.assertFalse(invalid_valid)
+        is_valid, invalid_message = validate_uuid_format(1223305010, 6)
+        self.assertFalse(is_valid)
         self.assertIn("does not match node_id", invalid_message)
         decoded_ok, decoded_uuid, _ = decode_uuid_response([0xE0, 0x3A, 0x00, 0x49, 0x96, 0x02, 0xD2])
         self.assertTrue(decoded_ok)
@@ -248,7 +248,7 @@ class ProductionParameterControllerTests(unittest.TestCase):
         self.assertEqual(controller.rows, [])
         self.assertGreaterEqual(len(controller.errors), 1)
 
-    def test_write_loaded_uuids_sends_uuid_write_payload(self) -> None:
+    def test_write_loaded_uuid_sends_write_and_readback_payloads(self) -> None:
         runtime_window = _FakeRuntimeWindow()
         bridge = _FakeBridge(runtime_window)
         controller = ProductionParameterController(bridge)
@@ -259,14 +259,15 @@ class ProductionParameterControllerTests(unittest.TestCase):
             csv_path.write_text(csv_text, encoding="utf-8")
             self.assertTrue(controller.load_uuid_csv(str(csv_path)))
 
-        ok, _message = controller.write_loaded_uuids()
+        ok, _message = controller.write_loaded_uuid(6, "H")
         self.assertTrue(ok)
         self.assertEqual(
-            runtime_window.backend_client.sent_commands[-1],
+            runtime_window.backend_client.sent_commands[0],
             (6, [0xE0, 0x3D, 0x00, 0x48, 0xEA, 0x2B, 0x1A]),
         )
+        self.assertEqual(runtime_window.backend_client.sent_commands[1], (6, [0xE0, 0x3F]))
 
-    def test_verify_loaded_uuids_passes_for_matching_response(self) -> None:
+    def test_verify_loaded_uuid_passes_for_matching_response(self) -> None:
         runtime_window = _FakeRuntimeWindow()
         bridge = _FakeBridge(runtime_window)
         controller = ProductionParameterController(bridge, timeout_ms=100)
@@ -279,7 +280,8 @@ class ProductionParameterControllerTests(unittest.TestCase):
             csv_path.write_text(csv_text, encoding="utf-8")
             self.assertTrue(controller.load_uuid_csv(str(csv_path)))
 
-        self.assertTrue(controller.verify_loaded_uuids())
+        self.assertTrue(controller.verify_loaded_uuid(6, "H"))
+        self.assertEqual(runtime_window.backend_client.sent_commands[0], (6, [0xE0, 0x3F]))
         runtime_window.packet_received.emit(
             {
                 "status": "ok",
@@ -294,7 +296,7 @@ class ProductionParameterControllerTests(unittest.TestCase):
         self.assertTrue(events)
         self.assertTrue(events[-1][0])
 
-    def test_verify_loaded_uuids_fails_for_wrong_node(self) -> None:
+    def test_verify_loaded_uuid_fails_for_wrong_node(self) -> None:
         runtime_window = _FakeRuntimeWindow()
         bridge = _FakeBridge(runtime_window)
         controller = ProductionParameterController(bridge, timeout_ms=100)
@@ -307,7 +309,7 @@ class ProductionParameterControllerTests(unittest.TestCase):
             csv_path.write_text(csv_text, encoding="utf-8")
             self.assertTrue(controller.load_uuid_csv(str(csv_path)))
 
-        self.assertTrue(controller.verify_loaded_uuids())
+        self.assertTrue(controller.verify_loaded_uuid(6, "H"))
         runtime_window.packet_received.emit(
             {
                 "status": "ok",
@@ -322,6 +324,33 @@ class ProductionParameterControllerTests(unittest.TestCase):
         self.assertTrue(events)
         self.assertFalse(events[-1][0])
         self.assertIn("wrong node", events[-1][1])
+
+    def test_verify_loaded_uuid_fails_when_selected_node_missing_in_csv(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        controller = ProductionParameterController(bridge, timeout_ms=100)
+        events: list[tuple[bool, str]] = []
+        controller.verification_finished.connect(lambda passed, reason: events.append((passed, reason)))
+
+        csv_text = "node_id,node_name,uuid\n6,H,1223306010\n"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "uuid_valid.csv"
+            csv_path.write_text(csv_text, encoding="utf-8")
+            self.assertTrue(controller.load_uuid_csv(str(csv_path)))
+
+        self.assertFalse(controller.verify_loaded_uuid(5, "V"))
+        self.assertTrue(events)
+        self.assertFalse(events[-1][0])
+        self.assertIn("No UUID CSV row found", events[-1][1])
+
+    def test_uuid_section_buttons_use_safe_verify_first_wording(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        self.assertEqual(page.uuid_section.load_button.text(), "Load UUID CSV")
+        self.assertEqual(page.uuid_section.verify_button.text(), "Verify Current UUID")
+        self.assertEqual(page.uuid_section.write_button.text(), "Write UUID to PCB")
 
 
 if __name__ == "__main__":

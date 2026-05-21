@@ -17,6 +17,7 @@ UUID_RESPONSE_PARAM = 0x3A
 UUID_VERIFY_TIMEOUT_MS = 3000
 UUID_MAX_40BIT_VALUE = 0xFFFFFFFFFF
 UUID_DECIMAL_LENGTH = 10
+# Decimal segment lengths: 1(prefix) + 2(year) + 2(week) + 2(node-id) + 3(running-number).
 UUID_DECIMAL_FORMAT = "1YYWWNNRRR"
 UUID_DECIMAL_FORMAT_DESCRIPTION = "Prefix-Year-Week-Node-RunningNumber"
 MIN_TESTABLE_NODE_ID = 3
@@ -86,6 +87,12 @@ def validate_uuid_format(uuid_int: int, node_id: int) -> tuple[bool, str]:
 
 
 def split_uuid_to_bytes(uuid_int: int, uuid_hi: int = 0) -> tuple[int, int, int, int, int]:
+    """Split UUID into command bytes.
+
+    `uuid_hi` is the explicit top byte used by the 5-byte UUID payload.
+    When `uuid_hi` is left as 0 and `uuid_int` exceeds 32 bits, the high byte
+    is derived from `uuid_int` so 40-bit UUID values are encoded correctly.
+    """
     effective_hi = uuid_hi & 0xFF
     if uuid_int > 0xFFFFFFFF and uuid_hi == 0:
         effective_hi = (uuid_int >> 32) & 0xFF
@@ -124,7 +131,13 @@ def decode_uuid_response(payload: list[int] | tuple[int, ...]) -> tuple[bool, in
 
 
 class ProductionParameterController(QObject):
-    """UUID CSV loading and Runtime-backed write/verify orchestration."""
+    """Manage Production UUID CSV validation and selected-node Runtime orchestration.
+
+    Responsibilities include strict CSV validation (`node_id,node_name,uuid`),
+    ML 2.0 node/range checks (3-12), UUID parsing and format checks, read-only
+    verification against the selected node, and explicit write + read-back
+    verification when the operator chooses to program a UUID.
+    """
 
     log_message = pyqtSignal(str)
     verification_finished = pyqtSignal(bool, str)
@@ -196,11 +209,14 @@ class ProductionParameterController(QObject):
             self._errors.append("CSV contains no data rows.")
         return self.has_valid_rows()
 
-    def write_loaded_uuids(self) -> tuple[bool, str]:
+    def write_loaded_uuid(self, node_id: int, node_name: str) -> tuple[bool, str]:
         if self._errors:
             return False, "CSV validation failed. Fix errors before writing UUIDs."
         if not self._rows:
             return False, "No UUID rows loaded."
+        selected_row, selection_error = self._resolve_selected_row(node_id, node_name)
+        if selected_row is None:
+            return False, selection_error or "Selected node UUID data is unavailable."
 
         runtime_window = self._bridge.get_runtime_window(create_if_missing=True)
         if runtime_window is None:
@@ -210,24 +226,32 @@ class ProductionParameterController(QObject):
         if backend_client is None or not backend_client.is_connected():
             return False, "Serial port not connected."
 
-        self.log_message.emit("[Production] Writing UUIDs")
+        self.log_message.emit(f"[Production] Writing UUID to Node {selected_row.node_id} {selected_row.node_name}")
         try:
-            for row in self._rows:
-                payload = build_uuid_write_payload(row.uuid_int)
-                backend_client.send_command_bytes(row.node_id, payload)
-                payload_text = " ".join(f"{byte:02X}" for byte in payload)
-                self.log_message.emit(f"[Production] TX[UUID Write] -> Node {row.node_id:02d}: {payload_text}")
+            payload = build_uuid_write_payload(selected_row.uuid_int)
+            backend_client.send_command_bytes(selected_row.node_id, payload)
+            payload_text = " ".join(f"{byte:02X}" for byte in payload)
+            self.log_message.emit(f"[Production] TX[UUID Write] -> Node {selected_row.node_id:02d}: {payload_text}")
         except Exception as exc:
-            return False, f"Failed to write UUID for Node {row.node_id} {row.node_name}: {exc}"
+            return False, f"Failed to write UUID for Node {selected_row.node_id} {selected_row.node_name}: {exc}"
 
-        return True, f"Queued UUID write command(s) for {len(self._rows)} node(s)."
+        if not self.verify_loaded_uuid(selected_row.node_id, selected_row.node_name):
+            return False, "Failed to start UUID read-back verification after write."
+        return (
+            True,
+            f"UUID write sent to Node {selected_row.node_id} {selected_row.node_name}; awaiting read-back verification.",
+        )
 
-    def verify_loaded_uuids(self) -> bool:
+    def verify_loaded_uuid(self, node_id: int, node_name: str) -> bool:
         if self._errors:
             self.verification_finished.emit(False, "CSV validation failed. Fix errors before verification.")
             return False
         if not self._rows:
             self.verification_finished.emit(False, "No UUID rows loaded.")
+            return False
+        selected_row, selection_error = self._resolve_selected_row(node_id, node_name)
+        if selected_row is None:
+            self.verification_finished.emit(False, selection_error or "Selected node UUID data is unavailable.")
             return False
 
         runtime_window = self._bridge.get_runtime_window(create_if_missing=True)
@@ -245,12 +269,28 @@ class ProductionParameterController(QObject):
             return False
 
         self._attach_runtime_window(runtime_window)
-        self._verify_rows = list(self._rows)
+        self._verify_rows = [selected_row]
         self._verify_index = 0
         self._pending_row = None
-        self.log_message.emit("[Production] Verifying UUID read-back")
+        self.log_message.emit(f"[Production] Verifying UUID for Node {selected_row.node_id} {selected_row.node_name}")
         self._send_next_verify_request()
         return True
+
+    def _resolve_selected_row(self, node_id: int, node_name: str) -> tuple[UuidCsvRow | None, str | None]:
+        expected_name = self._node_map.get(node_id)
+        if expected_name is None or not (MIN_TESTABLE_NODE_ID <= node_id <= MAX_TESTABLE_NODE_ID):
+            return (
+                None,
+                f"Selected node {node_id} {node_name} is not supported for UUID operations "
+                f"(allowed range: {MIN_TESTABLE_NODE_ID}-{MAX_TESTABLE_NODE_ID}).",
+            )
+
+        matching_rows = [row for row in self._rows if row.node_id == node_id]
+        if not matching_rows:
+            return None, f"No UUID CSV row found for selected node {node_id} {expected_name}."
+        if len(matching_rows) > 1:
+            return None, f"Multiple UUID CSV rows found for selected node {node_id} {expected_name}."
+        return matching_rows[0], None
 
     def _validate_and_add_row(self, row_number: int, row: dict[str, str]) -> None:
         node_id_text = str(row.get("node_id", "")).strip()
@@ -285,6 +325,8 @@ class ProductionParameterController(QObject):
             self._errors.append(f"Row {row_number}: {exc}")
             return
 
+        # Hex UUID values are accepted as-is for compatibility, so strict decimal
+        # format checks (1YYWWNNRRR) are only applied to non-hex CSV UUID values.
         if not uuid_text.lower().startswith("0x"):
             is_valid, reason = validate_uuid_format(uuid_int, node_id)
             if not is_valid:
@@ -331,6 +373,7 @@ class ProductionParameterController(QObject):
 
         self._pending_row = row
         payload = build_uuid_read_payload()
+        self.log_message.emit(f"[Production] Reading UUID from Node {row.node_id} {row.node_name}")
         try:
             backend_client.send_command_bytes(row.node_id, payload)
         except Exception as exc:
