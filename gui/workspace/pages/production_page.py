@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QListWidget, QPushButton, QTableWidgetItem
+from PyQt6.QtWidgets import QComboBox, QFileDialog, QHBoxLayout, QLabel, QListWidget, QPushButton, QTableWidgetItem
 
 from ..bridges import WorkspaceRuntimeBridge
 from ..models import DetailItem
 from ..widgets import DetailListWidget, LabeledControl, PanelFrame, SimpleTableWidget
 from ..widgets.layout_utils import clear_layout
 from .base_page import BaseWorkspacePage
+from .production_parameter_controller import ProductionParameterController
 from .production_test_controller import ProductionTestController
 
 # TODO(Phase 2/3): move ML 2.0 node mapping to project-config/model-aware constants.
@@ -60,22 +61,30 @@ class ProductionPage(BaseWorkspacePage):
         self.connection_section = _ConnectionStatusSection()
         self.node_status_section = _NodeStatusSection()
         self.test_control_section = _TestControlSection()
+        self.uuid_section = _UuidCsvSection()
         self.result_summary_section = _ResultSummarySection()
         self.progress_section = _TestProgressSection()
         self._test_controller = ProductionTestController(bridge)
+        self._parameter_controller = ProductionParameterController(bridge, node_map=ML20_NODE_MAP)
 
         self.test_control_section.run_requested.connect(self._handle_run_test)
         self.test_control_section.stop_requested.connect(self._handle_stop_test)
         self.test_control_section.clear_requested.connect(self._handle_clear_result)
+        self.uuid_section.load_csv_requested.connect(self._handle_load_uuid_csv)
+        self.uuid_section.write_requested.connect(self._handle_write_uuid)
+        self.uuid_section.verify_requested.connect(self._handle_verify_uuid)
         self._test_controller.log_message.connect(self.console_message.emit)
         self._test_controller.test_started.connect(self._handle_test_started)
         self._test_controller.test_passed.connect(self._handle_test_passed)
         self._test_controller.test_failed.connect(self._handle_test_failed)
         self._test_controller.test_unsupported.connect(self._handle_test_unsupported)
         self._test_controller.test_aborted.connect(self._handle_test_aborted)
+        self._parameter_controller.log_message.connect(self.console_message.emit)
+        self._parameter_controller.verification_finished.connect(self._handle_uuid_verification_finished)
 
         self.add_full_width(self.connection_section)
         self.add_row(self.node_status_section, self.test_control_section)
+        self.add_full_width(self.uuid_section)
         self.add_full_width(self.result_summary_section)
         self.add_full_width(self.progress_section)
 
@@ -109,6 +118,55 @@ class ProductionPage(BaseWorkspacePage):
             self._test_controller.abort_test()
         self._reset_result_only()
         self.console_message.emit("[Production] Cleared result summary and progress")
+
+    def _handle_load_uuid_csv(self) -> None:
+        path, _selected_filter = QFileDialog.getOpenFileName(self, "Load UUID CSV", "", "CSV Files (*.csv)")
+        if not path:
+            return
+
+        valid = self._parameter_controller.load_uuid_csv(path)
+        rows = self._parameter_controller.rows
+        errors = self._parameter_controller.errors
+        self.uuid_section.set_file_path(path)
+        self.uuid_section.set_preview_rows(rows)
+        self.uuid_section.set_validation(valid, errors)
+
+        if valid:
+            self.console_message.emit(f"[Production] Loaded UUID CSV: {path}")
+            self.progress_section.append_step(f"Loaded UUID CSV with {len(rows)} row(s)")
+            self.result_summary_section.set_result("READY", "UUID CSV validation passed.")
+        else:
+            self.console_message.emit(f"[Production] UUID CSV validation failed: {path}")
+            self.result_summary_section.set_result("FAIL", "UUID CSV validation failed.")
+            self.progress_section.append_step("UUID CSV validation failed")
+            self._refresh_connection_status()
+
+    def _handle_write_uuid(self) -> None:
+        self.result_summary_section.set_result("WRITING UUID", "Sending UUID write commands to selected nodes.")
+        success, message = self._parameter_controller.write_loaded_uuids()
+        if success:
+            self.result_summary_section.set_result("PASS", message)
+            self.progress_section.append_step("Queued UUID write commands")
+        else:
+            self.result_summary_section.set_result("FAIL", message)
+            self.progress_section.append_step("Failed to write UUID commands")
+            self.console_message.emit(f"[Production] {message}")
+        self._refresh_connection_status()
+
+    def _handle_verify_uuid(self) -> None:
+        self.result_summary_section.set_result("VERIFYING UUID", "Reading UUID values for verification.")
+        started = self._parameter_controller.verify_loaded_uuids()
+        if started:
+            self.progress_section.append_step("Started UUID read-back verification")
+        self._refresh_connection_status()
+
+    def _handle_uuid_verification_finished(self, passed: bool, reason: str) -> None:
+        if passed:
+            self.result_summary_section.set_result("PASS", reason)
+            self.progress_section.append_step("UUID verification passed")
+        else:
+            self.result_summary_section.set_result("FAIL", reason)
+            self.progress_section.append_step("UUID verification failed")
 
     def _reset_result_only(self) -> None:
         self.result_summary_section.set_result("READY", "No test has been run yet.")
@@ -243,6 +301,69 @@ class _ResultSummarySection(PanelFrame):
     def set_result(self, status: str, reason: str) -> None:
         self._status_label.setText(status)
         self._reason_label.setText(f"Reason: {reason}")
+
+
+class _UuidCsvSection(PanelFrame):
+    load_csv_requested = pyqtSignal()
+    write_requested = pyqtSignal()
+    verify_requested = pyqtSignal()
+
+    def __init__(self) -> None:
+        super().__init__("UUID CSV", "")
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 0, 0, 0)
+        button_row.setSpacing(8)
+
+        load_button = QPushButton("Load UUID CSV")
+        load_button.setProperty("tone", "primary")
+        load_button.clicked.connect(self.load_csv_requested.emit)
+        button_row.addWidget(load_button)
+
+        write_button = QPushButton("Write UUID")
+        write_button.setProperty("tone", "secondary")
+        write_button.clicked.connect(self.write_requested.emit)
+        button_row.addWidget(write_button)
+
+        verify_button = QPushButton("Verify/Read UUID")
+        verify_button.setProperty("tone", "secondary")
+        verify_button.clicked.connect(self.verify_requested.emit)
+        button_row.addWidget(verify_button)
+
+        self.body_layout.addLayout(button_row)
+
+        self._file_label = QLabel("Selected CSV: None")
+        self._file_label.setObjectName("DetailValue")
+        self._file_label.setWordWrap(True)
+        self.body_layout.addWidget(self._file_label)
+
+        self._validation_label = QLabel("Validation: Not loaded")
+        self._validation_label.setObjectName("DetailValue")
+        self._validation_label.setWordWrap(True)
+        self.body_layout.addWidget(self._validation_label)
+
+        self._error_list = QListWidget()
+        self._error_list.setObjectName("SimpleList")
+        self.body_layout.addWidget(self._error_list)
+
+        self._preview_table: SimpleTableWidget = SimpleTableWidget(["Node ID", "Node Name", "UUID"], [])
+        self.body_layout.addWidget(self._preview_table)
+
+    def set_file_path(self, path: str) -> None:
+        self._file_label.setText(f"Selected CSV: {path}")
+
+    def set_preview_rows(self, rows) -> None:
+        if self._preview_table is not None:
+            self.body_layout.removeWidget(self._preview_table)
+            self._preview_table.deleteLater()
+        table_rows = [[str(row.node_id), row.node_name, row.uuid_text] for row in rows]
+        self._preview_table = SimpleTableWidget(["Node ID", "Node Name", "UUID"], table_rows)
+        self.body_layout.addWidget(self._preview_table)
+
+    def set_validation(self, passed: bool, errors: list[str]) -> None:
+        self._validation_label.setText("Validation: PASSED" if passed else "Validation: FAILED")
+        self._error_list.clear()
+        if errors:
+            self._error_list.addItems(errors)
 
 
 class _TestProgressSection(PanelFrame):
