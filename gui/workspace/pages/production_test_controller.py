@@ -1,4 +1,4 @@
-"""Production test controller for Phase 3 runtime-backed node checks."""
+"""Production test controller for runtime-backed ML 2.0 node checks."""
 
 from __future__ import annotations
 
@@ -6,8 +6,24 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from ..bridges import WorkspaceRuntimeBridge
 
-PHASE3_SUPPORTED_NODE_ID = 6
 PRODUCTION_TEST_TIMEOUT_MS = 3000
+_DEFAULT_COMMAND_NAME = "Get Position"
+_DEFAULT_COMMAND_BYTES = [0x82]
+_DEFAULT_RESPONSE_COMMAND = 0x82
+_DEFAULT_DECODED_KEY = "getpos"
+
+PRODUCTION_NODE_TEST_PROFILES: dict[int, dict[str, object]] = {
+    3: {"name": "X", "timeout_ms": PRODUCTION_TEST_TIMEOUT_MS},
+    4: {"name": "Y", "timeout_ms": PRODUCTION_TEST_TIMEOUT_MS},
+    5: {"name": "V", "timeout_ms": PRODUCTION_TEST_TIMEOUT_MS},
+    6: {"name": "H", "timeout_ms": PRODUCTION_TEST_TIMEOUT_MS},
+    7: {"name": "NZ", "timeout_ms": PRODUCTION_TEST_TIMEOUT_MS},
+    8: {"name": "RZ", "timeout_ms": PRODUCTION_TEST_TIMEOUT_MS},
+    9: {"name": "PZ", "timeout_ms": PRODUCTION_TEST_TIMEOUT_MS},
+    10: {"name": "HMI", "timeout_ms": PRODUCTION_TEST_TIMEOUT_MS},
+    11: {"name": "NGActuator", "timeout_ms": PRODUCTION_TEST_TIMEOUT_MS},
+    12: {"name": "Z", "timeout_ms": PRODUCTION_TEST_TIMEOUT_MS},
+}
 
 
 class ProductionTestController(QObject):
@@ -17,20 +33,20 @@ class ProductionTestController(QObject):
     test_started = pyqtSignal(int, str)
     test_passed = pyqtSignal(int, str, str)
     test_failed = pyqtSignal(int, str, str)
+    test_unsupported = pyqtSignal(int, str, str)
     test_aborted = pyqtSignal(int, str, str)
 
-    def __init__(self, bridge: WorkspaceRuntimeBridge, timeout_ms: int = PRODUCTION_TEST_TIMEOUT_MS) -> None:
+    def __init__(self, bridge: WorkspaceRuntimeBridge, timeout_ms: int | None = None) -> None:
         super().__init__()
         self._bridge = bridge
-        self._timeout_ms = timeout_ms
+        self._timeout_override_ms = timeout_ms
         self._timeout_timer = QTimer(self)
         self._timeout_timer.setSingleShot(True)
         self._timeout_timer.timeout.connect(self._handle_timeout)
         self._runtime_window = None
         self._active_node_id: int | None = None
         self._active_node_name: str | None = None
-        self._active_command_name = "Get Position"
-        self._active_command_bytes = [0x82]
+        self._active_profile: dict[str, object] | None = None
 
     def is_active(self) -> bool:
         return self._active_node_id is not None
@@ -58,18 +74,23 @@ class ProductionTestController(QObject):
             self.test_failed.emit(node_id, node_name, reason)
             return False
 
-        if node_id != PHASE3_SUPPORTED_NODE_ID:
-            reason = f"Phase 3 currently supports only Node {PHASE3_SUPPORTED_NODE_ID} H."
+        profile = self._get_node_profile(node_id)
+        if profile is None:
+            reason = "No safe Production test profile is available for this node yet."
             self.log_message.emit(f"[Production] {reason}")
-            self.test_failed.emit(node_id, node_name, reason)
+            self.test_unsupported.emit(node_id, node_name, reason)
             return False
 
         self._attach_runtime_window(runtime_window)
         self._active_node_id = node_id
         self._active_node_name = node_name
+        self._active_profile = profile
 
         try:
-            command_bytes = list(backend_client.get_command_bytes(self._active_command_name, self._active_command_bytes))
+            command_name = str(profile.get("command_name", _DEFAULT_COMMAND_NAME))
+            command_bytes = list(
+                backend_client.get_command_bytes(command_name, list(profile.get("command_bytes", _DEFAULT_COMMAND_BYTES)))
+            )
             payload = backend_client.send_command_bytes(node_id, command_bytes)
         except Exception as exc:
             self._clear_active_state()
@@ -78,11 +99,12 @@ class ProductionTestController(QObject):
             self.test_failed.emit(node_id, node_name, reason)
             return False
 
-        self._timeout_timer.start(self._timeout_ms)
+        timeout_ms = self._resolve_timeout_ms(profile)
+        self._timeout_timer.start(timeout_ms)
         self.test_started.emit(node_id, node_name)
         payload_text = " ".join(f"{byte:02X}" for byte in payload)
         self.log_message.emit(f"[Production] Started test for Node {node_id} {node_name}")
-        self.log_message.emit(f"[Production] TX[{self._active_command_name}] -> Node {node_id:02d}: {payload_text}")
+        self.log_message.emit(f"[Production] TX[{command_name}] -> Node {node_id:02d}: {payload_text}")
         return True
 
     def abort_test(self, *, emit_signal: bool = True) -> bool:
@@ -136,14 +158,17 @@ class ProductionTestController(QObject):
         if node_id != self._active_node_id:
             return
 
+        profile = self._active_profile or {}
         command = int(packet.get("cmd", 0))
-        if command != 0x82:
+        expected_command = int(profile.get("response_command", _DEFAULT_RESPONSE_COMMAND))
+        if command != expected_command:
             return
 
         decoded_key = packet.get("decoded_key")
         decoded_value = packet.get("decoded_value")
-        if decoded_key != "getpos" or not isinstance(decoded_value, tuple) or len(decoded_value) != 2:
-            reason = f"Node {node_id} returned an invalid Get Position response."
+        expected_decoded_key = str(profile.get("decoded_key", _DEFAULT_DECODED_KEY))
+        if decoded_key != expected_decoded_key or not isinstance(decoded_value, tuple) or len(decoded_value) != 2:
+            reason = f"Node {node_id} returned an invalid {profile.get('command_name', _DEFAULT_COMMAND_NAME)} response."
             self._finish_failure(reason)
             return
 
@@ -172,3 +197,24 @@ class ProductionTestController(QObject):
     def _clear_active_state(self) -> None:
         self._active_node_id = None
         self._active_node_name = None
+        self._active_profile = None
+
+    def _get_node_profile(self, node_id: int) -> dict[str, object] | None:
+        profile = PRODUCTION_NODE_TEST_PROFILES.get(node_id)
+        if profile is None:
+            return None
+
+        merged_profile = {
+            "command_name": _DEFAULT_COMMAND_NAME,
+            "command_bytes": list(_DEFAULT_COMMAND_BYTES),
+            "response_command": _DEFAULT_RESPONSE_COMMAND,
+            "decoded_key": _DEFAULT_DECODED_KEY,
+            **profile,
+        }
+        merged_profile["command_bytes"] = list(merged_profile.get("command_bytes", _DEFAULT_COMMAND_BYTES))
+        return merged_profile
+
+    def _resolve_timeout_ms(self, profile: dict[str, object]) -> int:
+        if self._timeout_override_ms is not None:
+            return self._timeout_override_ms
+        return int(profile.get("timeout_ms", PRODUCTION_TEST_TIMEOUT_MS))

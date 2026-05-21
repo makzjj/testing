@@ -1,4 +1,4 @@
-"""Focused tests for the Production Phase 3 runtime-backed Node 6 flow."""
+"""Focused tests for the Production runtime-backed ML 2.0 node flow."""
 
 from __future__ import annotations
 
@@ -68,7 +68,7 @@ class ProductionTestControllerTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls._app = QApplication.instance() or QApplication([])
 
-    def test_node6_test_starts_and_matching_response_passes(self) -> None:
+    def test_selected_node_test_starts_and_matching_response_passes(self) -> None:
         runtime_window = _FakeRuntimeWindow()
         bridge = _FakeBridge(runtime_window)
         controller = ProductionTestController(bridge, timeout_ms=50)
@@ -77,15 +77,15 @@ class ProductionTestControllerTests(unittest.TestCase):
         controller.test_started.connect(lambda node_id, node_name: events.append(("started", node_id, node_name)))
         controller.test_passed.connect(lambda node_id, node_name, reason: events.append(("passed", node_id, node_name, reason)))
 
-        self.assertTrue(controller.run_test(6, "H"))
-        self.assertEqual(runtime_window.backend_client.sent_commands, [(6, [0x82])])
-        self.assertIn(("started", 6, "H"), events)
+        self.assertTrue(controller.run_test(8, "RZ"))
+        self.assertEqual(runtime_window.backend_client.sent_commands, [(8, [0x82])])
+        self.assertIn(("started", 8, "RZ"), events)
 
         runtime_window.packet_received.emit(
             {
                 "status": "ok",
                 "type": "can_over_uart",
-                "sender": 6,
+                "sender": 8,
                 "cmd": 0x82,
                 "decoded_key": "getpos",
                 "decoded_value": ("G", 12345),
@@ -93,7 +93,7 @@ class ProductionTestControllerTests(unittest.TestCase):
         )
         self._app.processEvents()
 
-        self.assertTrue(any(event[0] == "passed" and event[1] == 6 for event in events))
+        self.assertTrue(any(event[0] == "passed" and event[1] == 8 for event in events))
         self.assertFalse(controller.is_active())
 
     def test_wrong_node_response_does_not_pass(self) -> None:
@@ -104,12 +104,12 @@ class ProductionTestControllerTests(unittest.TestCase):
 
         controller.test_passed.connect(lambda node_id, node_name, reason: events.append(("passed", node_id, node_name, reason)))
 
-        controller.run_test(6, "H")
+        controller.run_test(11, "NGActuator")
         runtime_window.packet_received.emit(
             {
                 "status": "ok",
                 "type": "can_over_uart",
-                "sender": 5,
+                "sender": 10,
                 "cmd": 0x82,
                 "decoded_key": "getpos",
                 "decoded_value": ("G", 999),
@@ -128,14 +128,14 @@ class ProductionTestControllerTests(unittest.TestCase):
         events: list[tuple] = []
         controller.test_failed.connect(lambda node_id, node_name, reason: events.append(("failed", node_id, node_name, reason)))
 
-        controller.run_test(6, "H")
+        controller.run_test(10, "HMI")
 
         deadline = time.monotonic() + 0.5
         while time.monotonic() < deadline and not events:
             self._app.processEvents()
             time.sleep(0.01)
 
-        self.assertTrue(any(event[0] == "failed" and event[1] == 6 and "Timed out" in event[3] for event in events))
+        self.assertTrue(any(event[0] == "failed" and event[1] == 10 and "Timed out" in event[3] for event in events))
         self.assertFalse(controller.is_active())
 
     def test_stop_causes_aborted_and_sends_stop_command(self) -> None:
@@ -145,11 +145,25 @@ class ProductionTestControllerTests(unittest.TestCase):
         events: list[tuple] = []
         controller.test_aborted.connect(lambda node_id, node_name, reason: events.append(("aborted", node_id, node_name, reason)))
 
-        controller.run_test(6, "H")
+        controller.run_test(3, "X")
         self.assertTrue(controller.abort_test())
 
-        self.assertEqual(runtime_window.backend_client.stop_commands, [6])
-        self.assertTrue(any(event[0] == "aborted" and event[1] == 6 for event in events))
+        self.assertEqual(runtime_window.backend_client.stop_commands, [3])
+        self.assertTrue(any(event[0] == "aborted" and event[1] == 3 for event in events))
+        self.assertFalse(controller.is_active())
+
+    def test_unsupported_node_emits_unsupported_without_sending(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        controller = ProductionTestController(bridge, timeout_ms=100)
+        events: list[tuple] = []
+        controller.test_unsupported.connect(
+            lambda node_id, node_name, reason: events.append(("unsupported", node_id, node_name, reason))
+        )
+
+        self.assertFalse(controller.run_test(2, "Node 2"))
+        self.assertEqual(runtime_window.backend_client.sent_commands, [])
+        self.assertTrue(any(event[0] == "unsupported" and event[1] == 2 for event in events))
         self.assertFalse(controller.is_active())
 
 
@@ -158,27 +172,27 @@ class ProductionPageWorkflowTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls._app = QApplication.instance() or QApplication([])
 
-    def test_production_page_updates_ui_for_runtime_backed_node6_pass(self) -> None:
+    def test_production_page_updates_ui_for_runtime_backed_selected_node_pass(self) -> None:
         runtime_window = _FakeRuntimeWindow()
         bridge = _FakeBridge(runtime_window)
         page = ProductionPage(bridge)
 
         combo = page.test_control_section._combo
         for index in range(combo.count()):
-            if combo.itemText(index) == "Node 6 - H":
+            if combo.itemText(index) == "Node 8 - RZ":
                 combo.setCurrentIndex(index)
                 break
         page._handle_run_test()
         self._app.processEvents()
 
-        self.assertEqual(page.node_status_section.table.item(4, 2).text(), "Testing")
+        self.assertEqual(page.node_status_section.table.item(6, 2).text(), "Testing")
         self.assertEqual(page.result_summary_section._status_label.text(), "TESTING")
 
         runtime_window.packet_received.emit(
             {
                 "status": "ok",
                 "type": "can_over_uart",
-                "sender": 6,
+                "sender": 8,
                 "cmd": 0x82,
                 "decoded_key": "getpos",
                 "decoded_value": ("G", 456),
@@ -186,9 +200,9 @@ class ProductionPageWorkflowTests(unittest.TestCase):
         )
         self._app.processEvents()
 
-        self.assertEqual(page.node_status_section.table.item(4, 2).text(), "Pass")
+        self.assertEqual(page.node_status_section.table.item(6, 2).text(), "Pass")
         self.assertEqual(page.result_summary_section._status_label.text(), "PASS")
-        self.assertIn("Node 6 H responded successfully.", page.result_summary_section._reason_label.text())
+        self.assertIn("Node 8 RZ responded successfully.", page.result_summary_section._reason_label.text())
 
 
 if __name__ == "__main__":

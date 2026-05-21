@@ -1,4 +1,4 @@
-"""Production page implementation with Phase 3 runtime-backed Node 6 testing."""
+"""Production page implementation with runtime-backed ML 2.0 node testing."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def get_ml20_testable_nodes() -> list[tuple[int, str]]:
 
 
 class ProductionPage(BaseWorkspacePage):
-    """Operator-focused Production page for placeholder node testing."""
+    """Operator-focused Production page for runtime-backed node testing."""
 
     console_message = pyqtSignal(str)
 
@@ -71,6 +71,7 @@ class ProductionPage(BaseWorkspacePage):
         self._test_controller.test_started.connect(self._handle_test_started)
         self._test_controller.test_passed.connect(self._handle_test_passed)
         self._test_controller.test_failed.connect(self._handle_test_failed)
+        self._test_controller.test_unsupported.connect(self._handle_test_unsupported)
         self._test_controller.test_aborted.connect(self._handle_test_aborted)
 
         self.add_full_width(self.connection_section)
@@ -132,6 +133,11 @@ class ProductionPage(BaseWorkspacePage):
         self.node_status_section.set_node_status(node_id, "Fail")
         self.result_summary_section.set_result("FAIL", reason)
         self.progress_section.append_step(f"Failed test for Node {node_id} {node_name}")
+
+    def _handle_test_unsupported(self, node_id: int, node_name: str, reason: str) -> None:
+        self.node_status_section.set_node_status(node_id, "Unsupported")
+        self.result_summary_section.set_result("UNSUPPORTED", reason)
+        self.progress_section.append_step(f"Unsupported test for Node {node_id} {node_name}")
 
     def _handle_test_aborted(self, node_id: int, node_name: str, reason: str) -> None:
         self.node_status_section.set_node_status(node_id, "Aborted")
