@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QComboBox, QTextEdit, QCheckBox, QTableWidget,
     QTableWidgetItem, QHeaderView, QMessageBox, QGroupBox, QLineEdit, QSlider,
     QGridLayout)
-from PyQt6.QtCore import Qt, QTimer, QDateTime
+from PyQt6.QtCore import Qt, QTimer, QDateTime, pyqtSignal
 from PyQt6.QtGui import QPixmap,  QColor, QIcon
 from PyQt6.QtWidgets import QStackedWidget
 
@@ -95,6 +95,8 @@ def get_dark_theme(self):
     """
 
 class MainWindow(QMainWindow):
+    packet_received = pyqtSignal(object)
+
     def __init__(self):
         super().__init__()
         # --- Theme ---
@@ -2166,6 +2168,8 @@ class MainWindow(QMainWindow):
 
                     self.rx_buffer += data
                     packets, self.rx_buffer = self.backend_client.parse_rx_packets(self.rx_buffer)
+                    for packet in packets:
+                        self.packet_received.emit(packet)
                     events = self.packet_handler.handle_packets(
                         packets,
                         self.node_status,

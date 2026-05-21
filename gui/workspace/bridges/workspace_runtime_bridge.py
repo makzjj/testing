@@ -236,6 +236,23 @@ class WorkspaceRuntimeBridge:
         """Return the shared runtime widget attached to the provided parent."""
         return self._runtime_launcher.ensure_runtime_widget(parent)
 
+    def get_runtime_window(self, *, create_if_missing: bool = False):
+        """Return the shared legacy runtime window, creating it lazily when requested."""
+        if create_if_missing:
+            self._runtime_launcher.ensure_runtime_widget()
+        return self._runtime_launcher.current_window()
+
+    def get_runtime_connection_state(self, *, create_if_missing: bool = False) -> tuple[bool, bool]:
+        """Return lightweight serial/MCU connection flags from the shared runtime backend."""
+        runtime_window = self.get_runtime_window(create_if_missing=create_if_missing)
+        if runtime_window is None:
+            return False, False
+
+        backend_client = getattr(runtime_window, "backend_client", None)
+        serial_connected = bool(backend_client and backend_client.is_connected())
+        mcu_connected = serial_connected
+        return serial_connected, mcu_connected
+
     @property
     def project_definition(self) -> ProjectDefinition:
         return self._project_definition

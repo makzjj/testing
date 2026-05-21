@@ -1,8 +1,8 @@
-"""Production page implementation (Phase 1 placeholder shell)."""
+"""Production page implementation with Phase 3 runtime-backed Node 6 testing."""
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QListWidget, QPushButton, QTableWidgetItem
 
 from ..bridges import WorkspaceRuntimeBridge
@@ -10,6 +10,7 @@ from ..models import DetailItem
 from ..widgets import DetailListWidget, LabeledControl, PanelFrame, SimpleTableWidget
 from ..widgets.layout_utils import clear_layout
 from .base_page import BaseWorkspacePage
+from .production_test_controller import ProductionTestController
 
 # TODO(Phase 2/3): move ML 2.0 node mapping to project-config/model-aware constants.
 # TODO(Phase 2/3): replace old hardcoded node lists in legacy pages with model-aware config.
@@ -30,7 +31,6 @@ ML20_NODE_MAP: dict[int, str] = {
     12: "Z",
 }
 _ML20_NODE_ORDER: tuple[int, ...] = tuple(ML20_NODE_MAP)
-_PLACEHOLDER_TEST_DURATION_MS = 900
 
 
 def get_ml20_node_name(node_id: int) -> str:
@@ -62,12 +62,16 @@ class ProductionPage(BaseWorkspacePage):
         self.test_control_section = _TestControlSection()
         self.result_summary_section = _ResultSummarySection()
         self.progress_section = _TestProgressSection()
-        self._pending_result_timer: QTimer | None = None
-        self._active_node: tuple[int, str] | None = None
+        self._test_controller = ProductionTestController(bridge)
 
         self.test_control_section.run_requested.connect(self._handle_run_test)
         self.test_control_section.stop_requested.connect(self._handle_stop_test)
         self.test_control_section.clear_requested.connect(self._handle_clear_result)
+        self._test_controller.log_message.connect(self.console_message.emit)
+        self._test_controller.test_started.connect(self._handle_test_started)
+        self._test_controller.test_passed.connect(self._handle_test_passed)
+        self._test_controller.test_failed.connect(self._handle_test_failed)
+        self._test_controller.test_aborted.connect(self._handle_test_aborted)
 
         self.add_full_width(self.connection_section)
         self.add_row(self.node_status_section, self.test_control_section)
@@ -78,50 +82,31 @@ class ProductionPage(BaseWorkspacePage):
         self._refresh_connection_status()
 
     def refresh(self) -> None:
-        """Refresh lightweight placeholder status without resetting operator state."""
+        """Refresh lightweight status without resetting operator state."""
         self._refresh_connection_status()
 
     def _refresh_connection_status(self) -> None:
-        # TODO(Phase 2): replace placeholder transport state with real bridge/runtime connectivity.
-        self.connection_section.set_status(serial_connected=False, mcu_connected=False)
+        serial_connected, mcu_connected = self._bridge.get_runtime_connection_state()
+        self.connection_section.set_status(serial_connected=serial_connected, mcu_connected=mcu_connected)
 
     def _handle_run_test(self) -> None:
-        self._cancel_pending_completion()
         try:
             node_id, node_name = self.test_control_section.selected_node()
         except RuntimeError as exc:
             self.result_summary_section.set_result("READY", str(exc))
             self.console_message.emit(f"[Production] {exc}")
             return
-        self._active_node = (node_id, node_name)
-        self.node_status_section.set_node_status(node_id, "Testing")
-        self.result_summary_section.set_result("TESTING", "Running placeholder test flow.")
-        self.progress_section.append_step(f"Started placeholder test for Node {node_id} {node_name}")
-        self.console_message.emit(f"[Production] Started placeholder test for Node {node_id} {node_name}")
-
-        # TODO(Phase 2): invoke ProductionTestController and route UART/CAN test commands.
-        self._pending_result_timer = QTimer(self)
-        self._pending_result_timer.setSingleShot(True)
-        self._pending_result_timer.timeout.connect(self._complete_placeholder_test)
-        self._pending_result_timer.start(_PLACEHOLDER_TEST_DURATION_MS)
+        self._test_controller.run_test(node_id, node_name)
+        self._refresh_connection_status()
 
     def _handle_stop_test(self) -> None:
-        try:
-            node_id, _ = self.test_control_section.selected_node()
-        except RuntimeError as exc:
-            self.result_summary_section.set_result("ABORTED", str(exc))
-            self.console_message.emit(f"[Production] {exc}")
-            return
-        self._cancel_pending_completion()
-        self._active_node = None
-        self.node_status_section.set_node_status(node_id, "Aborted")
-        self.result_summary_section.set_result("ABORTED", "Operator stopped the placeholder test.")
-        self.progress_section.append_step("Placeholder test aborted")
-        self.console_message.emit("[Production] Test aborted")
+        self._test_controller.abort_test()
+        self._refresh_connection_status()
 
     def _handle_clear_result(self) -> None:
+        if self._test_controller.is_active():
+            self._test_controller.abort_test()
         self._reset_result_only()
-        self._active_node = None
         self.console_message.emit("[Production] Cleared result summary and progress")
 
     def _reset_result_only(self) -> None:
@@ -133,22 +118,25 @@ class ProductionPage(BaseWorkspacePage):
             ]
         )
 
-    def _complete_placeholder_test(self) -> None:
-        if self._active_node is None:
-            return
-        node_id, node_name = self._active_node
-        self.node_status_section.set_node_status(node_id, "PASS (placeholder)")
-        self.result_summary_section.set_result("PASS", "Placeholder test completed.")
-        self.progress_section.append_step(f"Completed placeholder test for Node {node_id} {node_name}")
-        self.console_message.emit(f"[Production] Placeholder test completed for Node {node_id} {node_name}")
-        self._cancel_pending_completion()
-        self._active_node = None
+    def _handle_test_started(self, node_id: int, node_name: str) -> None:
+        self.node_status_section.set_node_status(node_id, "Testing")
+        self.result_summary_section.set_result("TESTING", f"Running Production test for Node {node_id} {node_name}.")
+        self.progress_section.append_step(f"Started test for Node {node_id} {node_name}")
 
-    def _cancel_pending_completion(self) -> None:
-        if self._pending_result_timer is not None:
-            self._pending_result_timer.stop()
-            self._pending_result_timer.deleteLater()
-            self._pending_result_timer = None
+    def _handle_test_passed(self, node_id: int, node_name: str, reason: str) -> None:
+        self.node_status_section.set_node_status(node_id, "Pass")
+        self.result_summary_section.set_result("PASS", reason)
+        self.progress_section.append_step(f"Completed test for Node {node_id} {node_name}")
+
+    def _handle_test_failed(self, node_id: int, node_name: str, reason: str) -> None:
+        self.node_status_section.set_node_status(node_id, "Fail")
+        self.result_summary_section.set_result("FAIL", reason)
+        self.progress_section.append_step(f"Failed test for Node {node_id} {node_name}")
+
+    def _handle_test_aborted(self, node_id: int, node_name: str, reason: str) -> None:
+        self.node_status_section.set_node_status(node_id, "Aborted")
+        self.result_summary_section.set_result("ABORTED", reason)
+        self.progress_section.append_step(f"Aborted test for Node {node_id} {node_name}")
 
 
 class _ConnectionStatusSection(PanelFrame):
