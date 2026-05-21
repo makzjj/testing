@@ -214,7 +214,9 @@ class _TestControlSection(PanelFrame):
         selected = self._combo.currentData()
         if not isinstance(selected, tuple) or len(selected) != 2:
             fallback_nodes = get_ml20_testable_nodes()
-            return fallback_nodes[0]
+            if fallback_nodes:
+                return fallback_nodes[0]
+            return 1, get_ml20_node_name(1)
         node_id, node_name = selected
         return int(node_id), str(node_name)
 

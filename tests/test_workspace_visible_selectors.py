@@ -22,6 +22,7 @@ from myconfig.project_models import ProjectDefinition, ProjectFeatures, ProjectU
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+LEGACY_ACCUESS_NODE_NAMES = ["Ya", "Yb", "Nd", "Rs", "Rp", "Rn"]
 
 
 class WorkspaceVisibleSelectorTests(unittest.TestCase):
@@ -242,7 +243,7 @@ ui:
             self.assertIn("Node 7 - NZ", dropdown_text)
             self.assertIn("Node 11 - NGActuator", dropdown_text)
             self.assertNotIn("Node 1 - MCU Master", dropdown_text)
-            self.assertFalse(any(name in table_names for name in ["Ya", "Yb", "Nd", "Rs", "Rp", "Rn"]))
+            self.assertFalse(any(name in table_names for name in LEGACY_ACCUESS_NODE_NAMES))
 
     def test_project_config_reload_enables_feature_gated_navigation_from_current_editor_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
