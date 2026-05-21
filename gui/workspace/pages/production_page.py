@@ -135,6 +135,7 @@ class ProductionPage(BaseWorkspacePage):
             self.console_message.emit(f"[Production] Loaded UUID CSV: {path}")
             self.progress_section.append_step(f"Loaded UUID CSV with {len(rows)} row(s)")
             self.result_summary_section.set_result("READY", "UUID CSV validation passed.")
+            self._refresh_connection_status()
         else:
             self.console_message.emit(f"[Production] UUID CSV validation failed: {path}")
             self.result_summary_section.set_result("FAIL", "UUID CSV validation failed.")

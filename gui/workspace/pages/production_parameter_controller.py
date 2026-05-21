@@ -15,6 +15,11 @@ UUID_READ_PARAM = 0x3F
 UUID_WRITE_PARAM = 0x3D
 UUID_RESPONSE_PARAM = 0x3A
 UUID_VERIFY_TIMEOUT_MS = 3000
+UUID_MAX_VALUE = 0xFFFFFFFFFF
+UUID_DECIMAL_LENGTH = 10
+UUID_DECIMAL_FORMAT = "1YYWWNNRRR"
+MIN_TESTABLE_NODE_ID = 3
+MAX_TESTABLE_NODE_ID = 12
 
 ML20_NODE_MAP: dict[int, str] = {
     1: "MCU Master",
@@ -57,15 +62,15 @@ def parse_uuid_value(value: object) -> int:
 
     if parsed < 0:
         raise ValueError("UUID must be non-negative.")
-    if parsed > 0xFFFFFFFFFF:
+    if parsed > UUID_MAX_VALUE:
         raise ValueError("UUID exceeds 5-byte command encoding range.")
     return parsed
 
 
 def validate_uuid_format(uuid_int: int, node_id: int) -> tuple[bool, str]:
     text = f"{uuid_int:d}"
-    if len(text) != 10:
-        return False, "Decimal UUID must be exactly 10 digits in format 1YYWWNNRRR."
+    if len(text) != UUID_DECIMAL_LENGTH:
+        return False, f"Decimal UUID must be exactly {UUID_DECIMAL_LENGTH} digits in format {UUID_DECIMAL_FORMAT}."
     if text[0] != "1":
         return False, "Decimal UUID must start with prefix digit 1."
     expected_node_code = f"{node_id:02d}"
@@ -257,8 +262,11 @@ class ProductionParameterController(QObject):
         if expected_name is None:
             self._errors.append(f"Row {row_number}: node_id {node_id} is not defined in the ML 2.0 node map.")
             return
-        if not (3 <= node_id <= 12):
-            self._errors.append(f"Row {row_number}: node_id {node_id} is not testable (allowed range: 3-12).")
+        if not (MIN_TESTABLE_NODE_ID <= node_id <= MAX_TESTABLE_NODE_ID):
+            self._errors.append(
+                f"Row {row_number}: node_id {node_id} is not testable "
+                f"(allowed range: {MIN_TESTABLE_NODE_ID}-{MAX_TESTABLE_NODE_ID})."
+            )
             return
         if node_name != expected_name:
             self._errors.append(
