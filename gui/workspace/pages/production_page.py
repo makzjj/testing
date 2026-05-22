@@ -465,7 +465,7 @@ class _NodeStatusSection(PanelFrame):
 
     def _apply_status_style(self, item: QTableWidgetItem, status: str) -> None:
         normalized = status.strip().upper()
-        font = item.font() if item.font() is not None else QFont()
+        font = item.font()
         font.setBold(normalized in {"PASS", "FAIL", "TESTING", "ABORTED", "TIMEOUT", "UNSUPPORTED"})
         item.setFont(font)
         if normalized == "PASS":

@@ -27,6 +27,10 @@ class ResponsiveRow(QWidget):
         self._layout.addWidget(widget)
         self._update_direction()
 
+    def stretch_factors(self) -> tuple[int, ...]:
+        """Return configured horizontal stretch factors for each panel."""
+        return tuple(self._stretches)
+
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._update_direction()
