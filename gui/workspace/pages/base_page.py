@@ -50,6 +50,13 @@ class BaseWorkspacePage(QScrollArea):
             row.add_panel(widget)
         self.content_layout.addWidget(row)
 
+    def add_weighted_row(self, *panels: tuple[QWidget, int]) -> None:
+        """Add one horizontal row of section widgets with explicit stretch weights."""
+        row = ResponsiveRow()
+        for widget, stretch in panels:
+            row.add_panel(widget, stretch=stretch)
+        self.content_layout.addWidget(row)
+
     def add_full_width(self, widget: QWidget) -> None:
         """Add one section that spans the page width."""
         self.content_layout.addWidget(widget)

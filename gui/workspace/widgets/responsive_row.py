@@ -12,6 +12,7 @@ class ResponsiveRow(QWidget):
         super().__init__()
         self._stack_below_width = stack_below_width
         self._children: list[QWidget] = []
+        self._stretches: list[int] = []
 
         self._layout = QBoxLayout(QBoxLayout.Direction.LeftToRight, self)
         self._layout.setContentsMargins(0, 0, 0, 0)
@@ -19,9 +20,10 @@ class ResponsiveRow(QWidget):
 
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
 
-    def add_panel(self, widget: QWidget) -> None:
+    def add_panel(self, widget: QWidget, *, stretch: int = 1) -> None:
         """Add one section panel to the responsive row."""
         self._children.append(widget)
+        self._stretches.append(max(1, int(stretch)))
         self._layout.addWidget(widget)
         self._update_direction()
 
@@ -35,5 +37,5 @@ class ResponsiveRow(QWidget):
         if self._layout.direction() != direction:
             self._layout.setDirection(direction)
 
-        for index in range(len(self._children)):
-            self._layout.setStretch(index, 0 if stacked else 1)
+        for index, stretch in enumerate(self._stretches):
+            self._layout.setStretch(index, 0 if stacked else stretch)

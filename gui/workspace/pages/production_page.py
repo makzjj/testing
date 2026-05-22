@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -96,11 +97,10 @@ class ProductionPage(BaseWorkspacePage):
         self._parameter_controller.verification_finished.connect(self._handle_uuid_verification_finished)
         self._uuid_operation: str | None = None
 
-        self.add_row(self.communication_section, self.robot_nodes_section)
+        self.add_weighted_row((self.communication_section, 1), (self.robot_nodes_section, 2))
         self.add_row(self.node_status_section, self.test_control_section)
+        self.add_weighted_row((self.result_summary_section, 1), (self.progress_section, 2))
         self.add_full_width(self.uuid_section)
-        self.add_full_width(self.result_summary_section)
-        self.add_full_width(self.progress_section)
 
         self._runtime_poll_timer = QTimer(self)
         self._runtime_poll_timer.setInterval(RUNTIME_POLL_INTERVAL_MS)
@@ -373,6 +373,8 @@ class _RobotArmNodesSection(PanelFrame):
         self._connected_label.setObjectName("DetailValue")
         self._headers = ["Node", "Firmware", "Serial(UUID)", "Node Type", "Status"]
         self._table = SimpleTableWidget(self._headers, [])
+        self._table.setMinimumHeight(132)
+        self._table.setMaximumHeight(198)
         self._row_node_ids: list[int] = []
         self._table.cellClicked.connect(self._handle_cell_clicked)
         self.body_layout.addWidget(self._connected_label)
@@ -444,7 +446,13 @@ class _NodeStatusSection(PanelFrame):
         rows = [[str(node_id), node_name, "Not Tested"] for node_id, node_name in status_nodes]
         self._row_by_node_id = {node_id: row_index for row_index, (node_id, _name) in enumerate(status_nodes)}
         self.table = SimpleTableWidget(["Node ID", "Node Name", "Status"], rows)
+        self.table.setMinimumHeight(170)
+        self.table.setMaximumHeight(238)
         self.body_layout.addWidget(self.table)
+        for row_index in range(self.table.rowCount()):
+            status_item = self.table.item(row_index, 2)
+            if status_item is not None:
+                self._apply_status_style(status_item, status_item.text())
 
     def set_node_status(self, node_id: int, status: str) -> None:
         row_index = self._row_by_node_id.get(node_id)
@@ -452,7 +460,24 @@ class _NodeStatusSection(PanelFrame):
             return
         item = QTableWidgetItem(status)
         item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        self._apply_status_style(item, status)
         self.table.setItem(row_index, 2, item)
+
+    def _apply_status_style(self, item: QTableWidgetItem, status: str) -> None:
+        normalized = status.strip().upper()
+        font = item.font() if item.font() is not None else QFont()
+        font.setBold(normalized in {"PASS", "FAIL", "TESTING", "ABORTED", "TIMEOUT", "UNSUPPORTED"})
+        item.setFont(font)
+        if normalized == "PASS":
+            item.setForeground(QColor("#2E7D32"))
+        elif normalized == "FAIL":
+            item.setForeground(QColor("#C62828"))
+        elif normalized == "TESTING":
+            item.setForeground(QColor("#D98732"))
+        elif normalized in {"ABORTED", "TIMEOUT", "UNSUPPORTED"}:
+            item.setForeground(QColor("#6F7783"))
+        else:
+            item.setForeground(QColor("#594C44"))
 
 
 class _TestControlSection(PanelFrame):
@@ -562,9 +587,11 @@ class _UuidCsvSection(PanelFrame):
 
         self._error_list = QListWidget()
         self._error_list.setObjectName("SimpleList")
+        self._error_list.setMaximumHeight(88)
         self.body_layout.addWidget(self._error_list)
 
         self._preview_table: SimpleTableWidget = SimpleTableWidget(["Node ID", "Node Name", "UUID"], [])
+        self._preview_table.setMaximumHeight(216)
         self.body_layout.addWidget(self._preview_table)
 
     def set_file_path(self, path: str) -> None:
@@ -576,6 +603,7 @@ class _UuidCsvSection(PanelFrame):
             self._preview_table.deleteLater()
         table_rows = [[str(row.node_id), row.node_name, row.uuid_text] for row in rows]
         self._preview_table = SimpleTableWidget(["Node ID", "Node Name", "UUID"], table_rows)
+        self._preview_table.setMaximumHeight(216)
         self.body_layout.addWidget(self._preview_table)
 
     def set_validation(self, passed: bool, errors: list[str]) -> None:
@@ -589,6 +617,8 @@ class _TestProgressSection(PanelFrame):
     def __init__(self) -> None:
         super().__init__("Test Progress", "")
         self._list = QListWidget()
+        self._list.setMinimumHeight(120)
+        self._list.setMaximumHeight(176)
         self.body_layout.addWidget(self._list)
 
     def reset_steps(self, steps: list[str]) -> None:

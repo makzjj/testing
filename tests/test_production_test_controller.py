@@ -12,6 +12,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 
 from gui.workspace.pages.production_page import ProductionPage
+from gui.workspace.widgets import ResponsiveRow
 from gui.workspace.pages.production_parameter_controller import (
     ProductionParameterController,
     build_uuid_read_payload,
@@ -273,8 +274,54 @@ class ProductionPageWorkflowTests(unittest.TestCase):
         self._app.processEvents()
 
         self.assertEqual(page.node_status_section.table.item(6, 2).text(), "Pass")
+        pass_item = page.node_status_section.table.item(6, 2)
+        self.assertTrue(pass_item.font().bold())
+        self.assertEqual(pass_item.foreground().color().name().lower(), "#2e7d32")
         self.assertEqual(page.result_summary_section._status_label.text(), "PASS")
         self.assertIn("Node 8 RZ responded successfully.", page.result_summary_section._reason_label.text())
+
+    def test_production_page_uses_compact_section_order_with_results_before_uuid(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        first_row = page.content_layout.itemAt(0).widget()
+        second_row = page.content_layout.itemAt(1).widget()
+        third_row = page.content_layout.itemAt(2).widget()
+        fourth_widget = page.content_layout.itemAt(3).widget()
+
+        self.assertIsInstance(first_row, ResponsiveRow)
+        self.assertIsInstance(second_row, ResponsiveRow)
+        self.assertIsInstance(third_row, ResponsiveRow)
+        self.assertIs(fourth_widget, page.uuid_section)
+
+        first_layout = first_row.layout()
+        second_layout = second_row.layout()
+        third_layout = third_row.layout()
+
+        self.assertIs(first_layout.itemAt(0).widget(), page.communication_section)
+        self.assertIs(first_layout.itemAt(1).widget(), page.robot_nodes_section)
+        self.assertEqual(first_layout.stretch(0), 1)
+        self.assertEqual(first_layout.stretch(1), 2)
+
+        self.assertIs(second_layout.itemAt(0).widget(), page.node_status_section)
+        self.assertIs(second_layout.itemAt(1).widget(), page.test_control_section)
+
+        self.assertIs(third_layout.itemAt(0).widget(), page.result_summary_section)
+        self.assertIs(third_layout.itemAt(1).widget(), page.progress_section)
+        self.assertEqual(third_layout.stretch(0), 1)
+        self.assertEqual(third_layout.stretch(1), 2)
+
+    def test_production_page_node_status_fail_is_bold_red(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        page.node_status_section.set_node_status(8, "Fail")
+        fail_item = page.node_status_section.table.item(6, 2)
+        self.assertEqual(fail_item.text(), "Fail")
+        self.assertTrue(fail_item.font().bold())
+        self.assertEqual(fail_item.foreground().color().name().lower(), "#c62828")
 
     def test_production_page_shows_communication_card_controls(self) -> None:
         runtime_window = _FakeRuntimeWindow()
