@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
@@ -18,6 +22,8 @@ from ..bridges import WorkspaceRuntimeBridge
 from ..models import DetailItem
 from ..widgets import DetailListWidget, LabeledControl, PanelFrame, SimpleTableWidget
 from ..widgets.layout_utils import clear_layout
+from services.production_csv_logger import ProductionCsvLogger
+from services.production_test_result import ProductionTestResult
 from .base_page import BaseWorkspacePage
 from .production_parameter_controller import ProductionParameterController, UuidCsvRow
 from .production_test_controller import ProductionTestController
@@ -77,6 +83,8 @@ class ProductionPage(BaseWorkspacePage):
         self.progress_section = _TestProgressSection()
         self._test_controller = ProductionTestController(bridge)
         self._parameter_controller = ProductionParameterController(bridge, node_map=ML20_NODE_MAP)
+        self._result_logger = ProductionCsvLogger()
+        self._result_job_id = ""
 
         self.test_control_section.run_requested.connect(self._handle_run_test)
         self.test_control_section.stop_requested.connect(self._handle_stop_test)
@@ -107,6 +115,7 @@ class ProductionPage(BaseWorkspacePage):
         self._runtime_poll_timer.timeout.connect(self._refresh_runtime_panels)
         self._runtime_poll_timer.start()
 
+        self._refresh_result_csv_ui()
         self._reset_result_only()
         self._refresh_runtime_panels()
 
@@ -185,6 +194,9 @@ class ProductionPage(BaseWorkspacePage):
         valid = self._parameter_controller.load_uuid_csv(path)
         rows = self._parameter_controller.rows
         errors = self._parameter_controller.errors
+        self._result_job_id = Path(path).stem
+        self._result_logger.set_output_dir(Path(path).expanduser().resolve().parent)
+        self._refresh_result_csv_ui()
         self.uuid_section.set_file_path(path)
         self.uuid_section.set_preview_rows(rows)
         self.uuid_section.set_validation(valid, errors)
@@ -240,6 +252,32 @@ class ProductionPage(BaseWorkspacePage):
     def _handle_uuid_verification_finished(self, passed: bool, reason: str) -> None:
         operation = self._uuid_operation
         self._uuid_operation = None
+        try:
+            selected_node_id, selected_node_name = self.test_control_section.selected_node()
+        except RuntimeError:
+            selected_node_id, selected_node_name = -1, "Unknown"
+        selected_row = self._find_uuid_row(selected_node_id)
+        expected_value = selected_row.uuid_int if selected_row is not None else ""
+        actual_value = (
+            self._parameter_controller.last_verify_actual_uuid
+            if self._parameter_controller.last_verify_actual_uuid is not None
+            else ""
+        )
+        if not passed and actual_value == "":
+            mismatch = re.search(r"expected\s+(\d+),\s+got\s+(\d+)", reason)
+            if mismatch is not None:
+                actual_value = mismatch.group(2)
+        test_type = "UUID_WRITE_READBACK" if operation == "write" else "UUID_VERIFY"
+        self._append_result_row(
+            node_id=selected_node_id,
+            node_name=selected_node_name,
+            test_type=test_type,
+            expected_value=expected_value,
+            actual_value=actual_value,
+            passed=passed,
+            failure_reason="" if passed else reason,
+            raw_response_hex=self._parameter_controller.last_verify_raw_response_hex,
+        )
         if passed:
             self.result_summary_section.set_result("PASS", reason)
             if operation == "write":
@@ -271,21 +309,112 @@ class ProductionPage(BaseWorkspacePage):
         self.node_status_section.set_node_status(node_id, "Pass")
         self.result_summary_section.set_result("PASS", reason)
         self.progress_section.append_step(f"Completed test for Node {node_id} {node_name}")
+        self._append_result_row(
+            node_id=node_id,
+            node_name=node_name,
+            test_type="NODE_COMMUNICATION_TEST",
+            expected_value="CAN response with decoded getpos payload",
+            actual_value=self._test_controller.last_actual_value,
+            passed=True,
+            failure_reason="",
+            raw_response_hex=self._test_controller.last_raw_response_hex,
+        )
 
     def _handle_test_failed(self, node_id: int, node_name: str, reason: str) -> None:
         self.node_status_section.set_node_status(node_id, "Fail")
         self.result_summary_section.set_result("FAIL", reason)
         self.progress_section.append_step(f"Failed test for Node {node_id} {node_name}")
+        self._append_result_row(
+            node_id=node_id,
+            node_name=node_name,
+            test_type="NODE_COMMUNICATION_TEST",
+            expected_value="CAN response with decoded getpos payload",
+            actual_value=self._test_controller.last_actual_value,
+            passed=False,
+            failure_reason=reason,
+            raw_response_hex=self._test_controller.last_raw_response_hex,
+        )
 
     def _handle_test_unsupported(self, node_id: int, node_name: str, reason: str) -> None:
         self.node_status_section.set_node_status(node_id, "Unsupported")
         self.result_summary_section.set_result("UNSUPPORTED", reason)
         self.progress_section.append_step(f"Unsupported test for Node {node_id} {node_name}")
+        self._append_result_row(
+            node_id=node_id,
+            node_name=node_name,
+            test_type="NODE_COMMUNICATION_TEST",
+            expected_value="Supported production node profile",
+            actual_value="Unsupported",
+            passed=False,
+            failure_reason=reason,
+            raw_response_hex="",
+        )
 
     def _handle_test_aborted(self, node_id: int, node_name: str, reason: str) -> None:
         self.node_status_section.set_node_status(node_id, "Aborted")
         self.result_summary_section.set_result("ABORTED", reason)
         self.progress_section.append_step(f"Aborted test for Node {node_id} {node_name}")
+        self._append_result_row(
+            node_id=node_id,
+            node_name=node_name,
+            test_type="NODE_COMMUNICATION_TEST",
+            expected_value="CAN response with decoded getpos payload",
+            actual_value="Aborted",
+            passed=False,
+            failure_reason=reason,
+            raw_response_hex="",
+        )
+
+    def _find_uuid_row(self, node_id: int) -> UuidCsvRow | None:
+        for row in self._parameter_controller.rows:
+            if row.node_id == node_id:
+                return row
+        return None
+
+    def _append_result_row(
+        self,
+        *,
+        node_id: int,
+        node_name: str,
+        test_type: str,
+        expected_value: object,
+        actual_value: object,
+        passed: bool,
+        failure_reason: str,
+        raw_response_hex: str,
+    ) -> None:
+        try:
+            csv_path = self._result_logger.append_result(
+                ProductionTestResult(
+                    run_id=self._result_logger.run_id,
+                    job_id=self._result_job_id,
+                    timestamp_utc=datetime.now(timezone.utc).isoformat(),
+                    node_id=node_id,
+                    node_name=node_name,
+                    test_type=test_type,
+                    expected_value=expected_value,
+                    actual_value=actual_value,
+                    result="PASS" if passed else "FAIL",
+                    failure_reason=failure_reason,
+                    raw_response_hex=raw_response_hex,
+                )
+            )
+        except Exception as exc:
+            error = f"Failed to write production result CSV: {exc}"
+            self.console_message.emit(f"[Production] {error}")
+            self.progress_section.append_step("Result CSV write failed")
+            self.result_summary_section.set_result("ERROR", error)
+            return
+
+        self._refresh_result_csv_ui()
+        self.console_message.emit(f"[Production] Result row appended: {csv_path}")
+
+    def _refresh_result_csv_ui(self) -> None:
+        csv_path = self._result_logger.result_csv_path
+        if csv_path is None:
+            self.uuid_section.set_result_csv_path("Pending (first result row will create the file)")
+            return
+        self.uuid_section.set_result_csv_path(str(csv_path))
 
 
 class _ConnectionStatusSection(PanelFrame):
@@ -585,6 +714,11 @@ class _UuidCsvSection(PanelFrame):
         self._validation_label.setWordWrap(True)
         self.body_layout.addWidget(self._validation_label)
 
+        self._result_csv_label = QLabel("Result CSV: Pending (first result row will create the file)")
+        self._result_csv_label.setObjectName("DetailValue")
+        self._result_csv_label.setWordWrap(True)
+        self.body_layout.addWidget(self._result_csv_label)
+
         self._error_list = QListWidget()
         self._error_list.setObjectName("SimpleList")
         self._error_list.setMaximumHeight(88)
@@ -611,6 +745,9 @@ class _UuidCsvSection(PanelFrame):
         self._error_list.clear()
         if errors:
             self._error_list.addItems(errors)
+
+    def set_result_csv_path(self, path_or_status: str) -> None:
+        self._result_csv_label.setText(f"Result CSV: {path_or_status}")
 
 
 class _TestProgressSection(PanelFrame):

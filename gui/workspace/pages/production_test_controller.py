@@ -47,12 +47,24 @@ class ProductionTestController(QObject):
         self._active_node_id: int | None = None
         self._active_node_name: str | None = None
         self._active_profile: dict[str, object] | None = None
+        self._last_actual_value: str = ""
+        self._last_raw_response_hex: str = ""
 
     def is_active(self) -> bool:
         return self._active_node_id is not None
 
+    @property
+    def last_actual_value(self) -> str:
+        return self._last_actual_value
+
+    @property
+    def last_raw_response_hex(self) -> str:
+        return self._last_raw_response_hex
+
     def run_test(self, node_id: int, node_name: str) -> bool:
         self.abort_test(emit_signal=False)
+        self._last_actual_value = ""
+        self._last_raw_response_hex = ""
 
         runtime_window = self._bridge.get_runtime_window(create_if_missing=True)
         if runtime_window is None:
@@ -164,6 +176,7 @@ class ProductionTestController(QObject):
 
         decoded_key = packet.get("decoded_key")
         decoded_value = packet.get("decoded_value")
+        self._last_raw_response_hex = self._extract_raw_response_hex(packet)
         expected_decoded_key = str(profile.get("decoded_key", _DEFAULT_DECODED_KEY))
         if decoded_key != expected_decoded_key or not isinstance(decoded_value, tuple) or len(decoded_value) != 2:
             reason = f"Node {node_id} returned an invalid {profile.get('command_name', _DEFAULT_COMMAND_NAME)} response."
@@ -173,6 +186,7 @@ class ProductionTestController(QObject):
         self._timeout_timer.stop()
         node_name = self._active_node_name
         position = decoded_value[1]
+        self._last_actual_value = str(position)
         self._clear_active_state()
         self.log_message.emit(f"[Production] Node {node_id} {node_name} responded with position {position}")
         self.test_passed.emit(node_id, node_name, f"Node {node_id} {node_name} responded successfully.")
@@ -215,3 +229,15 @@ class ProductionTestController(QObject):
         if self._timeout_override_ms is not None:
             return self._timeout_override_ms
         return int(profile.get("timeout_ms", PRODUCTION_TEST_TIMEOUT_MS))
+
+    def _extract_raw_response_hex(self, packet: dict[str, object]) -> str:
+        cmd = packet.get("cmd")
+        params = packet.get("params")
+        values: list[int] = []
+        if isinstance(cmd, int):
+            values.append(cmd & 0xFF)
+        if isinstance(params, list):
+            values.extend(int(value) & 0xFF for value in params if isinstance(value, int))
+        if not values:
+            return ""
+        return " ".join(f"{value:02X}" for value in values)

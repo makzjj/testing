@@ -160,6 +160,8 @@ class ProductionParameterController(QObject):
         self._verify_rows: list[UuidCsvRow] = []
         self._verify_index = 0
         self._pending_row: UuidCsvRow | None = None
+        self._last_verify_actual_uuid: int | None = None
+        self._last_verify_raw_response_hex: str = ""
 
         self._verify_timer = QTimer(self)
         self._verify_timer.setSingleShot(True)
@@ -176,6 +178,14 @@ class ProductionParameterController(QObject):
     @property
     def errors(self) -> list[str]:
         return list(self._errors)
+
+    @property
+    def last_verify_actual_uuid(self) -> int | None:
+        return self._last_verify_actual_uuid
+
+    @property
+    def last_verify_raw_response_hex(self) -> str:
+        return self._last_verify_raw_response_hex
 
     def has_valid_rows(self) -> bool:
         return bool(self._rows) and not self._errors
@@ -272,6 +282,8 @@ class ProductionParameterController(QObject):
         self._verify_rows = [selected_row]
         self._verify_index = 0
         self._pending_row = None
+        self._last_verify_actual_uuid = None
+        self._last_verify_raw_response_hex = ""
         self.log_message.emit(f"[Production] Verifying UUID for Node {selected_row.node_id} {selected_row.node_name}")
         self._send_next_verify_request()
         return True
@@ -417,6 +429,8 @@ class ProductionParameterController(QObject):
         if actual_uuid is None:
             self._finish_verify_failure("UUID response decode failed.")
             return
+        self._last_verify_actual_uuid = actual_uuid
+        self._last_verify_raw_response_hex = " ".join(f"{value & 0xFF:02X}" for value in [cmd, *params])
 
         if actual_uuid != pending_row.uuid_int:
             self._finish_verify_failure(
