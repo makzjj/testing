@@ -272,7 +272,7 @@ def build_safe_movement_profile(
                 command_id=None,
                 command_name="WAIT_FOR_MOVE_END",
                 payload=[],
-                timeout_ms=max(timeout_ms, 4000),
+                timeout_ms=timeout_ms,
                 stop_on_fail=True,
                 expected_response_command_id=CMD_TPOS,
                 send_command=False,

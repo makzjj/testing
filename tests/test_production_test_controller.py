@@ -25,7 +25,9 @@ from gui.workspace.pages.production_parameter_controller import (
 from gui.workspace.pages.production_test_controller import (
     ProductionTestController,
     build_basic_test_profile,
+    build_safe_movement_profile,
     decode_getpos_response,
+    decode_tpos_state_response,
     decode_getver_response,
     decode_interrupt_response,
 )
@@ -307,6 +309,10 @@ class ProductionTestControllerTests(unittest.TestCase):
         self.assertEqual(decode_getver_response([0x3A, 1, 2, 3]), (True, "1.2.3", ""))
         self.assertEqual(decode_getpos_response([0x00, 0x00, 0x01, 0x00]), (True, 256, ""))
         self.assertEqual(
+            decode_tpos_state_response([ord("E"), 0x00, 0x00, 0x00, 0x10]),
+            (True, {"state": "E", "position": 16}, ""),
+        )
+        self.assertEqual(
             decode_interrupt_response([0x01, 0x00]),
             (True, {"int0_status": 1, "int1_status": 0}, ""),
         )
@@ -329,6 +335,122 @@ class ProductionTestControllerTests(unittest.TestCase):
         self.assertIsNotNone(controller.last_final_result)
         self.assertEqual(controller.last_final_result.final_result, "PASS")
         self.assertEqual([step.step_id for step in controller.last_final_result.step_results], ["echo", "getver", "getpos", "interrupt"])
+
+    def test_movement_profile_runs_steps_in_order_and_passes_on_tpos_end(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        controller = ProductionTestController(bridge, timeout_ms=80)
+        step_ids: list[str] = []
+        controller.step_finished.connect(lambda _node_id, _node_name, step: step_ids.append(step.step_id))
+
+        self.assertTrue(controller.run_test(8, "RZ", profile_mode="movement"))
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xCB, "params": [0xA5, 0x5A]})
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xC8, "params": [0x3A, 1, 2, 3]})
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x64]})
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xD8, "params": [0, 0]})
+        self._app.processEvents()
+
+        # WAIT step should ignore start state and pass on end state.
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0x81, "params": [ord("S"), 0, 0, 0, 100]})
+        self._app.processEvents()
+        self.assertTrue(controller.is_active())
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0x81, "params": [ord("E"), 0, 0, 0, 116]})
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x74]})
+        self._app.processEvents()
+
+        self.assertFalse(controller.is_active())
+        self.assertIsNotNone(controller.last_final_result)
+        self.assertEqual(controller.last_final_result.final_result, "PASS")
+        self.assertIn("verify_position_delta", step_ids)
+        self.assertIn("stop_motor", step_ids)
+        sent_cmds = [cmd for _node, cmd in runtime_window.backend_client.sent_commands]
+        self.assertIn([0x84, 0x00, 0x14], sent_cmds)
+        self.assertIn([0xDD], sent_cmds)
+
+    def test_movement_profile_tpos_lr_state_fails_and_sends_stop(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        controller = ProductionTestController(bridge, timeout_ms=80)
+        self.assertTrue(controller.run_test(8, "RZ", profile_mode="movement"))
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xCB, "params": [0xA5, 0x5A]})
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xC8, "params": [0x3A, 1, 2, 3]})
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x64]})
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xD8, "params": [0, 0]})
+        self._app.processEvents()
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0x81, "params": [ord("L"), 0, 0, 0, 104]})
+        self._app.processEvents()
+
+        self.assertFalse(controller.is_active())
+        self.assertIn(8, runtime_window.backend_client.stop_commands)
+        self.assertEqual(controller.last_final_result.final_result, "FAIL")
+
+    def test_movement_profile_timeout_sends_stop(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        controller = ProductionTestController(bridge, timeout_ms=20)
+        self.assertTrue(controller.run_test(8, "RZ", profile_mode="movement"))
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xCB, "params": [0xA5, 0x5A]})
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xC8, "params": [0x3A, 1, 2, 3]})
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x64]})
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xD8, "params": [0, 0]})
+        self._app.processEvents()
+
+        deadline = time.monotonic() + 0.8
+        while time.monotonic() < deadline and controller.is_active():
+            self._app.processEvents()
+            time.sleep(0.01)
+
+        self.assertIn(8, runtime_window.backend_client.stop_commands)
+        self.assertEqual(controller.last_final_result.final_result, "TIMEOUT")
+
+    def test_movement_profile_position_delta_outside_tolerance_fails(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        controller = ProductionTestController(bridge, timeout_ms=80)
+        self.assertTrue(controller.run_test(8, "RZ", profile_mode="movement"))
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xCB, "params": [0xA5, 0x5A]})
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xC8, "params": [0x3A, 1, 2, 3]})
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x64]})
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xD8, "params": [0, 0]})
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0x81, "params": [ord("E"), 0, 0, 0, 108]})
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x6C]})
+        self._app.processEvents()
+
+        self.assertFalse(controller.is_active())
+        self.assertEqual(controller.last_final_result.final_result, "FAIL")
+
+    def test_movement_profile_wrong_node_response_is_rejected(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        controller = ProductionTestController(bridge, timeout_ms=80)
+        self.assertTrue(controller.run_test(8, "RZ", profile_mode="movement"))
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xCB, "params": [0xA5, 0x5A]})
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xC8, "params": [0x3A, 1, 2, 3]})
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x64]})
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xD8, "params": [0, 0]})
+        self._app.processEvents()
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 7, "cmd": 0x81, "params": [ord("E"), 0, 0, 0, 116]})
+        self._app.processEvents()
+        self.assertTrue(controller.is_active())
+        controller.abort_test()
+
+    def test_build_safe_movement_profile_contains_expected_steps(self) -> None:
+        profile = build_safe_movement_profile(8, "RZ", timeout_ms=120)
+        self.assertEqual(
+            [step.step_id for step in profile.steps],
+            [
+                "echo",
+                "getver",
+                "read_initial_position",
+                "interrupt_initial",
+                "set_safe_velocity",
+                "move_to_position",
+                "wait_move_end",
+                "read_final_position",
+                "verify_position_delta",
+                "stop_motor",
+            ],
+        )
 
 
 class ProductionPageWorkflowTests(unittest.TestCase):
@@ -399,6 +521,34 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             with csv_path.open("r", encoding="utf-8", newline="") as handle:
                 rows = list(csv.DictReader(handle))
             self.assertGreaterEqual(len(rows), 5)
+            self.assertEqual(rows[-1]["test_type"], "PROFILE_SUMMARY")
+
+    def test_movement_profile_step_results_append_to_csv_logger(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+        page.test_control_section._profile_combo.setCurrentIndex(1)  # movement
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            page._result_logger.set_output_dir(Path(tmpdir))
+            page._handle_run_test()
+            runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0xCB, "params": [0xA5, 0x5A]})
+            runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0xC8, "params": [0x3A, 1, 2, 3]})
+            runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x10]})
+            runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0xD8, "params": [0, 0]})
+            runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0x81, "params": [ord('E'), 0x00, 0x00, 0x00, 0x20]})
+            runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x20]})
+            self._app.processEvents()
+
+            csv_path = page._result_logger.result_csv_path
+            self.assertIsNotNone(csv_path)
+            with csv_path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            test_types = [row["test_type"] for row in rows]
+            self.assertIn("read_initial_position", test_types)
+            self.assertIn("wait_move_end", test_types)
+            self.assertIn("verify_position_delta", test_types)
+            self.assertIn("stop_motor", test_types)
             self.assertEqual(rows[-1]["test_type"], "PROFILE_SUMMARY")
 
     def test_production_page_uses_compact_section_order_with_results_before_uuid(self) -> None:
