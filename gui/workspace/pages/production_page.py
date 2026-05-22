@@ -27,6 +27,7 @@ from services.production_test_result import ProductionTestResult
 from .base_page import BaseWorkspacePage
 from .production_parameter_controller import ProductionParameterController, UuidCsvRow
 from .production_test_controller import ProductionTestController
+from .production_test_models import FinalNodeResult, StepResult
 
 # TODO(Phase 2/3): move ML 2.0 node mapping to project-config/model-aware constants.
 # TODO(Phase 2/3): replace old hardcoded node lists in legacy pages with model-aware config.
@@ -101,6 +102,9 @@ class ProductionPage(BaseWorkspacePage):
         self._test_controller.test_failed.connect(self._handle_test_failed)
         self._test_controller.test_unsupported.connect(self._handle_test_unsupported)
         self._test_controller.test_aborted.connect(self._handle_test_aborted)
+        self._test_controller.profile_started.connect(self._handle_profile_started)
+        self._test_controller.step_finished.connect(self._handle_step_finished)
+        self._test_controller.profile_finished.connect(self._handle_profile_finished)
         self._parameter_controller.log_message.connect(self.console_message.emit)
         self._parameter_controller.verification_finished.connect(self._handle_uuid_verification_finished)
         self._uuid_operation: str | None = None
@@ -173,7 +177,9 @@ class ProductionPage(BaseWorkspacePage):
             self.result_summary_section.set_result("READY", str(exc))
             self.console_message.emit(f"[Production] {exc}")
             return
-        self._test_controller.run_test(node_id, node_name)
+        selected_row = self._find_uuid_row(node_id)
+        expected_uuid = selected_row.uuid_int if selected_row is not None else None
+        self._test_controller.run_test(node_id, node_name, expected_uuid=expected_uuid)
         self._refresh_connection_status()
 
     def _handle_stop_test(self) -> None:
@@ -303,36 +309,38 @@ class ProductionPage(BaseWorkspacePage):
     def _handle_test_started(self, node_id: int, node_name: str) -> None:
         self.node_status_section.set_node_status(node_id, "Testing")
         self.result_summary_section.set_result("TESTING", f"Running Production test for Node {node_id} {node_name}.")
-        self.progress_section.append_step(f"Started test for Node {node_id} {node_name}")
+        self.progress_section.append_step(f"Started test profile for Node {node_id} {node_name}")
+
+    def _handle_profile_started(self, _node_id: int, _node_name: str, step_names: object) -> None:
+        names = [str(value) for value in step_names] if isinstance(step_names, list) else []
+        self.progress_section.set_profile_steps(names)
+
+    def _handle_step_finished(self, node_id: int, node_name: str, step_result: object) -> None:
+        if not isinstance(step_result, StepResult):
+            return
+        self.progress_section.mark_profile_step(step_result.step_name, step_result.result)
+        self._append_result_row(
+            node_id=node_id,
+            node_name=node_name,
+            test_type=step_result.step_id,
+            expected_value=step_result.expected_value,
+            actual_value=step_result.actual_value,
+            result_status=step_result.result,
+            failure_reason=step_result.failure_reason,
+            raw_response_hex=step_result.raw_response_hex,
+        )
 
     def _handle_test_passed(self, node_id: int, node_name: str, reason: str) -> None:
         self.node_status_section.set_node_status(node_id, "Pass")
         self.result_summary_section.set_result("PASS", reason)
-        self.progress_section.append_step(f"Completed test for Node {node_id} {node_name}")
-        self._append_result_row(
-            node_id=node_id,
-            node_name=node_name,
-            test_type="NODE_COMMUNICATION_TEST",
-            expected_value="CAN response with decoded getpos payload",
-            actual_value=self._test_controller.last_actual_value,
-            passed=True,
-            failure_reason="",
-            raw_response_hex=self._test_controller.last_raw_response_hex,
-        )
+        self.progress_section.append_step(f"Completed test profile for Node {node_id} {node_name}")
 
     def _handle_test_failed(self, node_id: int, node_name: str, reason: str) -> None:
-        self.node_status_section.set_node_status(node_id, "Fail")
-        self.result_summary_section.set_result("FAIL", reason)
-        self.progress_section.append_step(f"Failed test for Node {node_id} {node_name}")
-        self._append_result_row(
-            node_id=node_id,
-            node_name=node_name,
-            test_type="NODE_COMMUNICATION_TEST",
-            expected_value="CAN response with decoded getpos payload",
-            actual_value=self._test_controller.last_actual_value,
-            passed=False,
-            failure_reason=reason,
-            raw_response_hex=self._test_controller.last_raw_response_hex,
+        is_timeout = "Timed out" in reason
+        self.node_status_section.set_node_status(node_id, "Timeout" if is_timeout else "Fail")
+        self.result_summary_section.set_result("TIMEOUT" if is_timeout else "FAIL", reason)
+        self.progress_section.append_step(
+            f"{'Timed out' if is_timeout else 'Failed'} test profile for Node {node_id} {node_name}"
         )
 
     def _handle_test_unsupported(self, node_id: int, node_name: str, reason: str) -> None:
@@ -342,10 +350,10 @@ class ProductionPage(BaseWorkspacePage):
         self._append_result_row(
             node_id=node_id,
             node_name=node_name,
-            test_type="NODE_COMMUNICATION_TEST",
+            test_type="PROFILE_UNSUPPORTED",
             expected_value="Supported production node profile",
             actual_value="Unsupported",
-            passed=False,
+            result_status="FAIL",
             failure_reason=reason,
             raw_response_hex="",
         )
@@ -353,15 +361,19 @@ class ProductionPage(BaseWorkspacePage):
     def _handle_test_aborted(self, node_id: int, node_name: str, reason: str) -> None:
         self.node_status_section.set_node_status(node_id, "Aborted")
         self.result_summary_section.set_result("ABORTED", reason)
-        self.progress_section.append_step(f"Aborted test for Node {node_id} {node_name}")
+        self.progress_section.append_step(f"Aborted test profile for Node {node_id} {node_name}")
+
+    def _handle_profile_finished(self, final_node_result: object) -> None:
+        if not isinstance(final_node_result, FinalNodeResult):
+            return
         self._append_result_row(
-            node_id=node_id,
-            node_name=node_name,
-            test_type="NODE_COMMUNICATION_TEST",
-            expected_value="CAN response with decoded getpos payload",
-            actual_value="Aborted",
-            passed=False,
-            failure_reason=reason,
+            node_id=final_node_result.node_id,
+            node_name=final_node_result.node_name,
+            test_type="PROFILE_SUMMARY",
+            expected_value="All required profile steps PASS",
+            actual_value=f"{len(final_node_result.step_results)} steps",
+            result_status=final_node_result.final_result,
+            failure_reason=final_node_result.failure_reason,
             raw_response_hex="",
         )
 
@@ -379,10 +391,13 @@ class ProductionPage(BaseWorkspacePage):
         test_type: str,
         expected_value: object,
         actual_value: object,
-        passed: bool,
+        result_status: str | None = None,
+        passed: bool | None = None,
         failure_reason: str,
         raw_response_hex: str,
     ) -> None:
+        if result_status is None:
+            result_status = "PASS" if bool(passed) else "FAIL"
         try:
             csv_path = self._result_logger.append_result(
                 ProductionTestResult(
@@ -394,7 +409,7 @@ class ProductionPage(BaseWorkspacePage):
                     test_type=test_type,
                     expected_value=expected_value,
                     actual_value=actual_value,
-                    result="PASS" if passed else "FAIL",
+                    result=result_status,
                     failure_reason=failure_reason,
                     raw_response_hex=raw_response_hex,
                 )
@@ -757,10 +772,27 @@ class _TestProgressSection(PanelFrame):
         self._list.setMinimumHeight(120)
         self._list.setMaximumHeight(176)
         self.body_layout.addWidget(self._list)
+        self._profile_step_rows: dict[str, int] = {}
 
     def reset_steps(self, steps: list[str]) -> None:
         self._list.clear()
         self._list.addItems(steps)
+        self._profile_step_rows = {}
+
+    def set_profile_steps(self, step_names: list[str]) -> None:
+        self._list.clear()
+        self._profile_step_rows = {}
+        for index, step_name in enumerate(step_names, start=1):
+            text = f"{index}. {step_name} - PENDING"
+            self._list.addItem(text)
+            self._profile_step_rows[step_name] = index - 1
+
+    def mark_profile_step(self, step_name: str, status: str) -> None:
+        row_index = self._profile_step_rows.get(step_name)
+        if row_index is None:
+            self.append_step(f"{step_name} - {status}")
+            return
+        self._list.item(row_index).setText(f"{row_index + 1}. {step_name} - {status}")
 
     def append_step(self, step: str) -> None:
         self._list.addItem(step)
