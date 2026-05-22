@@ -301,16 +301,14 @@ class ProductionPageWorkflowTests(unittest.TestCase):
 
         self.assertIs(first_layout.itemAt(0).widget(), page.communication_section)
         self.assertIs(first_layout.itemAt(1).widget(), page.robot_nodes_section)
-        self.assertEqual(first_layout.stretch(0), 1)
-        self.assertEqual(first_layout.stretch(1), 2)
 
         self.assertIs(second_layout.itemAt(0).widget(), page.node_status_section)
         self.assertIs(second_layout.itemAt(1).widget(), page.test_control_section)
 
         self.assertIs(third_layout.itemAt(0).widget(), page.result_summary_section)
         self.assertIs(third_layout.itemAt(1).widget(), page.progress_section)
-        self.assertEqual(third_layout.stretch(0), 1)
-        self.assertEqual(third_layout.stretch(1), 2)
+        self.assertEqual(getattr(first_row, "_stretches", []), [1, 2])
+        self.assertEqual(getattr(third_row, "_stretches", []), [1, 2])
 
     def test_production_page_node_status_fail_is_bold_red(self) -> None:
         runtime_window = _FakeRuntimeWindow()
