@@ -39,6 +39,8 @@ class TestStep:
     timeout_ms: int = 3000
     stop_on_fail: bool = True
     expected_response_command_id: int | None = None
+    send_command: bool = True
+    wait_for_response: bool = True
 
 
 @dataclass(frozen=True)

@@ -179,7 +179,8 @@ class ProductionPage(BaseWorkspacePage):
             return
         selected_row = self._find_uuid_row(node_id)
         expected_uuid = selected_row.uuid_int if selected_row is not None else None
-        self._test_controller.run_test(node_id, node_name, expected_uuid=expected_uuid)
+        profile_mode = self.test_control_section.selected_profile_mode()
+        self._test_controller.run_test(node_id, node_name, expected_uuid=expected_uuid, profile_mode=profile_mode)
         self._refresh_connection_status()
 
     def _handle_stop_test(self) -> None:
@@ -631,6 +632,11 @@ class _TestControlSection(PanelFrame):
 
     def __init__(self) -> None:
         super().__init__("Test Control", "")
+        self._profile_combo = QComboBox()
+        self._profile_combo.addItem("Communication Profile", "basic")
+        self._profile_combo.addItem("Safe Movement Profile", "movement")
+        self.body_layout.addWidget(LabeledControl("Test Profile", self._profile_combo))
+
         self._combo = QComboBox()
         self._combo.setObjectName("AxisSelectorCombo")
         for node_id, node_name in get_ml20_testable_nodes():
@@ -667,6 +673,12 @@ class _TestControlSection(PanelFrame):
             raise RuntimeError("No ML 2.0 testable nodes configured for Production.")
         node_id, node_name = selected
         return int(node_id), str(node_name)
+
+    def selected_profile_mode(self) -> str:
+        value = self._profile_combo.currentData()
+        if not isinstance(value, str):
+            return "basic"
+        return value
 
 
 class _ResultSummarySection(PanelFrame):
