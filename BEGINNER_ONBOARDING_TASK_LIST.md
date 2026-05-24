@@ -20,7 +20,7 @@
 - [ ] `RuntimePacketHandler.handle_packet()` (`services/runtime_packet_handler.py`)
 
 ## 4) Features to learn in sequence
-- [ ] Connection + COM11 behavior (`refresh_ports`, `connect_serial`) in `gui/main_window.py`
+- [ ] Connection + serial port behavior (`refresh_ports`, `connect_serial`) in `gui/main_window.py`
 - [ ] Node detection/status display (`main_window.py`, `production_page.py`)
 - [ ] UUID CSV load/verify/write-readback (`production_parameter_controller.py`, `production_page.py`)
 - [ ] Production profile engine basic + movement (`production_test_models.py`, `production_test_controller.py`)
