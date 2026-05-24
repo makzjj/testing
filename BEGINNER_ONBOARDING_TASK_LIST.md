@@ -1,14 +1,14 @@
 # Beginner Onboarding Task List
 
 ## 1) Project entry and app flow
-- [ ] Read `/home/runner/work/testing/testing/main.py` (`main()` startup).
-- [ ] Read `/home/runner/work/testing/testing/gui/program_selector_window.py` (project selection to workspace).
-- [ ] Read `/home/runner/work/testing/testing/gui/workspace/shell/project_workspace_window.py` (`_build_pages`, `set_active_page`).
+- [ ] Read `main.py` (`main()` startup).
+- [ ] Read `gui/program_selector_window.py` (project selection to workspace).
+- [ ] Read `gui/workspace/shell/project_workspace_window.py` (`_build_pages`, `set_active_page`).
 
 ## 2) Architecture in 3 layers
-- [ ] UI pages: `/home/runner/work/testing/testing/gui/workspace/pages/`
-- [ ] Bridge layer: `/home/runner/work/testing/testing/gui/workspace/bridges/workspace_runtime_bridge.py`
-- [ ] Backend/services: `/home/runner/work/testing/testing/services/` + `/home/runner/work/testing/testing/serial_conn/`
+- [ ] UI pages: `gui/workspace/pages/`
+- [ ] Bridge layer: `gui/workspace/bridges/workspace_runtime_bridge.py`
+- [ ] Backend/services: `services/` + `serial_conn/`
 
 ## 3) First high-level functions
 - [ ] `ProductionPage._handle_run_test()` (`production_page.py`)
@@ -27,17 +27,17 @@
 - [ ] CSV result logging per step/profile (`production_page.py`, `production_csv_logger.py`)
 
 ## 5) Protocol and packet basics
-- [ ] Outgoing command build: `/home/runner/work/testing/testing/serial_conn/commands.py`
-- [ ] Incoming parse: `/home/runner/work/testing/testing/serial_conn/packet_parser.py`
-- [ ] Command decoding: `/home/runner/work/testing/testing/data/binary_cmd_parser.py`
-- [ ] Command table reference: `/home/runner/work/testing/testing/myconfig/constants.py`
+- [ ] Outgoing command build: `serial_conn/commands.py`
+- [ ] Incoming parse: `serial_conn/packet_parser.py`
+- [ ] Command decoding: `data/binary_cmd_parser.py`
+- [ ] Command table reference: `myconfig/constants.py`
 
 ## 6) Testing-first path
-- [ ] Read `/home/runner/work/testing/testing/tests/test_production_test_controller.py`
-- [ ] Read `/home/runner/work/testing/testing/tests/test_production_csv_logger.py`
-- [ ] Read `/home/runner/work/testing/testing/tests/test_backend_runtime_services.py`
-- [ ] Run tests: `/home/runner/work/testing/testing/scripts/test.sh`
-- [ ] Run build check: `/home/runner/work/testing/testing/scripts/build.sh`
+- [ ] Read `tests/test_production_test_controller.py`
+- [ ] Read `tests/test_production_csv_logger.py`
+- [ ] Read `tests/test_backend_runtime_services.py`
+- [ ] Run tests: `scripts/test.sh`
+- [ ] Run build check: `scripts/build.sh`
 
 ## 7) Practical first contribution tasks
 - [ ] Add one small edge-case test in `test_production_test_controller.py`
@@ -46,7 +46,7 @@
 - [ ] Identify one low-risk refactor candidate in Production page/controller
 
 ## 8) Postpone until later
-- [ ] Deep refactor of `/home/runner/work/testing/testing/gui/main_window.py`
+- [ ] Deep refactor of `gui/main_window.py`
 - [ ] Broad protocol changes in packet parser
 - [ ] New module families (PWM/PID/QEI/HMI/Needle) before mastering current Production flow
 
