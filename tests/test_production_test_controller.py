@@ -297,6 +297,16 @@ class ProductionTestControllerTests(unittest.TestCase):
         self.assertTrue(any(event[0] == "unsupported" and event[1] == 2 for event in events))
         self.assertFalse(controller.is_active())
 
+    def test_unknown_profile_mode_falls_back_to_basic_profile(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        controller = ProductionTestController(bridge, timeout_ms=100)
+
+        self.assertTrue(controller.run_test(8, "RZ", profile_mode="unsupported-mode"))
+        self.assertEqual(runtime_window.backend_client.sent_commands[0], (8, [0xCB, 0xA5, 0x5A]))
+        self.assertTrue(controller.is_active())
+        controller.abort_test()
+
     def test_tolerance_exact_abs_and_range(self) -> None:
         self.assertEqual(evaluate_tolerance(7, 7, Tolerance(exact_match=7)), (True, ""))
         self.assertFalse(evaluate_tolerance(7, 6, Tolerance(exact_match=7))[0])
