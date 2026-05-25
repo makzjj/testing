@@ -520,6 +520,11 @@ class ProductionPage(BaseWorkspacePage):
     def _write_uuid_result_to_ipqc_workbook(self, actual_value: object, passed: bool) -> bool:
         """Write UUID summary result to workbook.
 
+        Side effects:
+        - Updates completed workbook path and last workbook action labels.
+        - Emits production console messages.
+        - Sets result summary to REPORTING ERROR when write/save fails.
+
         Returns True only when workbook write/save/reporting succeeds.
         Returns False when no workbook is loaded or when write/save fails.
         """
@@ -558,11 +563,15 @@ class ProductionPage(BaseWorkspacePage):
         serial_text = expected.serial_number.strip()
         if not serial_text:
             return False
+        return self._is_valid_uuid_text(serial_text)
+
+    @staticmethod
+    def _is_valid_uuid_text(serial_text: str) -> bool:
         try:
             parse_uuid_value(serial_text)
+            return True
         except ValueError:
             return False
-        return True
 
 
 class _ConnectionStatusSection(PanelFrame):
