@@ -28,6 +28,18 @@ class IpqcExpectedSummary:
 class IpqcExcelAdapter:
     """Loads an IPQC workbook template and reads/writes summary-sheet values."""
 
+    _SUMMARY_PARAMETER_ALIASES: dict[str, int] = {
+        "s/n": 4,
+        "sn": 4,
+        "serial": 4,
+        "serial number": 4,
+        "uuid": 4,
+        "pwm": 5,
+        "other parameters": 6,
+        "other parameter": 6,
+        "other": 6,
+    }
+
     def __init__(self) -> None:
         self._template_path: Path | None = None
         self._workbook: Workbook | None = None
@@ -112,13 +124,10 @@ class IpqcExcelAdapter:
 
     def _resolve_summary_row(self, parameter_name: str) -> int:
         normalized = parameter_name.strip().lower().replace("_", " ")
-        if normalized in {"s/n", "sn", "serial", "serial number", "uuid"}:
-            return 4
-        if normalized in {"pwm"}:
-            return 5
-        if normalized in {"other parameters", "other parameter", "other"}:
-            return 6
-        raise ValueError(f"Unsupported summary parameter '{parameter_name}'.")
+        row = self._SUMMARY_PARAMETER_ALIASES.get(normalized)
+        if row is None:
+            raise ValueError(f"Unsupported summary parameter '{parameter_name}'.")
+        return row
 
     def suggest_completed_output_path(self) -> Path:
         template_path = self._require_template_path()

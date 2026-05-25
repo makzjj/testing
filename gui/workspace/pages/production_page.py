@@ -518,6 +518,11 @@ class ProductionPage(BaseWorkspacePage):
         self.uuid_section.set_result_csv_path(str(csv_path))
 
     def _write_uuid_result_to_ipqc_workbook(self, actual_value: object, passed: bool) -> bool:
+        """Write UUID summary result to workbook.
+
+        Returns True only when workbook write/save/reporting succeeds.
+        Returns False when no workbook is loaded or when write/save fails.
+        """
         if not self._ipqc_excel_adapter.has_loaded_workbook():
             return False
         try:
@@ -548,13 +553,16 @@ class ProductionPage(BaseWorkspacePage):
             return False
         try:
             expected = self._ipqc_excel_adapter.read_expected_summary(strict=False)
-            serial_text = expected.serial_number.strip()
-            if not serial_text:
-                return False
-            parse_uuid_value(serial_text)
-            return True
-        except Exception:
+        except (RuntimeError, ValueError):
             return False
+        serial_text = expected.serial_number.strip()
+        if not serial_text:
+            return False
+        try:
+            parse_uuid_value(serial_text)
+        except ValueError:
+            return False
+        return True
 
 
 class _ConnectionStatusSection(PanelFrame):
