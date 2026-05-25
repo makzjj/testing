@@ -466,6 +466,20 @@ class ProductionPageWorkflowTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls._app = QApplication.instance() or QApplication([])
 
+    @staticmethod
+    def _create_ipqc_workbook(path: Path, *, with_optional_fields: bool = True) -> None:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "3X"
+        wb.create_sheet("3X_D")
+        wb.create_sheet("3X_A")
+        ws["B4"] = "1223303010"
+        ws["B5"] = "100"
+        if with_optional_fields:
+            ws["B3"] = "operator-a"
+            ws["B6"] = "N/A"
+        wb.save(path)
+
     def test_production_page_updates_ui_for_runtime_backed_selected_node_pass(self) -> None:
         runtime_window = _FakeRuntimeWindow()
         bridge = _FakeBridge(runtime_window)
@@ -635,16 +649,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = Path(tmpdir) / "ipqc.xlsx"
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "3X"
-            wb.create_sheet("3X_D")
-            wb.create_sheet("3X_A")
-            ws["B3"] = "operator-a"
-            ws["B4"] = "1223303010"
-            ws["B5"] = "100"
-            ws["B6"] = "N/A"
-            wb.save(workbook_path)
+            self._create_ipqc_workbook(workbook_path, with_optional_fields=True)
 
             with patch(
                 "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
@@ -666,14 +671,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = Path(tmpdir) / "ipqc.xlsx"
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "3X"
-            wb.create_sheet("3X_D")
-            wb.create_sheet("3X_A")
-            ws["B4"] = "1223303010"
-            ws["B5"] = "100"
-            wb.save(workbook_path)
+            self._create_ipqc_workbook(workbook_path, with_optional_fields=False)
 
             with patch(
                 "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",

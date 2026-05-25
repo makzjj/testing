@@ -18,7 +18,7 @@ except ImportError:  # pragma: no cover - environment dependent.
 
 @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC Excel adapter tests.")
 class IpqcExcelAdapterTests(unittest.TestCase):
-    def _create_ipqc_template(self, base_dir: str, filename: str = "ipqc_template.xlsx") -> Path:
+    def _create_ipqc_template(self, base_dir: str | Path, filename: str = "ipqc_template.xlsx") -> Path:
         workbook = Workbook()
         summary = workbook.active
         summary.title = "3X"

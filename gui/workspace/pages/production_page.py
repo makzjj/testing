@@ -50,6 +50,7 @@ ML20_NODE_MAP: dict[int, str] = {
 }
 _ML20_NODE_ORDER: tuple[int, ...] = tuple(ML20_NODE_MAP)
 RUNTIME_POLL_INTERVAL_MS = 1000
+WORKBOOK_OUTPUT_PENDING = "Pending"
 
 
 def get_ml20_node_name(node_id: int) -> str:
@@ -124,7 +125,7 @@ class ProductionPage(BaseWorkspacePage):
         self._runtime_poll_timer.start()
 
         self._refresh_result_csv_ui()
-        self.uuid_section.set_workbook_output_path("Pending")
+        self.uuid_section.set_workbook_output_path(WORKBOOK_OUTPUT_PENDING)
         self._reset_result_only()
         self._refresh_runtime_panels()
 
@@ -229,7 +230,7 @@ class ProductionPage(BaseWorkspacePage):
             self,
             "Load IPQC Workbook",
             "",
-            "Excel Files (*.xlsx *.xlsm *.xltx *.xltm)",
+            "Excel Files (*.xlsx *.xlsm)",
         )
         if not path:
             return
@@ -242,7 +243,7 @@ class ProductionPage(BaseWorkspacePage):
             self._result_job_id = Path(path).stem
             self._result_logger.set_output_dir(Path(path).expanduser().resolve().parent)
             self._refresh_result_csv_ui()
-            self.uuid_section.set_workbook_output_path("Pending")
+            self.uuid_section.set_workbook_output_path(WORKBOOK_OUTPUT_PENDING)
             self._refresh_ipqc_expected_preview()
         except Exception as exc:
             self.console_message.emit(f"[Production] Failed to load IPQC workbook: {exc}")

@@ -9,9 +9,11 @@ from typing import Any
 
 try:
     from openpyxl import load_workbook
+    from openpyxl.worksheet.worksheet import Worksheet
     from openpyxl.workbook.workbook import Workbook
 except ImportError:  # pragma: no cover - guarded at runtime.
     Workbook = Any  # type: ignore[assignment]
+    Worksheet = Any  # type: ignore[assignment]
     load_workbook = None  # type: ignore[assignment]
 
 
@@ -109,7 +111,7 @@ class IpqcExcelAdapter:
     def suggest_completed_output_path(self) -> Path:
         template_path = self._require_template_path()
         active_group = self._require_active_group()
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "Z"
         base_name = f"{template_path.stem}_{active_group}_completed_{stamp}"
         candidate = template_path.parent / f"{base_name}{template_path.suffix}"
         index = 1
@@ -150,7 +152,7 @@ class IpqcExcelAdapter:
             raise RuntimeError("No IPQC sheet group is selected.")
         return self._active_group
 
-    def _require_base_sheet(self):
+    def _require_base_sheet(self) -> Worksheet:
         workbook = self._require_workbook()
         base_group = self._require_active_group()
         if base_group not in workbook.sheetnames:
@@ -158,7 +160,7 @@ class IpqcExcelAdapter:
         return workbook[base_group]
 
     @staticmethod
-    def _read_cell_text(sheet, cell_ref: str) -> str:
+    def _read_cell_text(sheet: Worksheet, cell_ref: str) -> str:
         value = sheet[cell_ref].value
         if value is None:
             return ""
