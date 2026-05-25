@@ -227,15 +227,25 @@ class ProductionParameterController(QObject):
         selected_row, selection_error = self._resolve_selected_row(node_id, node_name)
         if selected_row is None:
             return False, selection_error or "Selected node UUID data is unavailable."
+        return self._write_uuid_row(selected_row)
 
-        runtime_window = self._bridge.get_runtime_window(create_if_missing=True)
-        if runtime_window is None:
-            return False, "Runtime backend is unavailable for UUID writing."
+    def write_uuid(self, node_id: int, node_name: str, uuid_int: int) -> tuple[bool, str]:
+        supported_name, support_error = self._resolve_supported_node(node_id, node_name)
+        if support_error is not None:
+            return False, support_error
+        selected_row = UuidCsvRow(
+            row_index=0,
+            node_id=node_id,
+            node_name=supported_name or str(node_name),
+            uuid_text=str(uuid_int),
+            uuid_int=int(uuid_int),
+        )
+        return self._write_uuid_row(selected_row)
 
-        backend_client = getattr(runtime_window, "backend_client", None)
-        if backend_client is None or not backend_client.is_connected():
-            return False, "Serial port not connected."
-
+    def _write_uuid_row(self, selected_row: UuidCsvRow) -> tuple[bool, str]:
+        runtime_window, backend_client, readiness_error = self._resolve_runtime_for_uuid_operation()
+        if readiness_error is not None:
+            return False, readiness_error
         self.log_message.emit(f"[Production] Writing UUID to Node {selected_row.node_id} {selected_row.node_name}")
         try:
             payload = build_uuid_write_payload(selected_row.uuid_int)
@@ -245,7 +255,7 @@ class ProductionParameterController(QObject):
         except Exception as exc:
             return False, f"Failed to write UUID for Node {selected_row.node_id} {selected_row.node_name}: {exc}"
 
-        if not self.verify_loaded_uuid(selected_row.node_id, selected_row.node_name):
+        if not self._start_verify_for_row(selected_row, runtime_window=runtime_window):
             return False, "Failed to start UUID read-back verification after write."
         return (
             True,
@@ -263,21 +273,28 @@ class ProductionParameterController(QObject):
         if selected_row is None:
             self.verification_finished.emit(False, selection_error or "Selected node UUID data is unavailable.")
             return False
+        return self._start_verify_for_row(selected_row)
 
-        runtime_window = self._bridge.get_runtime_window(create_if_missing=True)
+    def verify_uuid(self, node_id: int, node_name: str, expected_uuid: int) -> bool:
+        supported_name, support_error = self._resolve_supported_node(node_id, node_name)
+        if support_error is not None:
+            self.verification_finished.emit(False, support_error)
+            return False
+        selected_row = UuidCsvRow(
+            row_index=0,
+            node_id=node_id,
+            node_name=supported_name or str(node_name),
+            uuid_text=str(expected_uuid),
+            uuid_int=int(expected_uuid),
+        )
+        return self._start_verify_for_row(selected_row)
+
+    def _start_verify_for_row(self, selected_row: UuidCsvRow, *, runtime_window=None) -> bool:
         if runtime_window is None:
-            self.verification_finished.emit(False, "Runtime backend is unavailable for UUID verification.")
-            return False
-
-        backend_client = getattr(runtime_window, "backend_client", None)
-        if backend_client is None or not backend_client.is_connected():
-            self.verification_finished.emit(False, "Serial port not connected.")
-            return False
-
-        if not hasattr(runtime_window, "packet_received"):
-            self.verification_finished.emit(False, "Runtime packet listener is unavailable.")
-            return False
-
+            runtime_window, _backend_client, readiness_error = self._resolve_runtime_for_uuid_operation()
+            if readiness_error is not None:
+                self.verification_finished.emit(False, readiness_error)
+                return False
         self._attach_runtime_window(runtime_window)
         self._verify_rows = [selected_row]
         self._verify_index = 0
@@ -289,13 +306,9 @@ class ProductionParameterController(QObject):
         return True
 
     def _resolve_selected_row(self, node_id: int, node_name: str) -> tuple[UuidCsvRow | None, str | None]:
-        expected_name = self._node_map.get(node_id)
-        if expected_name is None or not (MIN_TESTABLE_NODE_ID <= node_id <= MAX_TESTABLE_NODE_ID):
-            return (
-                None,
-                f"Selected node {node_id} {node_name} is not supported for UUID operations "
-                f"(allowed range: {MIN_TESTABLE_NODE_ID}-{MAX_TESTABLE_NODE_ID}).",
-            )
+        expected_name, support_error = self._resolve_supported_node(node_id, node_name)
+        if support_error is not None:
+            return None, support_error
 
         matching_rows = [row for row in self._rows if row.node_id == node_id]
         if not matching_rows:
@@ -303,6 +316,29 @@ class ProductionParameterController(QObject):
         if len(matching_rows) > 1:
             return None, f"Multiple UUID CSV rows found for selected node {node_id} {expected_name}."
         return matching_rows[0], None
+
+    def _resolve_supported_node(self, node_id: int, node_name: str) -> tuple[str | None, str | None]:
+        expected_name = self._node_map.get(node_id)
+        if expected_name is None or not (MIN_TESTABLE_NODE_ID <= node_id <= MAX_TESTABLE_NODE_ID):
+            return (
+                None,
+                f"Selected node {node_id} {node_name} is not supported for UUID operations "
+                f"(allowed range: {MIN_TESTABLE_NODE_ID}-{MAX_TESTABLE_NODE_ID}).",
+            )
+        return expected_name, None
+
+    def _resolve_runtime_for_uuid_operation(self):
+        runtime_window = self._bridge.get_runtime_window(create_if_missing=True)
+        if runtime_window is None:
+            return None, None, "Runtime backend is unavailable for UUID operations."
+
+        backend_client = getattr(runtime_window, "backend_client", None)
+        if backend_client is None or not backend_client.is_connected():
+            return None, None, "Serial port not connected."
+
+        if not hasattr(runtime_window, "packet_received"):
+            return None, None, "Runtime packet listener is unavailable."
+        return runtime_window, backend_client, None
 
     def _validate_and_add_row(self, row_number: int, row: dict[str, str]) -> None:
         node_id_text = str(row.get("node_id", "")).strip()

@@ -26,7 +26,7 @@ from services.ipqc_excel_adapter import IpqcExcelAdapter
 from services.production_csv_logger import ProductionCsvLogger
 from services.production_test_result import ProductionTestResult
 from .base_page import BaseWorkspacePage
-from .production_parameter_controller import ProductionParameterController, UuidCsvRow
+from .production_parameter_controller import ProductionParameterController, parse_uuid_value
 from .production_test_controller import ProductionTestController
 from .production_test_models import FinalNodeResult, StepResult
 
@@ -93,7 +93,6 @@ class ProductionPage(BaseWorkspacePage):
         self.test_control_section.run_requested.connect(self._handle_run_test)
         self.test_control_section.stop_requested.connect(self._handle_stop_test)
         self.test_control_section.clear_requested.connect(self._handle_clear_result)
-        self.uuid_section.load_csv_requested.connect(self._handle_load_uuid_csv)
         self.uuid_section.load_workbook_requested.connect(self._handle_load_ipqc_workbook)
         self.uuid_section.sheet_group_changed.connect(self._handle_ipqc_sheet_group_changed)
         self.uuid_section.write_requested.connect(self._handle_write_uuid)
@@ -113,6 +112,7 @@ class ProductionPage(BaseWorkspacePage):
         self._parameter_controller.log_message.connect(self.console_message.emit)
         self._parameter_controller.verification_finished.connect(self._handle_uuid_verification_finished)
         self._uuid_operation: str | None = None
+        self._pending_expected_uuid: int | None = None
 
         self.add_weighted_row((self.communication_section, 1), (self.robot_nodes_section, 2))
         self.add_row(self.node_status_section, self.test_control_section)
@@ -183,8 +183,7 @@ class ProductionPage(BaseWorkspacePage):
             self.result_summary_section.set_result("READY", str(exc))
             self.console_message.emit(f"[Production] {exc}")
             return
-        selected_row = self._find_uuid_row(node_id)
-        expected_uuid = selected_row.uuid_int if selected_row is not None else None
+        expected_uuid = self._get_workbook_expected_uuid()
         profile_mode = self.test_control_section.selected_profile_mode()
         self._test_controller.run_test(node_id, node_name, expected_uuid=expected_uuid, profile_mode=profile_mode)
         self._refresh_connection_status()
@@ -198,32 +197,6 @@ class ProductionPage(BaseWorkspacePage):
             self._test_controller.abort_test()
         self._reset_result_only()
         self.console_message.emit("[Production] Cleared result summary and progress")
-
-    def _handle_load_uuid_csv(self) -> None:
-        path, _selected_filter = QFileDialog.getOpenFileName(self, "Load UUID CSV", "", "CSV Files (*.csv)")
-        if not path:
-            return
-
-        valid = self._parameter_controller.load_uuid_csv(path)
-        rows = self._parameter_controller.rows
-        errors = self._parameter_controller.errors
-        self._result_job_id = Path(path).stem
-        self._result_logger.set_output_dir(Path(path).expanduser().resolve().parent)
-        self._refresh_result_csv_ui()
-        self.uuid_section.set_file_path(path)
-        self.uuid_section.set_preview_rows(rows)
-        self.uuid_section.set_validation(valid, errors)
-
-        if valid:
-            self.console_message.emit(f"[Production] Loaded UUID CSV: {path}")
-            self.progress_section.append_step(f"Loaded UUID CSV with {len(rows)} row(s)")
-            self.result_summary_section.set_result("READY", "UUID CSV validation passed.")
-            self._refresh_connection_status()
-        else:
-            self.console_message.emit(f"[Production] UUID CSV validation failed: {path}")
-            self.result_summary_section.set_result("FAIL", "UUID CSV validation failed.")
-            self.progress_section.append_step("UUID CSV validation failed")
-            self._refresh_connection_status()
 
     def _handle_load_ipqc_workbook(self) -> None:
         path, _selected_filter = QFileDialog.getOpenFileName(
@@ -294,13 +267,23 @@ class ProductionPage(BaseWorkspacePage):
             self.console_message.emit(f"[Production] {exc}")
             return
 
+        expected_uuid = self._get_workbook_expected_uuid()
+        if expected_uuid is None:
+            message = "Expected S/N is unavailable from the active IPQC workbook sheet."
+            self.result_summary_section.set_result("FAIL", message)
+            self.progress_section.append_step("UUID write blocked: expected workbook S/N missing")
+            self.console_message.emit(f"[Production] {message}")
+            return
+
         self._uuid_operation = "write"
+        self._pending_expected_uuid = expected_uuid
         self.result_summary_section.set_result("WRITING UUID", f"Writing UUID to Node {node_id} {node_name}.")
-        success, message = self._parameter_controller.write_loaded_uuid(node_id, node_name)
+        success, message = self._parameter_controller.write_uuid(node_id, node_name, expected_uuid)
         if success:
             self.progress_section.append_step(f"Started UUID write + read-back verification for Node {node_id} {node_name}")
         else:
             self._uuid_operation = None
+            self._pending_expected_uuid = None
             self.result_summary_section.set_result("FAIL", message)
             self.progress_section.append_step(f"Failed to write UUID for Node {node_id} {node_name}")
             self.console_message.emit(f"[Production] {message}")
@@ -314,24 +297,35 @@ class ProductionPage(BaseWorkspacePage):
             self.console_message.emit(f"[Production] {exc}")
             return
 
+        expected_uuid = self._get_workbook_expected_uuid()
+        if expected_uuid is None:
+            message = "Expected S/N is unavailable from the active IPQC workbook sheet."
+            self.result_summary_section.set_result("FAIL", message)
+            self.progress_section.append_step("UUID verify blocked: expected workbook S/N missing")
+            self.console_message.emit(f"[Production] {message}")
+            return
+
         self._uuid_operation = "verify"
+        self._pending_expected_uuid = expected_uuid
         self.result_summary_section.set_result("READING UUID", f"Reading and verifying UUID for Node {node_id} {node_name}.")
-        started = self._parameter_controller.verify_loaded_uuid(node_id, node_name)
+        started = self._parameter_controller.verify_uuid(node_id, node_name, expected_uuid)
         if started:
             self.progress_section.append_step(f"Started UUID read/verify for Node {node_id} {node_name}")
         else:
             self._uuid_operation = None
+            self._pending_expected_uuid = None
         self._refresh_connection_status()
 
     def _handle_uuid_verification_finished(self, passed: bool, reason: str) -> None:
         operation = self._uuid_operation
+        expected_uuid = self._pending_expected_uuid
         self._uuid_operation = None
+        self._pending_expected_uuid = None
         try:
             selected_node_id, selected_node_name = self.test_control_section.selected_node()
         except RuntimeError:
             selected_node_id, selected_node_name = -1, "Unknown"
-        selected_row = self._find_uuid_row(selected_node_id)
-        expected_value = selected_row.uuid_int if selected_row is not None else ""
+        expected_value = expected_uuid if expected_uuid is not None else ""
         actual_value = (
             self._parameter_controller.last_verify_actual_uuid
             if self._parameter_controller.last_verify_actual_uuid is not None
@@ -446,11 +440,22 @@ class ProductionPage(BaseWorkspacePage):
             raw_response_hex="",
         )
 
-    def _find_uuid_row(self, node_id: int) -> UuidCsvRow | None:
-        for row in self._parameter_controller.rows:
-            if row.node_id == node_id:
-                return row
-        return None
+    def _get_workbook_expected_uuid(self) -> int | None:
+        if not self._ipqc_excel_adapter.has_loaded_workbook():
+            return None
+        try:
+            expected = self._ipqc_excel_adapter.read_expected_summary(strict=False)
+        except Exception as exc:
+            self.console_message.emit(f"[Production] Failed to read expected workbook S/N: {exc}")
+            return None
+        serial_text = expected.serial_number.strip()
+        if not serial_text:
+            return None
+        try:
+            return parse_uuid_value(serial_text)
+        except ValueError as exc:
+            self.console_message.emit(f"[Production] Invalid workbook expected S/N '{serial_text}': {exc}")
+            return None
 
     def _append_result_row(
         self,
@@ -781,22 +786,16 @@ class _ResultSummarySection(PanelFrame):
 
 
 class _UuidCsvSection(PanelFrame):
-    load_csv_requested = pyqtSignal()
     load_workbook_requested = pyqtSignal()
     sheet_group_changed = pyqtSignal(str)
     write_requested = pyqtSignal()
     verify_requested = pyqtSignal()
 
     def __init__(self) -> None:
-        super().__init__("UUID CSV", "")
+        super().__init__("IPQC Workbook & Parameter Verification", "")
         button_row = QHBoxLayout()
         button_row.setContentsMargins(0, 0, 0, 0)
         button_row.setSpacing(8)
-
-        load_button = QPushButton("Load UUID CSV")
-        load_button.setProperty("tone", "primary")
-        load_button.clicked.connect(self.load_csv_requested.emit)
-        button_row.addWidget(load_button)
 
         load_workbook_button = QPushButton("Load IPQC Workbook")
         load_workbook_button.setProperty("tone", "primary")
@@ -813,24 +812,13 @@ class _UuidCsvSection(PanelFrame):
         write_button.clicked.connect(self.write_requested.emit)
         button_row.addWidget(write_button)
 
-        self.load_button = load_button
         self.load_workbook_button = load_workbook_button
         self.verify_button = verify_button
         self.write_button = write_button
 
         self.body_layout.addLayout(button_row)
 
-        self._file_label = QLabel("Selected CSV: None")
-        self._file_label.setObjectName("DetailValue")
-        self._file_label.setWordWrap(True)
-        self.body_layout.addWidget(self._file_label)
-
-        self._validation_label = QLabel("Validation: Not loaded")
-        self._validation_label.setObjectName("DetailValue")
-        self._validation_label.setWordWrap(True)
-        self.body_layout.addWidget(self._validation_label)
-
-        self._result_csv_label = QLabel("Result CSV: Pending (first result row will create the file)")
+        self._result_csv_label = QLabel("Debug result CSV: Pending (first result row will create the file)")
         self._result_csv_label.setObjectName("DetailValue")
         self._result_csv_label.setWordWrap(True)
         self.body_layout.addWidget(self._result_csv_label)
@@ -860,35 +848,8 @@ class _UuidCsvSection(PanelFrame):
         self._workbook_output_label.setWordWrap(True)
         self.body_layout.addWidget(self._workbook_output_label)
 
-        self._error_list = QListWidget()
-        self._error_list.setObjectName("SimpleList")
-        self._error_list.setMaximumHeight(88)
-        self.body_layout.addWidget(self._error_list)
-
-        self._preview_table: SimpleTableWidget = SimpleTableWidget(["Node ID", "Node Name", "UUID"], [])
-        self._preview_table.setMaximumHeight(216)
-        self.body_layout.addWidget(self._preview_table)
-
-    def set_file_path(self, path: str) -> None:
-        self._file_label.setText(f"Selected CSV: {path}")
-
-    def set_preview_rows(self, rows: list[UuidCsvRow]) -> None:
-        if self._preview_table is not None:
-            self.body_layout.removeWidget(self._preview_table)
-            self._preview_table.deleteLater()
-        table_rows = [[str(row.node_id), row.node_name, row.uuid_text] for row in rows]
-        self._preview_table = SimpleTableWidget(["Node ID", "Node Name", "UUID"], table_rows)
-        self._preview_table.setMaximumHeight(216)
-        self.body_layout.addWidget(self._preview_table)
-
-    def set_validation(self, passed: bool, errors: list[str]) -> None:
-        self._validation_label.setText("Validation: PASSED" if passed else "Validation: FAILED")
-        self._error_list.clear()
-        if errors:
-            self._error_list.addItems(errors)
-
     def set_result_csv_path(self, path_or_status: str) -> None:
-        self._result_csv_label.setText(f"Result CSV: {path_or_status}")
+        self._result_csv_label.setText(f"Debug result CSV: {path_or_status}")
 
     def set_workbook_path(self, path: str) -> None:
         self._workbook_label.setText(f"Selected workbook: {path}")

@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from PyQt6.QtCore import QObject, pyqtSignal
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QLabel
 
 from gui.workspace.pages.production_page import ProductionPage
 from gui.workspace.widgets import ResponsiveRow
@@ -693,6 +693,65 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertEqual(output_sheet["C4"].value, "1223303011")
             self.assertEqual(output_sheet["D4"].value, "PASS")
 
+    @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook UUID verify tests.")
+    def test_production_page_verify_uses_workbook_expected_sn_and_writes_workbook(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        runtime_window.node_status[3] = {
+            "connected": True,
+            "firmware": "v1.0.0",
+            "uuid": "",
+            "type": "X",
+            "interrupt": "OK",
+        }
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            self._create_ipqc_workbook(workbook_path, with_optional_fields=False)
+
+            with patch(
+                "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
+                return_value=(str(workbook_path), "Excel Files (*.xlsx)"),
+            ):
+                page._handle_load_ipqc_workbook()
+                self._app.processEvents()
+
+            page._handle_verify_uuid()
+            self._app.processEvents()
+            self.assertEqual(runtime_window.backend_client.sent_commands[-1], (3, [0xE0, 0x3F]))
+
+            expected_uuid = 1223303010
+            response_params = [0x3A, *build_uuid_write_payload(expected_uuid)[2:]]
+            runtime_window.packet_received.emit(
+                {
+                    "status": "ok",
+                    "type": "can_over_uart",
+                    "sender": 3,
+                    "cmd": 0xE0,
+                    "params": response_params,
+                }
+            )
+            self._app.processEvents()
+
+            output_text = page.uuid_section._workbook_output_label.text()
+            self.assertTrue(output_text.startswith("Completed workbook: "))
+            output_path = Path(output_text.replace("Completed workbook: ", "", 1))
+            self.assertTrue(output_path.exists())
+
+            output_sheet = load_workbook(output_path)["3X"]
+            self.assertEqual(output_sheet["C4"].value, str(expected_uuid))
+            self.assertEqual(output_sheet["D4"].value, "PASS")
+
+            csv_path = page._result_logger.result_csv_path
+            self.assertIsNotNone(csv_path)
+            with csv_path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertTrue(any(row["test_type"] == "UUID_VERIFY" for row in rows))
+            verify_rows = [row for row in rows if row["test_type"] == "UUID_VERIFY"]
+            self.assertEqual(verify_rows[-1]["expected_value"], str(expected_uuid))
+            self.assertEqual(verify_rows[-1]["actual_value"], str(expected_uuid))
+
 
 class ProductionParameterControllerTests(unittest.TestCase):
     @classmethod
@@ -822,14 +881,21 @@ class ProductionParameterControllerTests(unittest.TestCase):
         self.assertFalse(events[-1][0])
         self.assertIn("No UUID CSV row found", events[-1][1])
 
-    def test_uuid_section_buttons_use_safe_verify_first_wording(self) -> None:
+    def test_uuid_section_removes_legacy_uuid_csv_controls_and_keeps_workbook_flow(self) -> None:
         runtime_window = _FakeRuntimeWindow()
         bridge = _FakeBridge(runtime_window)
         page = ProductionPage(bridge)
 
-        self.assertEqual(page.uuid_section.load_button.text(), "Load UUID CSV")
+        title_labels = [label.text() for label in page.uuid_section.findChildren(QLabel) if label.objectName() == "PanelTitle"]
+        self.assertIn("IPQC Workbook & Parameter Verification", title_labels)
+        self.assertFalse(hasattr(page.uuid_section, "load_button"))
+        self.assertFalse(hasattr(page.uuid_section, "_file_label"))
+        self.assertFalse(hasattr(page.uuid_section, "_validation_label"))
+        self.assertFalse(hasattr(page.uuid_section, "_preview_table"))
+        self.assertEqual(page.uuid_section.load_workbook_button.text(), "Load IPQC Workbook")
         self.assertEqual(page.uuid_section.verify_button.text(), "Verify Current UUID")
         self.assertEqual(page.uuid_section.write_button.text(), "Write UUID to PCB")
+        self.assertTrue(page.uuid_section._result_csv_label.text().startswith("Debug result CSV: "))
 
 
 if __name__ == "__main__":
