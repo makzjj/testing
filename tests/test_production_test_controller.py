@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from PyQt6.QtCore import QObject, pyqtSignal
-from PyQt6.QtWidgets import QApplication, QLabel
+from PyQt6.QtWidgets import QApplication, QLabel, QPushButton
 
 from gui.workspace.pages.production_page import ProductionPage
 from gui.workspace.widgets import ResponsiveRow
@@ -496,6 +496,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
 
         self.assertEqual(page.node_status_section.table.item(6, 2).text(), "Testing")
         self.assertEqual(page.result_summary_section._status_label.text(), "TESTING")
+        self.assertIn("[TESTING] Running Production test for Node 8 RZ.", page.progress_section._list.item(2).text())
 
         runtime_window.packet_received.emit(
             {"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xCB, "params": [0xA5, 0x5A]}
@@ -523,6 +524,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
         self.assertEqual(pass_item.foreground().color().name().lower(), "#2e7d32")
         self.assertEqual(page.result_summary_section._status_label.text(), "PASS")
         self.assertIn("All profile steps passed", page.result_summary_section._reason_label.text())
+        self.assertIn("background: #2E7D32", page.stage_section._rows["configuration"][0].styleSheet())
 
     def test_profile_step_results_do_not_append_to_csv_logger(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -552,35 +554,33 @@ class ProductionPageWorkflowTests(unittest.TestCase):
         self._app.processEvents()
         self.assertEqual(page.result_summary_section._status_label.text(), "TESTING")
 
-    def test_production_page_uses_compact_section_order_with_results_before_uuid(self) -> None:
+    def test_production_page_uses_two_column_top_layout_and_bottom_status_log(self) -> None:
         runtime_window = _FakeRuntimeWindow()
         bridge = _FakeBridge(runtime_window)
         page = ProductionPage(bridge)
 
         first_row = page.content_layout.itemAt(0).widget()
-        second_row = page.content_layout.itemAt(1).widget()
-        third_row = page.content_layout.itemAt(2).widget()
-        fourth_widget = page.content_layout.itemAt(3).widget()
+        second_widget = page.content_layout.itemAt(1).widget()
 
         self.assertIsInstance(first_row, ResponsiveRow)
-        self.assertIsInstance(second_row, ResponsiveRow)
-        self.assertIsInstance(third_row, ResponsiveRow)
-        self.assertIs(fourth_widget, page.uuid_section)
+        self.assertIs(second_widget, page.progress_section)
 
         first_layout = first_row.layout()
-        second_layout = second_row.layout()
-        third_layout = third_row.layout()
+        self.assertIs(first_layout.itemAt(0).widget(), page.info_section)
+        self.assertIs(first_layout.itemAt(1).widget(), page.stage_section)
+        self.assertEqual(first_row.stretch_factors(), (3, 2))
+        self.assertIsNone(page.result_summary_section.parent())
 
-        self.assertIs(first_layout.itemAt(0).widget(), page.communication_section)
-        self.assertIs(first_layout.itemAt(1).widget(), page.robot_nodes_section)
+    def test_production_page_shows_status_log_with_refresh_and_clear_buttons(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
 
-        self.assertIs(second_layout.itemAt(0).widget(), page.node_status_section)
-        self.assertIs(second_layout.itemAt(1).widget(), page.test_control_section)
-
-        self.assertIs(third_layout.itemAt(0).widget(), page.result_summary_section)
-        self.assertIs(third_layout.itemAt(1).widget(), page.progress_section)
-        self.assertEqual(first_row.stretch_factors(), (1, 2))
-        self.assertEqual(third_row.stretch_factors(), (1, 2))
+        button_texts = [button.text() for button in page.progress_section.findChildren(QPushButton)]
+        self.assertIn("Refresh", button_texts)
+        self.assertIn("Clear", button_texts)
+        self.assertEqual(page.progress_section.windowTitle(), "")
+        self.assertGreaterEqual(page.progress_section._list.minimumHeight(), 220)
 
     def test_production_page_node_status_fail_is_bold_red(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -601,6 +601,8 @@ class ProductionPageWorkflowTests(unittest.TestCase):
         self.assertGreaterEqual(page.communication_section._port_combo.count(), 1)
         self.assertGreaterEqual(page.communication_section._baud_combo.count(), 1)
         self.assertEqual(page.communication_section._connect_button.text(), "Disconnect")
+        self.assertIn("MCU Firmware Version", page.communication_section._firmware_label.text())
+        self.assertIn("No. of Connection / Connected Nodes", page.communication_section._connected_label.text())
 
     def test_production_page_shows_runtime_robot_nodes_and_syncs_dropdown(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -614,7 +616,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
         bridge = _FakeBridge(runtime_window)
         page = ProductionPage(bridge)
 
-        self.assertIn("Connected nodes: 8", page.robot_nodes_section._connected_label.text())
+        self.assertIn("No. of Connection / Connected Nodes: 1", page.robot_nodes_section._connected_label.text())
         self.assertEqual(page.robot_nodes_section._table.item(0, 0).text(), "Node 08 ✅ Connected")
         page.robot_nodes_section._handle_cell_clicked(0, 0)
         selected_node_id, _selected_name = page.test_control_section.selected_node()
@@ -638,16 +640,18 @@ class ProductionPageWorkflowTests(unittest.TestCase):
                 self._app.processEvents()
 
             self.assertEqual(page.uuid_section._sheet_group_combo.currentText(), "3X")
-            self.assertIn("Selected workbook", page.uuid_section._workbook_label.text())
-            self.assertEqual(page.uuid_section._expected_serial_label.text(), "Expected S/N / UUID: 1223303010")
-            self.assertEqual(page.uuid_section._expected_pwm_label.text(), "Expected PWM: 100")
-            self.assertEqual(page.uuid_section._expected_other_label.text(), "Expected other parameters: N/A")
-            self.assertIn("Pending command support", page.uuid_section._actual_pwm_label.text())
-            self.assertEqual(page.uuid_section._workbook_validation_label.text(), "Workbook validation: PASSED")
+            self.assertIn("Configuration File / IPQC Workbook", page.uuid_section._workbook_label.text())
+            self.assertEqual(page.uuid_section._expected_serial_value, "1223303010")
+            self.assertEqual(page.uuid_section._expected_pwm_value, "100")
+            self.assertEqual(page.uuid_section._expected_other_value, "N/A")
+            self.assertEqual(page.uuid_section.workbook_validation_text, "Workbook validation: PASSED")
             self.assertTrue(page.uuid_section.verify_button.isEnabled())
             self.assertTrue(page.uuid_section.write_button.isEnabled())
             self.assertTrue(page.uuid_section.save_button.isEnabled())
             self.assertEqual(runtime_window.backend_client.sent_commands, [])
+            log_texts = [page.progress_section._list.item(index).text() for index in range(page.progress_section._list.count())]
+            self.assertIn("Expected S/N / UUID: 1223303010", log_texts)
+            self.assertIn("Expected PWM: 100", log_texts)
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook write wiring tests.")
     def test_production_page_write_uuid_sends_write_command_using_workbook_expected_value(self) -> None:
@@ -703,7 +707,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
 
             self.assertEqual(page.result_summary_section._status_label.text(), "REPORTING ERROR")
             self.assertIn("writing IPQC workbook report failed", page.result_summary_section._reason_label.text())
-            self.assertIn("failed", page.uuid_section._last_workbook_action_label.text().lower())
+            self.assertIn("failed", page.uuid_section.last_workbook_action_text.lower())
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook UUID verify tests.")
     def test_production_page_verify_uses_workbook_expected_sn_and_writes_result_cells(self) -> None:
@@ -749,7 +753,8 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             output_sheet = page._ipqc_excel_adapter._workbook["3X"]
             self.assertEqual(output_sheet["C4"].value, str(expected_uuid))
             self.assertEqual(output_sheet["D4"].value, "PASS")
-            self.assertIn("PASS", page.uuid_section._check_result_label.text())
+            log_texts = [page.progress_section._list.item(index).text() for index in range(page.progress_section._list.count())]
+            self.assertIn("Check result: PASS", log_texts)
 
             self.assertIsNone(page._result_logger.result_csv_path)
 
@@ -793,7 +798,8 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             output_sheet = page._ipqc_excel_adapter._workbook["3X"]
             self.assertEqual(output_sheet["C4"].value, "1223303011")
             self.assertEqual(output_sheet["D4"].value, "FAIL")
-            self.assertIn("FAIL", page.uuid_section._check_result_label.text())
+            log_texts = [page.progress_section._list.item(index).text() for index in range(page.progress_section._list.count())]
+            self.assertIn("Check result: FAIL", log_texts)
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook save tests.")
     def test_production_page_save_completed_workbook_shows_output_path(self) -> None:
@@ -828,7 +834,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
                 page._handle_save_completed_workbook()
                 self._app.processEvents()
 
-            self.assertIn(str(output_path.resolve()), page.uuid_section._workbook_output_label.text())
+            self.assertEqual(page.uuid_section.workbook_output_text, str(output_path.resolve()))
             self.assertTrue(output_path.exists())
 
 
@@ -966,7 +972,7 @@ class ProductionParameterControllerTests(unittest.TestCase):
         page = ProductionPage(bridge)
 
         title_labels = [label.text() for label in page.uuid_section.findChildren(QLabel) if label.objectName() == "PanelTitle"]
-        self.assertIn("IPQC Workbook Parameter Programming", title_labels)
+        self.assertIn("Information / Workbook / Communication", title_labels)
         self.assertFalse(hasattr(page.uuid_section, "load_button"))
         self.assertFalse(hasattr(page.uuid_section, "_file_label"))
         self.assertFalse(hasattr(page.uuid_section, "_validation_label"))
@@ -978,12 +984,18 @@ class ProductionParameterControllerTests(unittest.TestCase):
         self.assertFalse(page.uuid_section.verify_button.isEnabled())
         self.assertFalse(page.uuid_section.write_button.isEnabled())
         self.assertFalse(page.uuid_section.save_button.isEnabled())
-        self.assertTrue(page.uuid_section._last_workbook_action_label.text().startswith("Last workbook action: "))
+        self.assertEqual(page.uuid_section.last_workbook_action_text, "No workbook write yet")
         self.assertFalse(hasattr(page.uuid_section, "_result_csv_label"))
         button_texts = [button.text() for button in page.findChildren(type(page.uuid_section.write_button))]
         self.assertNotIn("Echo Test", button_texts)
         self.assertNotIn("Safe Movement Test", button_texts)
         self.assertFalse(hasattr(page.test_control_section, "_profile_combo"))
+        stage_labels = [label.text() for label in page.stage_section.findChildren(QLabel)]
+        self.assertIn("Configuration", stage_labels)
+        self.assertIn("Single Axis Functional Test", stage_labels)
+        self.assertIn("Performance Test", stage_labels)
+        stage_button_texts = [button.text() for button in page.stage_section.findChildren(QPushButton)]
+        self.assertEqual(stage_button_texts.count("Start Test"), 3)
 
     def test_production_page_blocks_write_and_verify_when_no_workbook_loaded(self) -> None:
         runtime_window = _FakeRuntimeWindow()
