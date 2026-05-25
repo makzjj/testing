@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import csv
 import tempfile
 import time
 import unittest
@@ -525,55 +524,33 @@ class ProductionPageWorkflowTests(unittest.TestCase):
         self.assertEqual(page.result_summary_section._status_label.text(), "PASS")
         self.assertIn("All profile steps passed", page.result_summary_section._reason_label.text())
 
-    def test_profile_step_results_append_to_csv_logger(self) -> None:
+    def test_profile_step_results_do_not_append_to_csv_logger(self) -> None:
         runtime_window = _FakeRuntimeWindow()
         bridge = _FakeBridge(runtime_window)
         page = ProductionPage(bridge)
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            page._result_logger.set_output_dir(Path(tmpdir))
-            page._handle_run_test()
-            runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0xCB, "params": [0xA5, 0x5A]})
-            runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0xC8, "params": [0x3A, 1, 2, 3]})
-            runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x2A]})
-            runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0xD8, "params": [0, 1]})
-            self._app.processEvents()
+        page._handle_run_test()
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0xCB, "params": [0xA5, 0x5A]})
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0xC8, "params": [0x3A, 1, 2, 3]})
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x2A]})
+        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0xD8, "params": [0, 1]})
+        self._app.processEvents()
 
-            csv_path = page._result_logger.result_csv_path
-            self.assertIsNotNone(csv_path)
-            self.assertTrue(csv_path.exists())
-            with csv_path.open("r", encoding="utf-8", newline="") as handle:
-                rows = list(csv.DictReader(handle))
-            self.assertGreaterEqual(len(rows), 5)
-            self.assertEqual(rows[-1]["test_type"], "PROFILE_SUMMARY")
+        self.assertIsNone(page._result_logger.result_csv_path)
 
-    def test_movement_profile_step_results_append_to_csv_logger(self) -> None:
+    def test_production_page_hides_test_profile_selector(self) -> None:
         runtime_window = _FakeRuntimeWindow()
         bridge = _FakeBridge(runtime_window)
         page = ProductionPage(bridge)
-        page.test_control_section._profile_combo.setCurrentIndex(1)  # movement
+        self.assertFalse(hasattr(page.test_control_section, "_profile_combo"))
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            page._result_logger.set_output_dir(Path(tmpdir))
-            page._handle_run_test()
-            runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0xCB, "params": [0xA5, 0x5A]})
-            runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0xC8, "params": [0x3A, 1, 2, 3]})
-            runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x10]})
-            runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0xD8, "params": [0, 0]})
-            runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0x81, "params": [ord('E'), 0x00, 0x00, 0x00, 0x20]})
-            runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x20]})
-            self._app.processEvents()
-
-            csv_path = page._result_logger.result_csv_path
-            self.assertIsNotNone(csv_path)
-            with csv_path.open("r", encoding="utf-8", newline="") as handle:
-                rows = list(csv.DictReader(handle))
-            test_types = [row["test_type"] for row in rows]
-            self.assertIn("read_initial_position", test_types)
-            self.assertIn("wait_move_end", test_types)
-            self.assertIn("verify_position_delta", test_types)
-            self.assertIn("stop_motor", test_types)
-            self.assertEqual(rows[-1]["test_type"], "PROFILE_SUMMARY")
+    def test_production_page_run_test_still_works_without_profile_selector(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+        page._handle_run_test()
+        self._app.processEvents()
+        self.assertEqual(page.result_summary_section._status_label.text(), "TESTING")
 
     def test_production_page_uses_compact_section_order_with_results_before_uuid(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -773,14 +750,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertEqual(output_sheet["C4"].value, str(expected_uuid))
             self.assertEqual(output_sheet["D4"].value, "PASS")
 
-            csv_path = page._result_logger.result_csv_path
-            self.assertIsNotNone(csv_path)
-            with csv_path.open("r", encoding="utf-8", newline="") as handle:
-                rows = list(csv.DictReader(handle))
-            self.assertTrue(any(row["test_type"] == "UUID_VERIFY" for row in rows))
-            verify_rows = [row for row in rows if row["test_type"] == "UUID_VERIFY"]
-            self.assertEqual(verify_rows[-1]["expected_value"], str(expected_uuid))
-            self.assertEqual(verify_rows[-1]["actual_value"], str(expected_uuid))
+            self.assertIsNone(page._result_logger.result_csv_path)
 
 
 class ProductionParameterControllerTests(unittest.TestCase):
@@ -928,7 +898,7 @@ class ProductionParameterControllerTests(unittest.TestCase):
         self.assertFalse(page.uuid_section.verify_button.isEnabled())
         self.assertFalse(page.uuid_section.write_button.isEnabled())
         self.assertTrue(page.uuid_section._last_workbook_action_label.text().startswith("Last workbook action: "))
-        self.assertTrue(page.uuid_section._result_csv_label.text().startswith("Debug result CSV: "))
+        self.assertFalse(hasattr(page.uuid_section, "_result_csv_label"))
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook guard tests.")
     def test_production_page_blocks_uuid_actions_when_workbook_expected_sn_missing(self) -> None:

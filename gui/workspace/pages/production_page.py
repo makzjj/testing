@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
 from pathlib import Path
 
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal
@@ -24,11 +23,10 @@ from ..widgets import DetailListWidget, LabeledControl, PanelFrame, SimpleTableW
 from ..widgets.layout_utils import clear_layout
 from services.ipqc_excel_adapter import IpqcExcelAdapter
 from services.production_csv_logger import ProductionCsvLogger
-from services.production_test_result import ProductionTestResult
 from .base_page import BaseWorkspacePage
 from .production_parameter_controller import ProductionParameterController, parse_uuid_value
 from .production_test_controller import ProductionTestController
-from .production_test_models import FinalNodeResult, StepResult
+from .production_test_models import StepResult
 
 # TODO(Phase 2/3): move ML 2.0 node mapping to project-config/model-aware constants.
 # TODO(Phase 2/3): replace old hardcoded node lists in legacy pages with model-aware config.
@@ -88,7 +86,6 @@ class ProductionPage(BaseWorkspacePage):
         self._parameter_controller = ProductionParameterController(bridge, node_map=ML20_NODE_MAP)
         self._ipqc_excel_adapter = IpqcExcelAdapter()
         self._result_logger = ProductionCsvLogger()
-        self._result_job_id = ""
 
         self.test_control_section.run_requested.connect(self._handle_run_test)
         self.test_control_section.stop_requested.connect(self._handle_stop_test)
@@ -124,7 +121,6 @@ class ProductionPage(BaseWorkspacePage):
         self._runtime_poll_timer.timeout.connect(self._refresh_runtime_panels)
         self._runtime_poll_timer.start()
 
-        self._refresh_result_csv_ui()
         self.uuid_section.set_workbook_output_path(WORKBOOK_OUTPUT_PENDING)
         self.uuid_section.set_last_workbook_action("No workbook write yet")
         self._reset_result_only()
@@ -187,8 +183,7 @@ class ProductionPage(BaseWorkspacePage):
             self.console_message.emit(f"[Production] {exc}")
             return
         expected_uuid = self._get_workbook_expected_uuid()
-        profile_mode = self.test_control_section.selected_profile_mode()
-        self._test_controller.run_test(node_id, node_name, expected_uuid=expected_uuid, profile_mode=profile_mode)
+        self._test_controller.run_test(node_id, node_name, expected_uuid=expected_uuid)
         self._refresh_connection_status()
 
     def _handle_stop_test(self) -> None:
@@ -216,9 +211,7 @@ class ProductionPage(BaseWorkspacePage):
             active_group = self._ipqc_excel_adapter.active_sheet_group or ""
             self.uuid_section.set_workbook_path(path)
             self.uuid_section.set_sheet_groups(groups, active_group)
-            self._result_job_id = Path(path).stem
             self._result_logger.set_output_dir(Path(path).expanduser().resolve().parent)
-            self._refresh_result_csv_ui()
             self.uuid_section.set_workbook_output_path(WORKBOOK_OUTPUT_PENDING)
             self.uuid_section.set_last_workbook_action("Workbook loaded; no write performed yet")
             self._refresh_ipqc_expected_preview()
@@ -329,14 +322,8 @@ class ProductionPage(BaseWorkspacePage):
 
     def _handle_uuid_verification_finished(self, passed: bool, reason: str) -> None:
         operation = self._uuid_operation
-        expected_uuid = self._pending_expected_uuid
         self._uuid_operation = None
         self._pending_expected_uuid = None
-        try:
-            selected_node_id, selected_node_name = self.test_control_section.selected_node()
-        except RuntimeError:
-            selected_node_id, selected_node_name = -1, "Unknown"
-        expected_value = expected_uuid if expected_uuid is not None else ""
         actual_value = (
             self._parameter_controller.last_verify_actual_uuid
             if self._parameter_controller.last_verify_actual_uuid is not None
@@ -346,17 +333,6 @@ class ProductionPage(BaseWorkspacePage):
             mismatch = re.search(r"expected\s+(\d+),\s+got\s+(\d+)", reason)
             if mismatch is not None:
                 actual_value = mismatch.group(2)
-        test_type = "UUID_WRITE_READBACK" if operation == "write" else "UUID_VERIFY"
-        self._append_result_row(
-            node_id=selected_node_id,
-            node_name=selected_node_name,
-            test_type=test_type,
-            expected_value=expected_value,
-            actual_value=actual_value,
-            passed=passed,
-            failure_reason="" if passed else reason,
-            raw_response_hex=self._parameter_controller.last_verify_raw_response_hex,
-        )
         if passed:
             self.result_summary_section.set_result("PASS", reason)
             if operation == "write":
@@ -394,16 +370,6 @@ class ProductionPage(BaseWorkspacePage):
         if not isinstance(step_result, StepResult):
             return
         self.progress_section.mark_profile_step(step_result.step_name, step_result.result)
-        self._append_result_row(
-            node_id=node_id,
-            node_name=node_name,
-            test_type=step_result.step_id,
-            expected_value=step_result.expected_value,
-            actual_value=step_result.actual_value,
-            result_status=step_result.result,
-            failure_reason=step_result.failure_reason,
-            raw_response_hex=step_result.raw_response_hex,
-        )
 
     def _handle_test_passed(self, node_id: int, node_name: str, reason: str) -> None:
         self.node_status_section.set_node_status(node_id, "Pass")
@@ -422,35 +388,14 @@ class ProductionPage(BaseWorkspacePage):
         self.node_status_section.set_node_status(node_id, "Unsupported")
         self.result_summary_section.set_result("UNSUPPORTED", reason)
         self.progress_section.append_step(f"Unsupported test for Node {node_id} {node_name}")
-        self._append_result_row(
-            node_id=node_id,
-            node_name=node_name,
-            test_type="PROFILE_UNSUPPORTED",
-            expected_value="Supported production node profile",
-            actual_value="Unsupported",
-            result_status="FAIL",
-            failure_reason=reason,
-            raw_response_hex="",
-        )
 
     def _handle_test_aborted(self, node_id: int, node_name: str, reason: str) -> None:
         self.node_status_section.set_node_status(node_id, "Aborted")
         self.result_summary_section.set_result("ABORTED", reason)
         self.progress_section.append_step(f"Aborted test profile for Node {node_id} {node_name}")
 
-    def _handle_profile_finished(self, final_node_result: object) -> None:
-        if not isinstance(final_node_result, FinalNodeResult):
-            return
-        self._append_result_row(
-            node_id=final_node_result.node_id,
-            node_name=final_node_result.node_name,
-            test_type="PROFILE_SUMMARY",
-            expected_value="All required profile steps PASS",
-            actual_value=f"{len(final_node_result.step_results)} steps",
-            result_status=final_node_result.final_result,
-            failure_reason=final_node_result.failure_reason,
-            raw_response_hex="",
-        )
+    def _handle_profile_finished(self, _final_node_result: object) -> None:
+        pass
 
     def _get_workbook_expected_uuid(self) -> int | None:
         if not self._ipqc_excel_adapter.has_loaded_workbook():
@@ -468,54 +413,6 @@ class ProductionPage(BaseWorkspacePage):
         except ValueError as exc:
             self.console_message.emit(f"[Production] Invalid workbook expected S/N '{serial_text}': {exc}")
             return None
-
-    def _append_result_row(
-        self,
-        *,
-        node_id: int,
-        node_name: str,
-        test_type: str,
-        expected_value: object,
-        actual_value: object,
-        result_status: str | None = None,
-        passed: bool | None = None,
-        failure_reason: str,
-        raw_response_hex: str,
-    ) -> None:
-        if result_status is None:
-            result_status = "PASS" if bool(passed) else "FAIL"
-        try:
-            csv_path = self._result_logger.append_result(
-                ProductionTestResult(
-                    run_id=self._result_logger.run_id,
-                    job_id=self._result_job_id,
-                    timestamp_utc=datetime.now(timezone.utc).isoformat(),
-                    node_id=node_id,
-                    node_name=node_name,
-                    test_type=test_type,
-                    expected_value=expected_value,
-                    actual_value=actual_value,
-                    result=result_status,
-                    failure_reason=failure_reason,
-                    raw_response_hex=raw_response_hex,
-                )
-            )
-        except Exception as exc:
-            error = f"Failed to write production result CSV: {exc}"
-            self.console_message.emit(f"[Production] {error}")
-            self.progress_section.append_step("Result CSV write failed")
-            self.result_summary_section.set_result("ERROR", error)
-            return
-
-        self._refresh_result_csv_ui()
-        self.console_message.emit(f"[Production] Result row appended: {csv_path}")
-
-    def _refresh_result_csv_ui(self) -> None:
-        csv_path = self._result_logger.result_csv_path
-        if csv_path is None:
-            self.uuid_section.set_result_csv_path("Pending (first result row will create the file)")
-            return
-        self.uuid_section.set_result_csv_path(str(csv_path))
 
     def _write_uuid_result_to_ipqc_workbook(self, actual_value: object, passed: bool) -> bool:
         """Write UUID summary result to workbook.
@@ -773,11 +670,6 @@ class _TestControlSection(PanelFrame):
 
     def __init__(self) -> None:
         super().__init__("Test Control", "")
-        self._profile_combo = QComboBox()
-        self._profile_combo.addItem("Communication Profile", "basic")
-        self._profile_combo.addItem("Safe Movement Profile", "movement")
-        self.body_layout.addWidget(LabeledControl("Test Profile", self._profile_combo))
-
         self._combo = QComboBox()
         self._combo.setObjectName("AxisSelectorCombo")
         for node_id, node_name in get_ml20_testable_nodes():
@@ -814,12 +706,6 @@ class _TestControlSection(PanelFrame):
             raise RuntimeError("No ML 2.0 testable nodes configured for Production.")
         node_id, node_name = selected
         return int(node_id), str(node_name)
-
-    def selected_profile_mode(self) -> str:
-        value = self._profile_combo.currentData()
-        if not isinstance(value, str):
-            return "basic"
-        return value
 
 
 class _ResultSummarySection(PanelFrame):
@@ -873,11 +759,6 @@ class _UuidCsvSection(PanelFrame):
 
         self.body_layout.addLayout(button_row)
 
-        self._result_csv_label = QLabel("Debug result CSV: Pending (first result row will create the file)")
-        self._result_csv_label.setObjectName("DetailValue")
-        self._result_csv_label.setWordWrap(True)
-        self.body_layout.addWidget(self._result_csv_label)
-
         self._workbook_label = QLabel("Selected workbook: None")
         self._workbook_label.setObjectName("DetailValue")
         self._workbook_label.setWordWrap(True)
@@ -907,9 +788,6 @@ class _UuidCsvSection(PanelFrame):
         self._last_workbook_action_label.setObjectName("DetailValue")
         self._last_workbook_action_label.setWordWrap(True)
         self.body_layout.addWidget(self._last_workbook_action_label)
-
-    def set_result_csv_path(self, path_or_status: str) -> None:
-        self._result_csv_label.setText(f"Debug result CSV: {path_or_status}")
 
     def set_workbook_path(self, path: str) -> None:
         self._workbook_label.setText(f"Selected workbook: {path}")
