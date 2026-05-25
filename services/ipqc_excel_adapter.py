@@ -126,7 +126,9 @@ class IpqcExcelAdapter:
         normalized = parameter_name.strip().lower().replace("_", " ")
         row = self._SUMMARY_PARAMETER_ALIASES.get(normalized)
         if row is None:
-            raise ValueError(f"Unsupported summary parameter '{parameter_name}'.")
+            raise ValueError(
+                f"Unsupported summary parameter '{parameter_name}' (normalized: '{normalized}')."
+            )
         return row
 
     def suggest_completed_output_path(self) -> Path:
