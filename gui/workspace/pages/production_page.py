@@ -83,11 +83,11 @@ class ProductionPage(BaseWorkspacePage):
         super().__init__("Production", "Simple node-based quality control testing.")
         self._bridge = bridge
 
-        self.info_section = _ProductionInfoSection()
-        self.communication_section = self.info_section
-        self.robot_nodes_section = self.info_section
-        self.test_control_section = self.info_section
-        self.uuid_section = self.info_section
+        self.communication_section = _CommunicationSection()
+        self.info_section = self.communication_section
+        self.robot_nodes_section = self.communication_section
+        self.test_control_section = self.communication_section
+        self.uuid_section = _UuidCsvSection()
         self.stage_section = _TestStagesSection()
         self.node_status_section = _NodeStatusSection()
         self.result_summary_section = _ResultSummarySection()
@@ -125,7 +125,8 @@ class ProductionPage(BaseWorkspacePage):
         self._uuid_operation: str | None = None
         self._pending_expected_uuid: int | None = None
 
-        self.add_weighted_row((self.info_section, 3), (self.stage_section, 2))
+        self.add_weighted_row((self.communication_section, 3), (self.stage_section, 2))
+        self.add_full_width(self.uuid_section)
         self.add_full_width(self.progress_section)
 
         self._runtime_poll_timer = QTimer(self)
@@ -564,6 +565,126 @@ class _ConnectionStatusSection(PanelFrame):
         self.body_layout.addWidget(self._detail_list)
 
 
+class _CommunicationSection(PanelFrame):
+    connect_requested = pyqtSignal(str, int)
+    disconnect_requested = pyqtSignal()
+    node_selected = pyqtSignal(int)
+
+    def __init__(self) -> None:
+        super().__init__("Communication", "")
+        self._port_combo = QComboBox()
+        self._baud_combo = QComboBox()
+        self._connect_button = QPushButton("Connect")
+        self._status_label = QLabel("○ Disconnected")
+        self._status_label.setObjectName("DetailValue")
+        self._connected = False
+        self._firmware_value = "-"
+        self._connected_nodes_value = "0"
+
+        self._combo = QComboBox()
+        self._combo.setObjectName("AxisSelectorCombo")
+        for node_id, node_name in get_ml20_testable_nodes():
+            self._combo.addItem(f"Node {node_id} - {node_name}", (node_id, node_name))
+
+        top_grid = QGridLayout()
+        top_grid.setContentsMargins(0, 0, 0, 0)
+        top_grid.setHorizontalSpacing(8)
+        top_grid.setVerticalSpacing(6)
+        top_grid.addWidget(LabeledControl("COM Port", self._port_combo), 0, 0)
+        top_grid.addWidget(LabeledControl("Baud Rate", self._baud_combo), 0, 1)
+        top_grid.addWidget(LabeledControl("Selected Node", self._combo), 1, 0, 1, 2)
+        self.body_layout.addLayout(top_grid)
+
+        self._connect_button.clicked.connect(self._handle_toggle)
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 0, 0, 0)
+        button_row.setSpacing(8)
+        button_row.addWidget(self._connect_button)
+        button_row.addWidget(self._status_label, 1)
+        self.body_layout.addLayout(button_row)
+
+        self._firmware_label = QLabel("MCU Firmware Version: -")
+        self._firmware_label.setObjectName("DetailValue")
+        self.body_layout.addWidget(self._firmware_label)
+
+        self._connected_label = QLabel("No. of Connection / Connected Nodes: 0")
+        self._connected_label.setObjectName("DetailValue")
+        self.body_layout.addWidget(self._connected_label)
+
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+
+    def set_model(self, model: dict) -> None:
+        current_port = str(self._port_combo.currentData() or "")
+        ports = model.get("ports", [])
+        self._port_combo.blockSignals(True)
+        self._port_combo.clear()
+        for port_info in ports:
+            label = str(port_info.get("label", ""))
+            value = str(port_info.get("value", ""))
+            self._port_combo.addItem(label, value)
+
+        selected_port = str(model.get("selected_port") or current_port)
+        if selected_port:
+            for index in range(self._port_combo.count()):
+                if str(self._port_combo.itemData(index) or "") == selected_port:
+                    self._port_combo.setCurrentIndex(index)
+                    break
+        self._port_combo.blockSignals(False)
+
+        selected_baud = str(model.get("selected_baud", "115200"))
+        baud_rates = [str(rate) for rate in model.get("baud_rates", ["115200", "230400", "345600"])]
+        self._baud_combo.blockSignals(True)
+        self._baud_combo.clear()
+        self._baud_combo.addItems(baud_rates)
+        self._baud_combo.setCurrentText(selected_baud)
+        self._baud_combo.blockSignals(False)
+
+        self._connected = bool(model.get("connected", False))
+        self._connect_button.setText("Disconnect" if self._connected else "Connect")
+        self._port_combo.setEnabled(not self._connected)
+        self._baud_combo.setEnabled(not self._connected)
+
+    def set_status_text(self, text: str) -> None:
+        self._status_label.setText(text)
+        if text.startswith("●"):
+            self._status_label.setStyleSheet("color: green; font-weight: bold;")
+        else:
+            self._status_label.setStyleSheet("color: #808080; font-weight: bold;")
+
+    def set_nodes(self, nodes_model: dict) -> None:
+        connected_nodes = [int(node_id) for node_id in nodes_model.get("connected_nodes", [])]
+        rows = list(nodes_model.get("rows", []))
+        self._connected_nodes_value = str(len(connected_nodes))
+        self._connected_label.setText(
+            f"No. of Connection / Connected Nodes: {self._connected_nodes_value}"
+            + (f" ({', '.join(str(node) for node in connected_nodes)})" if connected_nodes else "")
+        )
+        firmware_values = [str(row.get("firmware", "")).strip() for row in rows if str(row.get("firmware", "")).strip()]
+        self._firmware_value = firmware_values[0] if firmware_values else "-"
+        self._firmware_label.setText(f"MCU Firmware Version: {self._firmware_value}")
+
+    def selected_node(self) -> tuple[int, str]:
+        selected = self._combo.currentData()
+        if not isinstance(selected, tuple) or len(selected) != 2:
+            fallback_nodes = get_ml20_testable_nodes()
+            if fallback_nodes:
+                return fallback_nodes[0]
+            raise RuntimeError("No ML 2.0 testable nodes configured for Production.")
+        node_id, node_name = selected
+        return int(node_id), str(node_name)
+
+    def _handle_toggle(self) -> None:
+        if self._connected:
+            self.disconnect_requested.emit()
+            return
+        port = str(self._port_combo.currentData() or "")
+        try:
+            baud_rate = int(self._baud_combo.currentText())
+        except ValueError:
+            baud_rate = 115200
+        self.connect_requested.emit(port, baud_rate)
+
+
 class _ProductionInfoSection(PanelFrame):
     connect_requested = pyqtSignal(str, int)
     disconnect_requested = pyqtSignal()
@@ -850,6 +971,7 @@ class _TestStagesSection(PanelFrame):
         self._add_stage_row("single_axis", "Single Axis Functional Test", self.single_axis_requested.emit)
         self._add_stage_row("performance", "Performance Test", self.performance_requested.emit)
         self.reset_stage_states()
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
 
     def _add_stage_row(self, key: str, label_text: str, handler) -> None:
         row = QWidget()
@@ -1010,38 +1132,53 @@ class _UuidCsvSection(PanelFrame):
 
     def __init__(self) -> None:
         super().__init__("IPQC Workbook Parameter Programming", "")
-        button_row = QHBoxLayout()
-        button_row.setContentsMargins(0, 0, 0, 0)
-        button_row.setSpacing(8)
+        self._workbook_validation_text = "Workbook validation: Not loaded"
+        self._last_workbook_action_text = "No workbook write yet"
+        self._workbook_output_text = WORKBOOK_OUTPUT_PENDING
+        self._expected_serial_value = "-"
+        self._expected_pwm_value = "-"
+        self._expected_other_value = "-"
+        self._actual_serial_value = "-"
+        self._actual_pwm_value = PWM_COMMAND_SUPPORT_PENDING
+        self._check_result_value = "-"
+
+        button_grid = QGridLayout()
+        button_grid.setContentsMargins(0, 0, 0, 0)
+        button_grid.setHorizontalSpacing(8)
+        button_grid.setVerticalSpacing(6)
 
         load_workbook_button = QPushButton("Load IPQC Workbook")
         load_workbook_button.setProperty("tone", "primary")
+        load_workbook_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         load_workbook_button.clicked.connect(self.load_workbook_requested.emit)
-        button_row.addWidget(load_workbook_button)
+        button_grid.addWidget(load_workbook_button, 0, 0)
 
         write_button = QPushButton("Write Parameters to MCU")
         write_button.setProperty("tone", "secondary")
+        write_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         write_button.clicked.connect(self.write_requested.emit)
-        button_row.addWidget(write_button)
+        button_grid.addWidget(write_button, 0, 1)
 
         verify_button = QPushButton("Read Back / Verify")
         verify_button.setProperty("tone", "primary")
+        verify_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         verify_button.clicked.connect(self.verify_requested.emit)
-        button_row.addWidget(verify_button)
+        button_grid.addWidget(verify_button, 1, 0)
 
         save_button = QPushButton("Save / Download Completed Workbook")
         save_button.setProperty("tone", "secondary")
+        save_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         save_button.clicked.connect(self.save_requested.emit)
-        button_row.addWidget(save_button)
+        button_grid.addWidget(save_button, 1, 1)
 
         self.load_workbook_button = load_workbook_button
         self.verify_button = verify_button
         self.write_button = write_button
         self.save_button = save_button
 
-        self.body_layout.addLayout(button_row)
+        self.body_layout.addLayout(button_grid)
 
-        self._workbook_label = QLabel("Selected workbook: None")
+        self._workbook_label = QLabel("Configuration File / IPQC Workbook: None")
         self._workbook_label.setObjectName("DetailValue")
         self._workbook_label.setWordWrap(True)
         self.body_layout.addWidget(self._workbook_label)
@@ -1097,7 +1234,9 @@ class _UuidCsvSection(PanelFrame):
         self.body_layout.addWidget(self._last_workbook_action_label)
 
     def set_workbook_path(self, path: str) -> None:
-        self._workbook_label.setText(f"Selected workbook: {path}")
+        display_name = Path(path).name if path else "None"
+        self._workbook_label.setText(f"Configuration File / IPQC Workbook: {display_name}")
+        self._workbook_label.setToolTip(path)
 
     def set_sheet_groups(self, groups: list[str], selected: str) -> None:
         self._sheet_group_combo.blockSignals(True)
@@ -1114,27 +1253,50 @@ class _UuidCsvSection(PanelFrame):
             self.sheet_group_changed.emit(selected)
 
     def set_expected_values(self, serial_number: str, pwm: str, other_parameters: str) -> None:
-        self._expected_serial_label.setText(f"Expected S/N / UUID: {serial_number or '-'}")
-        self._expected_pwm_label.setText(f"Expected PWM: {pwm or '-'}")
-        self._expected_other_label.setText(f"Expected other parameters: {other_parameters or '-'}")
+        self._expected_serial_value = serial_number or "-"
+        self._expected_pwm_value = pwm or "-"
+        self._expected_other_value = other_parameters or "-"
+        self._expected_serial_label.setText(f"Expected S/N / UUID: {self._expected_serial_value}")
+        self._expected_pwm_label.setText(f"Expected PWM: {self._expected_pwm_value}")
+        self._expected_other_label.setText(f"Expected other parameters: {self._expected_other_value}")
 
     def set_programmed_values(self, serial_number: str, pwm: str, check_result: str) -> None:
-        self._actual_serial_label.setText(f"Programmed/read-back S/N: {serial_number or '-'}")
-        self._actual_pwm_label.setText(f"Programmed/read-back PWM: {pwm or '-'}")
-        self._check_result_label.setText(f"Check result: {check_result or '-'}")
+        self._actual_serial_value = serial_number or "-"
+        self._actual_pwm_value = pwm or "-"
+        self._check_result_value = check_result or "-"
+        self._actual_serial_label.setText(f"Programmed/read-back S/N: {self._actual_serial_value}")
+        self._actual_pwm_label.setText(f"Programmed/read-back PWM: {self._actual_pwm_value}")
+        self._check_result_label.setText(f"Check result: {self._check_result_value}")
 
     def set_workbook_validation(self, passed: bool, message: str) -> None:
         if passed:
+            self._workbook_validation_text = "Workbook validation: PASSED"
             self._workbook_validation_label.setText("Workbook validation: PASSED")
             return
         reason = message or "FAILED"
-        self._workbook_validation_label.setText(f"Workbook validation: FAILED ({reason})")
+        self._workbook_validation_text = f"Workbook validation: FAILED ({reason})"
+        self._workbook_validation_label.setText(self._workbook_validation_text)
 
     def set_workbook_output_path(self, path_or_status: str) -> None:
+        self._workbook_output_text = path_or_status
         self._workbook_output_label.setText(f"Completed workbook: {path_or_status}")
+        self._workbook_output_label.setToolTip(path_or_status)
 
     def set_last_workbook_action(self, status: str) -> None:
+        self._last_workbook_action_text = status
         self._last_workbook_action_label.setText(f"Last workbook action: {status}")
+
+    @property
+    def workbook_validation_text(self) -> str:
+        return self._workbook_validation_text
+
+    @property
+    def last_workbook_action_text(self) -> str:
+        return self._last_workbook_action_text
+
+    @property
+    def workbook_output_text(self) -> str:
+        return self._workbook_output_text
 
 
 class _TestProgressSection(PanelFrame):
