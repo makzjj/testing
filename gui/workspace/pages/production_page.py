@@ -94,6 +94,7 @@ class ProductionPage(BaseWorkspacePage):
         self.uuid_section.sheet_group_changed.connect(self._handle_ipqc_sheet_group_changed)
         self.uuid_section.write_requested.connect(self._handle_write_uuid)
         self.uuid_section.verify_requested.connect(self._handle_verify_uuid)
+        self.uuid_section.save_requested.connect(self._handle_save_completed_workbook)
         self.communication_section.connect_requested.connect(self._handle_connect_requested)
         self.communication_section.disconnect_requested.connect(self._handle_disconnect_requested)
         self.robot_nodes_section.node_selected.connect(self._handle_runtime_node_selected)
@@ -123,6 +124,7 @@ class ProductionPage(BaseWorkspacePage):
 
         self.uuid_section.set_workbook_output_path(WORKBOOK_OUTPUT_PENDING)
         self.uuid_section.set_last_workbook_action("No workbook write yet")
+        self.uuid_section.set_programmed_values("-", "Pending command support", "-")
         self._reset_result_only()
         self._refresh_runtime_panels()
         self._refresh_workbook_action_states()
@@ -246,21 +248,23 @@ class ProductionPage(BaseWorkspacePage):
 
     def _refresh_ipqc_expected_preview(self) -> None:
         if not self._ipqc_excel_adapter.has_loaded_workbook():
-            self.uuid_section.set_expected_values("", "", "", "")
+            self.uuid_section.set_expected_values("", "", "")
+            self.uuid_section.set_programmed_values("-", "Pending command support", "-")
             return
         try:
             expected = self._ipqc_excel_adapter.read_expected_summary(strict=False)
         except Exception as exc:
             self.uuid_section.set_workbook_validation(False, str(exc))
-            self.uuid_section.set_expected_values("", "", "", "")
+            self.uuid_section.set_expected_values("", "", "")
+            self.uuid_section.set_programmed_values("-", "Pending command support", "-")
             self._refresh_workbook_action_states()
             return
         self.uuid_section.set_expected_values(
             expected.serial_number,
             expected.pwm,
-            expected.operator,
             expected.other_parameters,
         )
+        self.uuid_section.set_programmed_values("-", "Pending command support", "-")
         self._refresh_workbook_action_states()
 
     def _handle_write_uuid(self) -> None:
@@ -279,18 +283,18 @@ class ProductionPage(BaseWorkspacePage):
             self.console_message.emit(f"[Production] {message}")
             return
 
-        self._uuid_operation = "write"
-        self._pending_expected_uuid = expected_uuid
         self.result_summary_section.set_result("WRITING UUID", f"Writing UUID to Node {node_id} {node_name}.")
         success, message = self._parameter_controller.write_uuid(node_id, node_name, expected_uuid)
         if success:
-            self.progress_section.append_step(f"Started UUID write + read-back verification for Node {node_id} {node_name}")
+            self.progress_section.append_step(f"UUID write sent for Node {node_id} {node_name}")
+            self.result_summary_section.set_result("WRITE SENT", message)
+            self.uuid_section.set_last_workbook_action("UUID write sent to MCU; awaiting read-back verification")
         else:
-            self._uuid_operation = None
-            self._pending_expected_uuid = None
             self.result_summary_section.set_result("FAIL", message)
             self.progress_section.append_step(f"Failed to write UUID for Node {node_id} {node_name}")
             self.console_message.emit(f"[Production] {message}")
+        self._uuid_operation = None
+        self._pending_expected_uuid = None
         self._refresh_connection_status()
 
     def _handle_verify_uuid(self) -> None:
@@ -345,8 +349,10 @@ class ProductionPage(BaseWorkspacePage):
                 self.progress_section.append_step("UUID write + read-back verification failed")
             else:
                 self.progress_section.append_step("UUID verification failed")
+        check_text = "PASS" if passed else "FAIL"
+        self.uuid_section.set_programmed_values(actual_value if actual_value != "" else "-", "Pending command support", check_text)
         if self._ipqc_excel_adapter.has_loaded_workbook():
-            self._write_uuid_result_to_ipqc_workbook(actual_value, passed)
+            self._record_uuid_result_in_ipqc_workbook(actual_value, passed)
 
     def _reset_result_only(self) -> None:
         self.result_summary_section.set_result("READY", "No test has been run yet.")
@@ -414,29 +420,26 @@ class ProductionPage(BaseWorkspacePage):
             self.console_message.emit(f"[Production] Invalid workbook expected S/N '{serial_text}': {exc}")
             return None
 
-    def _write_uuid_result_to_ipqc_workbook(self, actual_value: object, passed: bool) -> bool:
-        """Write UUID summary result to workbook.
+    def _record_uuid_result_in_ipqc_workbook(self, actual_value: object, passed: bool) -> bool:
+        """Write UUID summary result into the loaded workbook object.
 
         Side effects:
-        - Updates completed workbook path and last workbook action labels.
+        - Updates last workbook action labels.
         - Emits production console messages.
-        - Sets result summary to REPORTING ERROR when write/save fails.
+        - Sets result summary to REPORTING ERROR when write fails.
 
-        Returns True only when workbook write/save/reporting succeeds.
-        Returns False when no workbook is loaded or when write/save fails.
+        Returns True only when workbook write/reporting succeeds.
+        Returns False when no workbook is loaded or when write fails.
         """
         if not self._ipqc_excel_adapter.has_loaded_workbook():
             return False
         try:
-            self._ipqc_excel_adapter.write_summary_result("S/N", actual_value, "PASS" if passed else "FAIL")
-            output_path = self._ipqc_excel_adapter.suggest_completed_output_path()
-            saved_path = self._ipqc_excel_adapter.save_completed_workbook(output_path)
-            self.uuid_section.set_workbook_output_path(str(saved_path))
-            self.uuid_section.set_last_workbook_action("UUID summary row write: success")
-            self.console_message.emit(f"[Production] IPQC workbook updated: {saved_path}")
+            self._ipqc_excel_adapter.write_uuid_actual_and_check(actual_value, "PASS" if passed else "FAIL")
+            self.uuid_section.set_last_workbook_action("UUID summary row updated in workbook memory")
+            self.console_message.emit("[Production] IPQC workbook UUID report row updated in memory")
             return True
         except Exception as exc:
-            self.console_message.emit(f"[Production] Failed to update IPQC workbook with UUID result: {exc}")
+            self.console_message.emit(f"[Production] Failed to update IPQC workbook UUID report row: {exc}")
             self.progress_section.append_step("IPQC workbook UUID result write failed")
             self.uuid_section.set_last_workbook_action(f"UUID summary row write failed: {exc}")
             self.result_summary_section.set_result(
@@ -445,10 +448,36 @@ class ProductionPage(BaseWorkspacePage):
             )
             return False
 
+    def _handle_save_completed_workbook(self) -> None:
+        if not self._ipqc_excel_adapter.has_loaded_workbook():
+            self.result_summary_section.set_result("FAIL", "Load an IPQC workbook before saving a completed workbook.")
+            self.console_message.emit("[Production] Save blocked: no IPQC workbook is loaded.")
+            return
+        suggested = self._ipqc_excel_adapter.suggest_completed_output_path()
+        save_path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Save Completed IPQC Workbook",
+            str(suggested),
+            "Excel Files (*.xlsx *.xlsm)",
+        )
+        if not save_path:
+            return
+        try:
+            saved_path = self._ipqc_excel_adapter.save_completed_workbook(save_path)
+            self.uuid_section.set_workbook_output_path(str(saved_path))
+            self.uuid_section.set_last_workbook_action("Completed workbook saved")
+            self.console_message.emit(f"[Production] Completed IPQC workbook saved: {saved_path}")
+        except Exception as exc:
+            self.uuid_section.set_last_workbook_action(f"Completed workbook save failed: {exc}")
+            self.result_summary_section.set_result("REPORTING ERROR", "Failed to save completed IPQC workbook.")
+            self.console_message.emit(f"[Production] Failed to save completed IPQC workbook: {exc}")
+
     def _refresh_workbook_action_states(self) -> None:
         can_use_workbook_uuid = self._has_workbook_expected_uuid()
+        has_workbook = self._ipqc_excel_adapter.has_loaded_workbook()
         self.uuid_section.verify_button.setEnabled(can_use_workbook_uuid)
         self.uuid_section.write_button.setEnabled(can_use_workbook_uuid)
+        self.uuid_section.save_button.setEnabled(has_workbook)
 
     def _has_workbook_expected_uuid(self) -> bool:
         if not self._ipqc_excel_adapter.has_loaded_workbook():
@@ -731,9 +760,10 @@ class _UuidCsvSection(PanelFrame):
     sheet_group_changed = pyqtSignal(str)
     write_requested = pyqtSignal()
     verify_requested = pyqtSignal()
+    save_requested = pyqtSignal()
 
     def __init__(self) -> None:
-        super().__init__("IPQC Workbook & Parameter Verification", "")
+        super().__init__("IPQC Workbook Parameter Programming", "")
         button_row = QHBoxLayout()
         button_row.setContentsMargins(0, 0, 0, 0)
         button_row.setSpacing(8)
@@ -743,19 +773,25 @@ class _UuidCsvSection(PanelFrame):
         load_workbook_button.clicked.connect(self.load_workbook_requested.emit)
         button_row.addWidget(load_workbook_button)
 
-        verify_button = QPushButton("Verify Current UUID")
-        verify_button.setProperty("tone", "primary")
-        verify_button.clicked.connect(self.verify_requested.emit)
-        button_row.addWidget(verify_button)
-
-        write_button = QPushButton("Write UUID to PCB")
+        write_button = QPushButton("Write Parameters to MCU")
         write_button.setProperty("tone", "secondary")
         write_button.clicked.connect(self.write_requested.emit)
         button_row.addWidget(write_button)
 
+        verify_button = QPushButton("Read Back / Verify")
+        verify_button.setProperty("tone", "primary")
+        verify_button.clicked.connect(self.verify_requested.emit)
+        button_row.addWidget(verify_button)
+
+        save_button = QPushButton("Save / Download Completed Workbook")
+        save_button.setProperty("tone", "secondary")
+        save_button.clicked.connect(self.save_requested.emit)
+        button_row.addWidget(save_button)
+
         self.load_workbook_button = load_workbook_button
         self.verify_button = verify_button
         self.write_button = write_button
+        self.save_button = save_button
 
         self.body_layout.addLayout(button_row)
 
@@ -774,10 +810,35 @@ class _UuidCsvSection(PanelFrame):
         self._workbook_validation_label.setWordWrap(True)
         self.body_layout.addWidget(self._workbook_validation_label)
 
-        self._expected_summary_label = QLabel("Expected values: S/N=-, PWM=-, Operator=-, Other=-")
-        self._expected_summary_label.setObjectName("DetailValue")
-        self._expected_summary_label.setWordWrap(True)
-        self.body_layout.addWidget(self._expected_summary_label)
+        self._expected_serial_label = QLabel("Expected S/N / UUID: -")
+        self._expected_serial_label.setObjectName("DetailValue")
+        self._expected_serial_label.setWordWrap(True)
+        self.body_layout.addWidget(self._expected_serial_label)
+
+        self._expected_pwm_label = QLabel("Expected PWM: -")
+        self._expected_pwm_label.setObjectName("DetailValue")
+        self._expected_pwm_label.setWordWrap(True)
+        self.body_layout.addWidget(self._expected_pwm_label)
+
+        self._expected_other_label = QLabel("Expected other parameters: -")
+        self._expected_other_label.setObjectName("DetailValue")
+        self._expected_other_label.setWordWrap(True)
+        self.body_layout.addWidget(self._expected_other_label)
+
+        self._actual_serial_label = QLabel("Programmed/read-back S/N: -")
+        self._actual_serial_label.setObjectName("DetailValue")
+        self._actual_serial_label.setWordWrap(True)
+        self.body_layout.addWidget(self._actual_serial_label)
+
+        self._actual_pwm_label = QLabel("Programmed/read-back PWM: Pending command support")
+        self._actual_pwm_label.setObjectName("DetailValue")
+        self._actual_pwm_label.setWordWrap(True)
+        self.body_layout.addWidget(self._actual_pwm_label)
+
+        self._check_result_label = QLabel("Check result: -")
+        self._check_result_label.setObjectName("DetailValue")
+        self._check_result_label.setWordWrap(True)
+        self.body_layout.addWidget(self._check_result_label)
 
         self._workbook_output_label = QLabel("Completed workbook: Pending")
         self._workbook_output_label.setObjectName("DetailValue")
@@ -806,14 +867,15 @@ class _UuidCsvSection(PanelFrame):
         if selected:
             self.sheet_group_changed.emit(selected)
 
-    def set_expected_values(self, serial_number: str, pwm: str, operator: str, other_parameters: str) -> None:
-        serial_text = serial_number or "-"
-        pwm_text = pwm or "-"
-        operator_text = operator or "-"
-        other_text = other_parameters or "-"
-        self._expected_summary_label.setText(
-            f"Expected values: S/N={serial_text}, PWM={pwm_text}, Operator={operator_text}, Other={other_text}"
-        )
+    def set_expected_values(self, serial_number: str, pwm: str, other_parameters: str) -> None:
+        self._expected_serial_label.setText(f"Expected S/N / UUID: {serial_number or '-'}")
+        self._expected_pwm_label.setText(f"Expected PWM: {pwm or '-'}")
+        self._expected_other_label.setText(f"Expected other parameters: {other_parameters or '-'}")
+
+    def set_programmed_values(self, serial_number: str, pwm: str, check_result: str) -> None:
+        self._actual_serial_label.setText(f"Programmed/read-back S/N: {serial_number or '-'}")
+        self._actual_pwm_label.setText(f"Programmed/read-back PWM: {pwm or '-'}")
+        self._check_result_label.setText(f"Check result: {check_result or '-'}")
 
     def set_workbook_validation(self, passed: bool, message: str) -> None:
         if passed:

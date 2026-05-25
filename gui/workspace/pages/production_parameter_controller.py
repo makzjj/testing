@@ -1,4 +1,4 @@
-"""Production UUID parameter controller for CSV loading, writing, and verification."""
+"""Production UUID parameter controller for writing and verification."""
 
 from __future__ import annotations
 
@@ -132,12 +132,11 @@ def decode_uuid_response(payload: list[int] | tuple[int, ...]) -> tuple[bool, in
 
 
 class ProductionParameterController(QObject):
-    """Manage Production UUID CSV validation and selected-node Runtime orchestration.
+    """Manage Production UUID write/read runtime orchestration.
 
-    Responsibilities include strict CSV validation (`node_id,node_name,uuid`),
-    ML 2.0 node/range checks (3-12), UUID parsing and format checks, read-only
-    verification against the selected node, and explicit write + read-back
-    verification when the operator chooses to program a UUID.
+    Responsibilities include UUID parsing and format checks, optional legacy CSV
+    validation, selected-node runtime write operations, and explicit read-back
+    verification when requested by the operator.
     """
 
     log_message = pyqtSignal(str)
@@ -244,7 +243,7 @@ class ProductionParameterController(QObject):
         return self._write_uuid_row(selected_row)
 
     def _write_uuid_row(self, selected_row: UuidCsvRow) -> tuple[bool, str]:
-        runtime_window, backend_client, readiness_error = self._resolve_runtime_for_uuid_operation()
+        _runtime_window, backend_client, readiness_error = self._resolve_runtime_for_uuid_operation()
         if readiness_error is not None:
             return False, readiness_error
         self.log_message.emit(f"[Production] Writing UUID to Node {selected_row.node_id} {selected_row.node_name}")
@@ -255,13 +254,7 @@ class ProductionParameterController(QObject):
             self.log_message.emit(f"[Production] TX[UUID Write] -> Node {selected_row.node_id:02d}: {payload_text}")
         except Exception as exc:
             return False, f"Failed to write UUID for Node {selected_row.node_id} {selected_row.node_name}: {exc}"
-
-        if not self._start_verify_for_row(selected_row, runtime_window=runtime_window):
-            return False, "Failed to start UUID read-back verification after write."
-        return (
-            True,
-            f"UUID write sent to Node {selected_row.node_id} {selected_row.node_name}; awaiting read-back verification.",
-        )
+        return True, f"UUID write sent to Node {selected_row.node_id} {selected_row.node_name}."
 
     def verify_loaded_uuid(self, node_id: int, node_name: str) -> bool:
         if self._errors:

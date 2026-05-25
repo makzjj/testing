@@ -639,15 +639,26 @@ class ProductionPageWorkflowTests(unittest.TestCase):
 
             self.assertEqual(page.uuid_section._sheet_group_combo.currentText(), "3X")
             self.assertIn("Selected workbook", page.uuid_section._workbook_label.text())
-            self.assertIn("1223303010", page.uuid_section._expected_summary_label.text())
-            self.assertIn("PWM=100", page.uuid_section._expected_summary_label.text())
+            self.assertEqual(page.uuid_section._expected_serial_label.text(), "Expected S/N / UUID: 1223303010")
+            self.assertEqual(page.uuid_section._expected_pwm_label.text(), "Expected PWM: 100")
+            self.assertEqual(page.uuid_section._expected_other_label.text(), "Expected other parameters: N/A")
+            self.assertIn("Pending command support", page.uuid_section._actual_pwm_label.text())
             self.assertEqual(page.uuid_section._workbook_validation_label.text(), "Workbook validation: PASSED")
             self.assertTrue(page.uuid_section.verify_button.isEnabled())
             self.assertTrue(page.uuid_section.write_button.isEnabled())
+            self.assertTrue(page.uuid_section.save_button.isEnabled())
+            self.assertEqual(runtime_window.backend_client.sent_commands, [])
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook write wiring tests.")
-    def test_production_page_writes_uuid_result_to_ipqc_workbook_output(self) -> None:
+    def test_production_page_write_parameters_sends_uuid_write_using_workbook_b4_value(self) -> None:
         runtime_window = _FakeRuntimeWindow()
+        runtime_window.node_status[3] = {
+            "connected": True,
+            "firmware": "v1.0.0",
+            "uuid": "",
+            "type": "X",
+            "interrupt": "OK",
+        }
         bridge = _FakeBridge(runtime_window)
         page = ProductionPage(bridge)
 
@@ -662,19 +673,12 @@ class ProductionPageWorkflowTests(unittest.TestCase):
                 page._handle_load_ipqc_workbook()
                 self._app.processEvents()
 
-            page._write_uuid_result_to_ipqc_workbook("1223303011", True)
+            page._handle_write_uuid()
             self._app.processEvents()
 
-            output_text = page.uuid_section._workbook_output_label.text()
-            self.assertTrue(output_text.startswith("Completed workbook: "))
-            output_path = Path(output_text.replace("Completed workbook: ", "", 1))
-            self.assertTrue(output_path.exists())
-
-            output_wb = load_workbook(output_path)
-            output_sheet = output_wb["3X"]
-            self.assertEqual(output_sheet["C4"].value, "1223303011")
-            self.assertEqual(output_sheet["D4"].value, "PASS")
-            self.assertIn("success", page.uuid_section._last_workbook_action_label.text().lower())
+            expected_uuid = 1223303010
+            self.assertEqual(runtime_window.backend_client.sent_commands[-1], (3, build_uuid_write_payload(expected_uuid)))
+            self.assertNotIn((3, [0xE0, 0x3F]), runtime_window.backend_client.sent_commands)
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook write wiring tests.")
     def test_production_page_workbook_write_failure_is_reporting_error(self) -> None:
@@ -692,8 +696,8 @@ class ProductionPageWorkflowTests(unittest.TestCase):
                 page._handle_load_ipqc_workbook()
                 self._app.processEvents()
 
-            with patch.object(page._ipqc_excel_adapter, "save_completed_workbook", side_effect=OSError("disk full")):
-                page._write_uuid_result_to_ipqc_workbook("1223303011", True)
+            with patch.object(page._ipqc_excel_adapter, "write_uuid_actual_and_check", side_effect=OSError("disk full")):
+                page._record_uuid_result_in_ipqc_workbook("1223303011", True)
                 self._app.processEvents()
 
             self.assertEqual(page.result_summary_section._status_label.text(), "REPORTING ERROR")
@@ -701,7 +705,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertIn("failed", page.uuid_section._last_workbook_action_label.text().lower())
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook UUID verify tests.")
-    def test_production_page_verify_uses_workbook_expected_sn_and_writes_workbook(self) -> None:
+    def test_production_page_verify_uses_workbook_expected_sn_and_writes_result_cells(self) -> None:
         runtime_window = _FakeRuntimeWindow()
         runtime_window.node_status[3] = {
             "connected": True,
@@ -741,16 +745,90 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             )
             self._app.processEvents()
 
-            output_text = page.uuid_section._workbook_output_label.text()
-            self.assertTrue(output_text.startswith("Completed workbook: "))
-            output_path = Path(output_text.replace("Completed workbook: ", "", 1))
-            self.assertTrue(output_path.exists())
-
-            output_sheet = load_workbook(output_path)["3X"]
+            output_sheet = page._ipqc_excel_adapter._workbook["3X"]
             self.assertEqual(output_sheet["C4"].value, str(expected_uuid))
             self.assertEqual(output_sheet["D4"].value, "PASS")
+            self.assertIn("PASS", page.uuid_section._check_result_label.text())
 
             self.assertIsNone(page._result_logger.result_csv_path)
+
+    @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook UUID verify tests.")
+    def test_production_page_verify_mismatch_writes_fail_result_cells(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        runtime_window.node_status[3] = {
+            "connected": True,
+            "firmware": "v1.0.0",
+            "uuid": "",
+            "type": "X",
+            "interrupt": "OK",
+        }
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            self._create_ipqc_workbook(workbook_path, with_optional_fields=False)
+
+            with patch(
+                "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
+                return_value=(str(workbook_path), "Excel Files (*.xlsx)"),
+            ):
+                page._handle_load_ipqc_workbook()
+                self._app.processEvents()
+
+            page._handle_verify_uuid()
+            self._app.processEvents()
+            runtime_window.packet_received.emit(
+                {
+                    "status": "ok",
+                    "type": "can_over_uart",
+                    "sender": 3,
+                    "cmd": 0xE0,
+                    "params": [0x3A, *build_uuid_write_payload(1223303011)[2:]],
+                }
+            )
+            self._app.processEvents()
+
+            output_sheet = page._ipqc_excel_adapter._workbook["3X"]
+            self.assertEqual(output_sheet["C4"].value, "1223303011")
+            self.assertEqual(output_sheet["D4"].value, "FAIL")
+            self.assertIn("FAIL", page.uuid_section._check_result_label.text())
+
+    @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook save tests.")
+    def test_production_page_save_completed_workbook_shows_output_path(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        runtime_window.node_status[3] = {
+            "connected": True,
+            "firmware": "v1.0.0",
+            "uuid": "",
+            "type": "X",
+            "interrupt": "OK",
+        }
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            output_path = Path(tmpdir) / "ipqc_completed.xlsx"
+            self._create_ipqc_workbook(workbook_path, with_optional_fields=False)
+
+            with patch(
+                "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
+                return_value=(str(workbook_path), "Excel Files (*.xlsx)"),
+            ):
+                page._handle_load_ipqc_workbook()
+                self._app.processEvents()
+
+            page._record_uuid_result_in_ipqc_workbook("1223303010", True)
+            with patch(
+                "gui.workspace.pages.production_page.QFileDialog.getSaveFileName",
+                return_value=(str(output_path), "Excel Files (*.xlsx)"),
+            ):
+                page._handle_save_completed_workbook()
+                self._app.processEvents()
+
+            self.assertIn(str(output_path.resolve()), page.uuid_section._workbook_output_label.text())
+            self.assertTrue(output_path.exists())
 
 
 class ProductionParameterControllerTests(unittest.TestCase):
@@ -786,7 +864,7 @@ class ProductionParameterControllerTests(unittest.TestCase):
         self.assertEqual(controller.rows, [])
         self.assertGreaterEqual(len(controller.errors), 1)
 
-    def test_write_loaded_uuid_sends_write_and_readback_payloads(self) -> None:
+    def test_write_loaded_uuid_sends_write_payload_only(self) -> None:
         runtime_window = _FakeRuntimeWindow()
         bridge = _FakeBridge(runtime_window)
         controller = ProductionParameterController(bridge)
@@ -803,7 +881,7 @@ class ProductionParameterControllerTests(unittest.TestCase):
             runtime_window.backend_client.sent_commands[0],
             (6, [0xE0, 0x3D, 0x00, 0x48, 0xEA, 0x2B, 0x1A]),
         )
-        self.assertEqual(runtime_window.backend_client.sent_commands[1], (6, [0xE0, 0x3F]))
+        self.assertEqual(len(runtime_window.backend_client.sent_commands), 1)
 
     def test_verify_loaded_uuid_passes_for_matching_response(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -887,18 +965,39 @@ class ProductionParameterControllerTests(unittest.TestCase):
         page = ProductionPage(bridge)
 
         title_labels = [label.text() for label in page.uuid_section.findChildren(QLabel) if label.objectName() == "PanelTitle"]
-        self.assertIn("IPQC Workbook & Parameter Verification", title_labels)
+        self.assertIn("IPQC Workbook Parameter Programming", title_labels)
         self.assertFalse(hasattr(page.uuid_section, "load_button"))
         self.assertFalse(hasattr(page.uuid_section, "_file_label"))
         self.assertFalse(hasattr(page.uuid_section, "_validation_label"))
         self.assertFalse(hasattr(page.uuid_section, "_preview_table"))
         self.assertEqual(page.uuid_section.load_workbook_button.text(), "Load IPQC Workbook")
-        self.assertEqual(page.uuid_section.verify_button.text(), "Verify Current UUID")
-        self.assertEqual(page.uuid_section.write_button.text(), "Write UUID to PCB")
+        self.assertEqual(page.uuid_section.write_button.text(), "Write Parameters to MCU")
+        self.assertEqual(page.uuid_section.verify_button.text(), "Read Back / Verify")
+        self.assertEqual(page.uuid_section.save_button.text(), "Save / Download Completed Workbook")
         self.assertFalse(page.uuid_section.verify_button.isEnabled())
         self.assertFalse(page.uuid_section.write_button.isEnabled())
+        self.assertFalse(page.uuid_section.save_button.isEnabled())
         self.assertTrue(page.uuid_section._last_workbook_action_label.text().startswith("Last workbook action: "))
         self.assertFalse(hasattr(page.uuid_section, "_result_csv_label"))
+        button_texts = [button.text() for button in page.findChildren(type(page.uuid_section.write_button))]
+        self.assertNotIn("Echo Test", button_texts)
+        self.assertNotIn("Safe Movement Test", button_texts)
+        self.assertFalse(hasattr(page.test_control_section, "_profile_combo"))
+
+    def test_production_page_blocks_write_and_verify_when_no_workbook_loaded(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        self.assertFalse(page.uuid_section.write_button.isEnabled())
+        self.assertFalse(page.uuid_section.verify_button.isEnabled())
+        page._handle_write_uuid()
+        page._handle_verify_uuid()
+        self._app.processEvents()
+
+        self.assertEqual(runtime_window.backend_client.sent_commands, [])
+        self.assertEqual(page.result_summary_section._status_label.text(), "FAIL")
+        self.assertIn("Expected S/N is unavailable", page.result_summary_section._reason_label.text())
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook guard tests.")
     def test_production_page_blocks_uuid_actions_when_workbook_expected_sn_missing(self) -> None:
@@ -921,8 +1020,10 @@ class ProductionParameterControllerTests(unittest.TestCase):
 
             self.assertFalse(page.uuid_section.verify_button.isEnabled())
             self.assertFalse(page.uuid_section.write_button.isEnabled())
+            page._handle_write_uuid()
             page._handle_verify_uuid()
             self._app.processEvents()
+            self.assertEqual(runtime_window.backend_client.sent_commands, [])
             self.assertEqual(page.result_summary_section._status_label.text(), "FAIL")
             self.assertIn("Expected S/N is unavailable", page.result_summary_section._reason_label.text())
 
