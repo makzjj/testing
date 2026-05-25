@@ -8,6 +8,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QApplication
@@ -34,6 +35,13 @@ from gui.workspace.pages.production_test_controller import (
 from gui.workspace.pages.production_test_models import Tolerance, evaluate_tolerance
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+try:
+    from openpyxl import Workbook, load_workbook
+
+    _HAS_OPENPYXL = True
+except ImportError:  # pragma: no cover - environment dependent.
+    _HAS_OPENPYXL = False
 
 
 class _FakeBackendClient:
@@ -618,6 +626,74 @@ class ProductionPageWorkflowTests(unittest.TestCase):
         page.robot_nodes_section._handle_cell_clicked(0, 0)
         selected_node_id, _selected_name = page.test_control_section.selected_node()
         self.assertEqual(selected_node_id, 8)
+
+    @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook UI tests.")
+    def test_production_page_loads_ipqc_workbook_and_shows_expected_preview(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "3X"
+            wb.create_sheet("3X_D")
+            wb.create_sheet("3X_A")
+            ws["B3"] = "operator-a"
+            ws["B4"] = "1223303010"
+            ws["B5"] = "100"
+            ws["B6"] = "N/A"
+            wb.save(workbook_path)
+
+            with patch(
+                "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
+                return_value=(str(workbook_path), "Excel Files (*.xlsx)"),
+            ):
+                page._handle_load_ipqc_workbook()
+                self._app.processEvents()
+
+            self.assertEqual(page.uuid_section._sheet_group_combo.currentText(), "3X")
+            self.assertIn("Selected workbook", page.uuid_section._workbook_label.text())
+            self.assertIn("1223303010", page.uuid_section._expected_summary_label.text())
+            self.assertIn("PWM=100", page.uuid_section._expected_summary_label.text())
+
+    @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook write wiring tests.")
+    def test_production_page_writes_uuid_result_to_ipqc_workbook_output(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "3X"
+            wb.create_sheet("3X_D")
+            wb.create_sheet("3X_A")
+            ws["B4"] = "1223303010"
+            ws["B5"] = "100"
+            wb.save(workbook_path)
+
+            with patch(
+                "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
+                return_value=(str(workbook_path), "Excel Files (*.xlsx)"),
+            ):
+                page._handle_load_ipqc_workbook()
+                self._app.processEvents()
+
+            page._write_uuid_result_to_ipqc_workbook("1223303011", True)
+            self._app.processEvents()
+
+            output_text = page.uuid_section._workbook_output_label.text()
+            self.assertTrue(output_text.startswith("Completed workbook: "))
+            output_path = Path(output_text.replace("Completed workbook: ", "", 1))
+            self.assertTrue(output_path.exists())
+
+            output_wb = load_workbook(output_path)
+            output_sheet = output_wb["3X"]
+            self.assertEqual(output_sheet["C4"].value, "1223303011")
+            self.assertEqual(output_sheet["D4"].value, "PASS")
 
 
 class ProductionParameterControllerTests(unittest.TestCase):

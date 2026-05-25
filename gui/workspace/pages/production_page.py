@@ -22,6 +22,7 @@ from ..bridges import WorkspaceRuntimeBridge
 from ..models import DetailItem
 from ..widgets import DetailListWidget, LabeledControl, PanelFrame, SimpleTableWidget
 from ..widgets.layout_utils import clear_layout
+from services.ipqc_excel_adapter import IpqcExcelAdapter
 from services.production_csv_logger import ProductionCsvLogger
 from services.production_test_result import ProductionTestResult
 from .base_page import BaseWorkspacePage
@@ -84,6 +85,7 @@ class ProductionPage(BaseWorkspacePage):
         self.progress_section = _TestProgressSection()
         self._test_controller = ProductionTestController(bridge)
         self._parameter_controller = ProductionParameterController(bridge, node_map=ML20_NODE_MAP)
+        self._ipqc_excel_adapter = IpqcExcelAdapter()
         self._result_logger = ProductionCsvLogger()
         self._result_job_id = ""
 
@@ -91,6 +93,8 @@ class ProductionPage(BaseWorkspacePage):
         self.test_control_section.stop_requested.connect(self._handle_stop_test)
         self.test_control_section.clear_requested.connect(self._handle_clear_result)
         self.uuid_section.load_csv_requested.connect(self._handle_load_uuid_csv)
+        self.uuid_section.load_workbook_requested.connect(self._handle_load_ipqc_workbook)
+        self.uuid_section.sheet_group_changed.connect(self._handle_ipqc_sheet_group_changed)
         self.uuid_section.write_requested.connect(self._handle_write_uuid)
         self.uuid_section.verify_requested.connect(self._handle_verify_uuid)
         self.communication_section.connect_requested.connect(self._handle_connect_requested)
@@ -120,6 +124,7 @@ class ProductionPage(BaseWorkspacePage):
         self._runtime_poll_timer.start()
 
         self._refresh_result_csv_ui()
+        self.uuid_section.set_workbook_output_path("Pending")
         self._reset_result_only()
         self._refresh_runtime_panels()
 
@@ -219,6 +224,67 @@ class ProductionPage(BaseWorkspacePage):
             self.progress_section.append_step("UUID CSV validation failed")
             self._refresh_connection_status()
 
+    def _handle_load_ipqc_workbook(self) -> None:
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "Load IPQC Workbook",
+            "",
+            "Excel Files (*.xlsx *.xlsm *.xltx *.xltm)",
+        )
+        if not path:
+            return
+
+        try:
+            groups = self._ipqc_excel_adapter.load_template(path)
+            active_group = self._ipqc_excel_adapter.active_sheet_group or ""
+            self.uuid_section.set_workbook_path(path)
+            self.uuid_section.set_sheet_groups(groups, active_group)
+            self._result_job_id = Path(path).stem
+            self._result_logger.set_output_dir(Path(path).expanduser().resolve().parent)
+            self._refresh_result_csv_ui()
+            self.uuid_section.set_workbook_output_path("Pending")
+            self._refresh_ipqc_expected_preview()
+        except Exception as exc:
+            self.console_message.emit(f"[Production] Failed to load IPQC workbook: {exc}")
+            self.result_summary_section.set_result("FAIL", "IPQC workbook load failed.")
+            self.progress_section.append_step("IPQC workbook load failed")
+            self.uuid_section.set_workbook_validation(False, str(exc))
+            return
+
+        self.uuid_section.set_workbook_validation(True, "")
+        self.console_message.emit(f"[Production] Loaded IPQC workbook: {path}")
+        self.progress_section.append_step(f"Loaded IPQC workbook with {len(groups)} sheet group(s)")
+        self.result_summary_section.set_result("READY", "IPQC workbook loaded.")
+
+    def _handle_ipqc_sheet_group_changed(self, base_group: str) -> None:
+        if not base_group:
+            return
+        try:
+            self._ipqc_excel_adapter.select_sheet_group(base_group)
+            self._refresh_ipqc_expected_preview()
+        except Exception as exc:
+            self.console_message.emit(f"[Production] Failed to select IPQC sheet group '{base_group}': {exc}")
+            self.uuid_section.set_workbook_validation(False, str(exc))
+            return
+        self.uuid_section.set_workbook_validation(True, "")
+
+    def _refresh_ipqc_expected_preview(self) -> None:
+        if not self._ipqc_excel_adapter.has_loaded_workbook():
+            self.uuid_section.set_expected_values("", "", "", "")
+            return
+        try:
+            expected = self._ipqc_excel_adapter.read_expected_summary(strict=False)
+        except Exception as exc:
+            self.uuid_section.set_workbook_validation(False, str(exc))
+            self.uuid_section.set_expected_values("", "", "", "")
+            return
+        self.uuid_section.set_expected_values(
+            expected.serial_number,
+            expected.pwm,
+            expected.operator,
+            expected.other_parameters,
+        )
+
     def _handle_write_uuid(self) -> None:
         try:
             node_id, node_name = self.test_control_section.selected_node()
@@ -297,6 +363,7 @@ class ProductionPage(BaseWorkspacePage):
                 self.progress_section.append_step("UUID write + read-back verification failed")
             else:
                 self.progress_section.append_step("UUID verification failed")
+        self._write_uuid_result_to_ipqc_workbook(actual_value, passed)
 
     def _reset_result_only(self) -> None:
         self.result_summary_section.set_result("READY", "No test has been run yet.")
@@ -431,6 +498,19 @@ class ProductionPage(BaseWorkspacePage):
             self.uuid_section.set_result_csv_path("Pending (first result row will create the file)")
             return
         self.uuid_section.set_result_csv_path(str(csv_path))
+
+    def _write_uuid_result_to_ipqc_workbook(self, actual_value: object, passed: bool) -> None:
+        if not self._ipqc_excel_adapter.has_loaded_workbook():
+            return
+        try:
+            self._ipqc_excel_adapter.write_uuid_actual_and_check(actual_value, "PASS" if passed else "FAIL")
+            output_path = self._ipqc_excel_adapter.suggest_completed_output_path()
+            saved_path = self._ipqc_excel_adapter.save_completed_workbook(output_path)
+            self.uuid_section.set_workbook_output_path(str(saved_path))
+            self.console_message.emit(f"[Production] IPQC workbook updated: {saved_path}")
+        except Exception as exc:
+            self.console_message.emit(f"[Production] Failed to update IPQC workbook with UUID result: {exc}")
+            self.progress_section.append_step("IPQC workbook UUID result write failed")
 
 
 class _ConnectionStatusSection(PanelFrame):
@@ -701,6 +781,8 @@ class _ResultSummarySection(PanelFrame):
 
 class _UuidCsvSection(PanelFrame):
     load_csv_requested = pyqtSignal()
+    load_workbook_requested = pyqtSignal()
+    sheet_group_changed = pyqtSignal(str)
     write_requested = pyqtSignal()
     verify_requested = pyqtSignal()
 
@@ -715,6 +797,11 @@ class _UuidCsvSection(PanelFrame):
         load_button.clicked.connect(self.load_csv_requested.emit)
         button_row.addWidget(load_button)
 
+        load_workbook_button = QPushButton("Load IPQC Workbook")
+        load_workbook_button.setProperty("tone", "primary")
+        load_workbook_button.clicked.connect(self.load_workbook_requested.emit)
+        button_row.addWidget(load_workbook_button)
+
         verify_button = QPushButton("Verify Current UUID")
         verify_button.setProperty("tone", "primary")
         verify_button.clicked.connect(self.verify_requested.emit)
@@ -726,6 +813,7 @@ class _UuidCsvSection(PanelFrame):
         button_row.addWidget(write_button)
 
         self.load_button = load_button
+        self.load_workbook_button = load_workbook_button
         self.verify_button = verify_button
         self.write_button = write_button
 
@@ -745,6 +833,31 @@ class _UuidCsvSection(PanelFrame):
         self._result_csv_label.setObjectName("DetailValue")
         self._result_csv_label.setWordWrap(True)
         self.body_layout.addWidget(self._result_csv_label)
+
+        self._workbook_label = QLabel("Selected workbook: None")
+        self._workbook_label.setObjectName("DetailValue")
+        self._workbook_label.setWordWrap(True)
+        self.body_layout.addWidget(self._workbook_label)
+
+        self._sheet_group_combo = QComboBox()
+        self._sheet_group_combo.setEnabled(False)
+        self._sheet_group_combo.currentTextChanged.connect(self.sheet_group_changed.emit)
+        self.body_layout.addWidget(LabeledControl("IPQC Sheet Group", self._sheet_group_combo))
+
+        self._workbook_validation_label = QLabel("Workbook validation: Not loaded")
+        self._workbook_validation_label.setObjectName("DetailValue")
+        self._workbook_validation_label.setWordWrap(True)
+        self.body_layout.addWidget(self._workbook_validation_label)
+
+        self._expected_summary_label = QLabel("Expected values: S/N=-, PWM=-, Operator=-, Other=-")
+        self._expected_summary_label.setObjectName("DetailValue")
+        self._expected_summary_label.setWordWrap(True)
+        self.body_layout.addWidget(self._expected_summary_label)
+
+        self._workbook_output_label = QLabel("Completed workbook: Pending")
+        self._workbook_output_label.setObjectName("DetailValue")
+        self._workbook_output_label.setWordWrap(True)
+        self.body_layout.addWidget(self._workbook_output_label)
 
         self._error_list = QListWidget()
         self._error_list.setObjectName("SimpleList")
@@ -775,6 +888,42 @@ class _UuidCsvSection(PanelFrame):
 
     def set_result_csv_path(self, path_or_status: str) -> None:
         self._result_csv_label.setText(f"Result CSV: {path_or_status}")
+
+    def set_workbook_path(self, path: str) -> None:
+        self._workbook_label.setText(f"Selected workbook: {path}")
+
+    def set_sheet_groups(self, groups: list[str], selected: str) -> None:
+        self._sheet_group_combo.blockSignals(True)
+        self._sheet_group_combo.clear()
+        for group in groups:
+            self._sheet_group_combo.addItem(group)
+        self._sheet_group_combo.setEnabled(bool(groups))
+        if selected and groups:
+            index = self._sheet_group_combo.findText(selected)
+            if index >= 0:
+                self._sheet_group_combo.setCurrentIndex(index)
+        self._sheet_group_combo.blockSignals(False)
+        if selected:
+            self.sheet_group_changed.emit(selected)
+
+    def set_expected_values(self, serial_number: str, pwm: str, operator: str, other_parameters: str) -> None:
+        serial_text = serial_number or "-"
+        pwm_text = pwm or "-"
+        operator_text = operator or "-"
+        other_text = other_parameters or "-"
+        self._expected_summary_label.setText(
+            f"Expected values: S/N={serial_text}, PWM={pwm_text}, Operator={operator_text}, Other={other_text}"
+        )
+
+    def set_workbook_validation(self, passed: bool, message: str) -> None:
+        if passed:
+            self._workbook_validation_label.setText("Workbook validation: PASSED")
+            return
+        reason = message or "FAILED"
+        self._workbook_validation_label.setText(f"Workbook validation: FAILED ({reason})")
+
+    def set_workbook_output_path(self, path_or_status: str) -> None:
+        self._workbook_output_label.setText(f"Completed workbook: {path_or_status}")
 
 
 class _TestProgressSection(PanelFrame):
