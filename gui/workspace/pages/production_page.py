@@ -126,8 +126,10 @@ class ProductionPage(BaseWorkspacePage):
 
         self._refresh_result_csv_ui()
         self.uuid_section.set_workbook_output_path(WORKBOOK_OUTPUT_PENDING)
+        self.uuid_section.set_last_workbook_action("No workbook write yet")
         self._reset_result_only()
         self._refresh_runtime_panels()
+        self._refresh_workbook_action_states()
 
     def refresh(self) -> None:
         """Refresh lightweight status without resetting operator state."""
@@ -136,6 +138,7 @@ class ProductionPage(BaseWorkspacePage):
     def _refresh_runtime_panels(self) -> None:
         self._refresh_connection_status()
         self._refresh_robot_nodes()
+        self._refresh_workbook_action_states()
 
     def _refresh_connection_status(self) -> None:
         communication_model = self._bridge.get_runtime_communication_model(create_if_missing=False)
@@ -217,18 +220,22 @@ class ProductionPage(BaseWorkspacePage):
             self._result_logger.set_output_dir(Path(path).expanduser().resolve().parent)
             self._refresh_result_csv_ui()
             self.uuid_section.set_workbook_output_path(WORKBOOK_OUTPUT_PENDING)
+            self.uuid_section.set_last_workbook_action("Workbook loaded; no write performed yet")
             self._refresh_ipqc_expected_preview()
         except Exception as exc:
             self.console_message.emit(f"[Production] Failed to load IPQC workbook: {exc}")
             self.result_summary_section.set_result("FAIL", "IPQC workbook load failed.")
             self.progress_section.append_step("IPQC workbook load failed")
             self.uuid_section.set_workbook_validation(False, str(exc))
+            self.uuid_section.set_last_workbook_action(f"Load failed: {exc}")
+            self._refresh_workbook_action_states()
             return
 
         self.uuid_section.set_workbook_validation(True, "")
         self.console_message.emit(f"[Production] Loaded IPQC workbook: {path}")
         self.progress_section.append_step(f"Loaded IPQC workbook with {len(groups)} sheet group(s)")
         self.result_summary_section.set_result("READY", "IPQC workbook loaded.")
+        self._refresh_workbook_action_states()
 
     def _handle_ipqc_sheet_group_changed(self, base_group: str) -> None:
         if not base_group:
@@ -239,8 +246,10 @@ class ProductionPage(BaseWorkspacePage):
         except Exception as exc:
             self.console_message.emit(f"[Production] Failed to select IPQC sheet group '{base_group}': {exc}")
             self.uuid_section.set_workbook_validation(False, str(exc))
+            self._refresh_workbook_action_states()
             return
         self.uuid_section.set_workbook_validation(True, "")
+        self._refresh_workbook_action_states()
 
     def _refresh_ipqc_expected_preview(self) -> None:
         if not self._ipqc_excel_adapter.has_loaded_workbook():
@@ -251,6 +260,7 @@ class ProductionPage(BaseWorkspacePage):
         except Exception as exc:
             self.uuid_section.set_workbook_validation(False, str(exc))
             self.uuid_section.set_expected_values("", "", "", "")
+            self._refresh_workbook_action_states()
             return
         self.uuid_section.set_expected_values(
             expected.serial_number,
@@ -258,6 +268,7 @@ class ProductionPage(BaseWorkspacePage):
             expected.operator,
             expected.other_parameters,
         )
+        self._refresh_workbook_action_states()
 
     def _handle_write_uuid(self) -> None:
         try:
@@ -506,18 +517,44 @@ class ProductionPage(BaseWorkspacePage):
             return
         self.uuid_section.set_result_csv_path(str(csv_path))
 
-    def _write_uuid_result_to_ipqc_workbook(self, actual_value: object, passed: bool) -> None:
+    def _write_uuid_result_to_ipqc_workbook(self, actual_value: object, passed: bool) -> bool:
         if not self._ipqc_excel_adapter.has_loaded_workbook():
-            return
+            return False
         try:
-            self._ipqc_excel_adapter.write_uuid_actual_and_check(actual_value, "PASS" if passed else "FAIL")
+            self._ipqc_excel_adapter.write_summary_result("S/N", actual_value, "PASS" if passed else "FAIL")
             output_path = self._ipqc_excel_adapter.suggest_completed_output_path()
             saved_path = self._ipqc_excel_adapter.save_completed_workbook(output_path)
             self.uuid_section.set_workbook_output_path(str(saved_path))
+            self.uuid_section.set_last_workbook_action("UUID summary row write: success")
             self.console_message.emit(f"[Production] IPQC workbook updated: {saved_path}")
+            return True
         except Exception as exc:
             self.console_message.emit(f"[Production] Failed to update IPQC workbook with UUID result: {exc}")
             self.progress_section.append_step("IPQC workbook UUID result write failed")
+            self.uuid_section.set_last_workbook_action(f"UUID summary row write failed: {exc}")
+            self.result_summary_section.set_result(
+                "REPORTING ERROR",
+                "Device result is available, but writing IPQC workbook report failed.",
+            )
+            return False
+
+    def _refresh_workbook_action_states(self) -> None:
+        can_use_workbook_uuid = self._has_workbook_expected_uuid()
+        self.uuid_section.verify_button.setEnabled(can_use_workbook_uuid)
+        self.uuid_section.write_button.setEnabled(can_use_workbook_uuid)
+
+    def _has_workbook_expected_uuid(self) -> bool:
+        if not self._ipqc_excel_adapter.has_loaded_workbook():
+            return False
+        try:
+            expected = self._ipqc_excel_adapter.read_expected_summary(strict=False)
+            serial_text = expected.serial_number.strip()
+            if not serial_text:
+                return False
+            parse_uuid_value(serial_text)
+            return True
+        except Exception:
+            return False
 
 
 class _ConnectionStatusSection(PanelFrame):
@@ -849,6 +886,11 @@ class _UuidCsvSection(PanelFrame):
         self._workbook_output_label.setWordWrap(True)
         self.body_layout.addWidget(self._workbook_output_label)
 
+        self._last_workbook_action_label = QLabel("Last workbook action: No workbook write yet")
+        self._last_workbook_action_label.setObjectName("DetailValue")
+        self._last_workbook_action_label.setWordWrap(True)
+        self.body_layout.addWidget(self._last_workbook_action_label)
+
     def set_result_csv_path(self, path_or_status: str) -> None:
         self._result_csv_label.setText(f"Debug result CSV: {path_or_status}")
 
@@ -887,6 +929,9 @@ class _UuidCsvSection(PanelFrame):
 
     def set_workbook_output_path(self, path_or_status: str) -> None:
         self._workbook_output_label.setText(f"Completed workbook: {path_or_status}")
+
+    def set_last_workbook_action(self, status: str) -> None:
+        self._last_workbook_action_label.setText(f"Last workbook action: {status}")
 
 
 class _TestProgressSection(PanelFrame):

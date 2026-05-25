@@ -99,14 +99,26 @@ class IpqcExcelAdapter:
         )
 
     def write_uuid_actual_and_check(self, actual_uuid: object, check_result: str) -> None:
-        sheet = self._require_base_sheet()
-        sheet["C4"] = "" if actual_uuid is None else str(actual_uuid)
-        sheet["D4"] = str(check_result)
+        self.write_summary_result("S/N", actual_uuid, check_result)
 
     def write_pwm_actual_and_check(self, actual_pwm: object, check_result: str) -> None:
+        self.write_summary_result("PWM", actual_pwm, check_result)
+
+    def write_summary_result(self, parameter_name: str, actual_value: object, check_result: str) -> None:
         sheet = self._require_base_sheet()
-        sheet["C5"] = "" if actual_pwm is None else str(actual_pwm)
-        sheet["D5"] = str(check_result)
+        row = self._resolve_summary_row(parameter_name)
+        sheet[f"C{row}"] = "" if actual_value is None else str(actual_value)
+        sheet[f"D{row}"] = str(check_result)
+
+    def _resolve_summary_row(self, parameter_name: str) -> int:
+        normalized = parameter_name.strip().lower().replace("_", " ")
+        if normalized in {"s/n", "sn", "serial", "serial number", "uuid"}:
+            return 4
+        if normalized in {"pwm"}:
+            return 5
+        if normalized in {"other parameters", "other parameter", "other"}:
+            return 6
+        raise ValueError(f"Unsupported summary parameter '{parameter_name}'.")
 
     def suggest_completed_output_path(self) -> Path:
         template_path = self._require_template_path()

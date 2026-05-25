@@ -94,6 +94,33 @@ class IpqcExcelAdapterTests(unittest.TestCase):
         self.assertEqual(summary["C5"].value, "98")
         self.assertEqual(summary["D5"].value, "FAIL")
 
+    def test_write_summary_result_maps_sn_pwm_and_other_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template_path = self._create_ipqc_template(tmpdir)
+            adapter = IpqcExcelAdapter()
+            adapter.load_template(template_path)
+            adapter.write_summary_result("serial", "1223303012", "PASS")
+            adapter.write_summary_result("PWM", "101", "FAIL")
+            adapter.write_summary_result("Other parameters", "N/A", "PASS")
+            output_path = Path(tmpdir) / "ipqc_completed.xlsx"
+            adapter.save_completed_workbook(output_path)
+            summary = load_workbook(output_path)["3X"]
+
+        self.assertEqual(summary["C4"].value, "1223303012")
+        self.assertEqual(summary["D4"].value, "PASS")
+        self.assertEqual(summary["C5"].value, "101")
+        self.assertEqual(summary["D5"].value, "FAIL")
+        self.assertEqual(summary["C6"].value, "N/A")
+        self.assertEqual(summary["D6"].value, "PASS")
+
+    def test_write_summary_result_rejects_unknown_parameter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template_path = self._create_ipqc_template(tmpdir)
+            adapter = IpqcExcelAdapter()
+            adapter.load_template(template_path)
+            with self.assertRaisesRegex(ValueError, "Unsupported summary parameter"):
+                adapter.write_summary_result("temperature", "40", "PASS")
+
     def test_save_completed_workbook_uses_new_path_and_preserves_template(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             template_path = self._create_ipqc_template(tmpdir)
