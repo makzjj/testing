@@ -468,6 +468,8 @@ class ProductionPageWorkflowTests(unittest.TestCase):
 
     @staticmethod
     def _create_ipqc_workbook(path: Path, *, with_optional_fields: bool = True) -> None:
+        if not _HAS_OPENPYXL:
+            raise RuntimeError("openpyxl is required to create IPQC workbook fixtures.")
         wb = Workbook()
         ws = wb.active
         ws.title = "3X"

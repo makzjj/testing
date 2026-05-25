@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
@@ -327,7 +328,7 @@ class ProductionParameterController(QObject):
             )
         return expected_name, None
 
-    def _resolve_runtime_for_uuid_operation(self):
+    def _resolve_runtime_for_uuid_operation(self) -> tuple[Any | None, Any | None, str | None]:
         runtime_window = self._bridge.get_runtime_window(create_if_missing=True)
         if runtime_window is None:
             return None, None, "Runtime backend is unavailable for UUID operations."

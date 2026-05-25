@@ -358,7 +358,8 @@ class ProductionPage(BaseWorkspacePage):
                 self.progress_section.append_step("UUID write + read-back verification failed")
             else:
                 self.progress_section.append_step("UUID verification failed")
-        self._write_uuid_result_to_ipqc_workbook(actual_value, passed)
+        if self._ipqc_excel_adapter.has_loaded_workbook():
+            self._write_uuid_result_to_ipqc_workbook(actual_value, passed)
 
     def _reset_result_only(self) -> None:
         self.result_summary_section.set_result("READY", "No test has been run yet.")
