@@ -650,7 +650,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertEqual(runtime_window.backend_client.sent_commands, [])
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook write wiring tests.")
-    def test_production_page_write_parameters_sends_uuid_write_using_workbook_b4_value(self) -> None:
+    def test_production_page_write_uuid_sends_write_command_using_workbook_expected_value(self) -> None:
         runtime_window = _FakeRuntimeWindow()
         runtime_window.node_status[3] = {
             "connected": True,
@@ -677,6 +677,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self._app.processEvents()
 
             expected_uuid = 1223303010
+            self.assertTrue(runtime_window.backend_client.sent_commands)
             self.assertEqual(runtime_window.backend_client.sent_commands[-1], (3, build_uuid_write_payload(expected_uuid)))
             self.assertNotIn((3, [0xE0, 0x3F]), runtime_window.backend_client.sent_commands)
 
@@ -697,7 +698,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
                 self._app.processEvents()
 
             with patch.object(page._ipqc_excel_adapter, "write_uuid_actual_and_check", side_effect=OSError("disk full")):
-                page._record_uuid_result_in_ipqc_workbook("1223303011", True)
+                page._update_uuid_cells_in_workbook_memory("1223303011", True)
                 self._app.processEvents()
 
             self.assertEqual(page.result_summary_section._status_label.text(), "REPORTING ERROR")
@@ -819,7 +820,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
                 page._handle_load_ipqc_workbook()
                 self._app.processEvents()
 
-            page._record_uuid_result_in_ipqc_workbook("1223303010", True)
+            page._update_uuid_cells_in_workbook_memory("1223303010", True)
             with patch(
                 "gui.workspace.pages.production_page.QFileDialog.getSaveFileName",
                 return_value=(str(output_path), "Excel Files (*.xlsx)"),

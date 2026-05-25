@@ -49,6 +49,7 @@ ML20_NODE_MAP: dict[int, str] = {
 _ML20_NODE_ORDER: tuple[int, ...] = tuple(ML20_NODE_MAP)
 RUNTIME_POLL_INTERVAL_MS = 1000
 WORKBOOK_OUTPUT_PENDING = "Pending"
+PWM_COMMAND_SUPPORT_PENDING = "Pending command support"
 
 
 def get_ml20_node_name(node_id: int) -> str:
@@ -124,7 +125,7 @@ class ProductionPage(BaseWorkspacePage):
 
         self.uuid_section.set_workbook_output_path(WORKBOOK_OUTPUT_PENDING)
         self.uuid_section.set_last_workbook_action("No workbook write yet")
-        self.uuid_section.set_programmed_values("-", "Pending command support", "-")
+        self.uuid_section.set_programmed_values("-", PWM_COMMAND_SUPPORT_PENDING, "-")
         self._reset_result_only()
         self._refresh_runtime_panels()
         self._refresh_workbook_action_states()
@@ -248,15 +249,15 @@ class ProductionPage(BaseWorkspacePage):
 
     def _refresh_ipqc_expected_preview(self) -> None:
         if not self._ipqc_excel_adapter.has_loaded_workbook():
-            self.uuid_section.set_expected_values("", "", "")
-            self.uuid_section.set_programmed_values("-", "Pending command support", "-")
+            self.uuid_section.set_expected_values(serial_number="", pwm="", other_parameters="")
+            self.uuid_section.set_programmed_values("-", PWM_COMMAND_SUPPORT_PENDING, "-")
             return
         try:
             expected = self._ipqc_excel_adapter.read_expected_summary(strict=False)
         except Exception as exc:
             self.uuid_section.set_workbook_validation(False, str(exc))
-            self.uuid_section.set_expected_values("", "", "")
-            self.uuid_section.set_programmed_values("-", "Pending command support", "-")
+            self.uuid_section.set_expected_values(serial_number="", pwm="", other_parameters="")
+            self.uuid_section.set_programmed_values("-", PWM_COMMAND_SUPPORT_PENDING, "-")
             self._refresh_workbook_action_states()
             return
         self.uuid_section.set_expected_values(
@@ -264,7 +265,7 @@ class ProductionPage(BaseWorkspacePage):
             expected.pwm,
             expected.other_parameters,
         )
-        self.uuid_section.set_programmed_values("-", "Pending command support", "-")
+        self.uuid_section.set_programmed_values("-", PWM_COMMAND_SUPPORT_PENDING, "-")
         self._refresh_workbook_action_states()
 
     def _handle_write_uuid(self) -> None:
@@ -350,9 +351,9 @@ class ProductionPage(BaseWorkspacePage):
             else:
                 self.progress_section.append_step("UUID verification failed")
         check_text = "PASS" if passed else "FAIL"
-        self.uuid_section.set_programmed_values(actual_value if actual_value != "" else "-", "Pending command support", check_text)
+        self.uuid_section.set_programmed_values(actual_value if actual_value != "" else "-", PWM_COMMAND_SUPPORT_PENDING, check_text)
         if self._ipqc_excel_adapter.has_loaded_workbook():
-            self._record_uuid_result_in_ipqc_workbook(actual_value, passed)
+            self._update_uuid_cells_in_workbook_memory(actual_value, passed)
 
     def _reset_result_only(self) -> None:
         self.result_summary_section.set_result("READY", "No test has been run yet.")
@@ -420,7 +421,7 @@ class ProductionPage(BaseWorkspacePage):
             self.console_message.emit(f"[Production] Invalid workbook expected S/N '{serial_text}': {exc}")
             return None
 
-    def _record_uuid_result_in_ipqc_workbook(self, actual_value: object, passed: bool) -> bool:
+    def _update_uuid_cells_in_workbook_memory(self, actual_value: str | int | None, passed: bool) -> bool:
         """Write UUID summary result into the loaded workbook object.
 
         Side effects:
@@ -434,14 +435,15 @@ class ProductionPage(BaseWorkspacePage):
         if not self._ipqc_excel_adapter.has_loaded_workbook():
             return False
         try:
-            self._ipqc_excel_adapter.write_uuid_actual_and_check(actual_value, "PASS" if passed else "FAIL")
-            self.uuid_section.set_last_workbook_action("UUID summary row updated in workbook memory")
+            actual_value_or_empty: str | int = "" if actual_value is None else actual_value
+            self._ipqc_excel_adapter.write_uuid_actual_and_check(actual_value_or_empty, "PASS" if passed else "FAIL")
+            self.uuid_section.set_last_workbook_action("UUID report row updated in workbook memory")
             self.console_message.emit("[Production] IPQC workbook UUID report row updated in memory")
             return True
         except Exception as exc:
             self.console_message.emit(f"[Production] Failed to update IPQC workbook UUID report row: {exc}")
             self.progress_section.append_step("IPQC workbook UUID result write failed")
-            self.uuid_section.set_last_workbook_action(f"UUID summary row write failed: {exc}")
+            self.uuid_section.set_last_workbook_action(f"UUID report row write failed: {exc}")
             self.result_summary_section.set_result(
                 "REPORTING ERROR",
                 "Device result is available, but writing IPQC workbook report failed.",
@@ -830,7 +832,7 @@ class _UuidCsvSection(PanelFrame):
         self._actual_serial_label.setWordWrap(True)
         self.body_layout.addWidget(self._actual_serial_label)
 
-        self._actual_pwm_label = QLabel("Programmed/read-back PWM: Pending command support")
+        self._actual_pwm_label = QLabel(f"Programmed/read-back PWM: {PWM_COMMAND_SUPPORT_PENDING}")
         self._actual_pwm_label.setObjectName("DetailValue")
         self._actual_pwm_label.setWordWrap(True)
         self.body_layout.addWidget(self._actual_pwm_label)
