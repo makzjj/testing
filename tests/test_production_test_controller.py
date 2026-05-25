@@ -10,7 +10,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from PyQt6.QtCore import QObject, pyqtSignal
-from PyQt6.QtWidgets import QApplication, QLabel, QPushButton
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QApplication, QLabel, QPushButton, QTextEdit
 
 from gui.workspace.pages.production_page import ProductionPage
 from gui.workspace.widgets import ResponsiveRow
@@ -496,7 +497,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
 
         self.assertEqual(page.node_status_section.table.item(6, 2).text(), "Testing")
         self.assertEqual(page.result_summary_section._status_label.text(), "TESTING")
-        self.assertIn("[TESTING] Running Production test for Node 8 RZ.", page.progress_section._list.item(2).text())
+        self.assertIn("[TESTING] Running Production test for Node 8 RZ.", page.progress_section.to_plain_text())
 
         runtime_window.packet_received.emit(
             {"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xCB, "params": [0xA5, 0x5A]}
@@ -575,12 +576,20 @@ class ProductionPageWorkflowTests(unittest.TestCase):
         runtime_window = _FakeRuntimeWindow()
         bridge = _FakeBridge(runtime_window)
         page = ProductionPage(bridge)
+        page.resize(1280, 800)
+        self._app.processEvents()
 
         button_texts = [button.text() for button in page.progress_section.findChildren(QPushButton)]
         self.assertIn("Refresh", button_texts)
         self.assertIn("Clear", button_texts)
         self.assertEqual(page.progress_section.windowTitle(), "")
-        self.assertGreaterEqual(page.progress_section._list.minimumHeight(), 220)
+        self.assertIsInstance(page.progress_section._log_output, QTextEdit)
+        self.assertGreaterEqual(page.progress_section._log_output.minimumHeight(), 220)
+        self.assertEqual(
+            page.progress_section._log_output.horizontalScrollBarPolicy(),
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
+        )
+        self.assertEqual(page.horizontalScrollBarPolicy(), Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
     def test_production_page_node_status_fail_is_bold_red(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -641,6 +650,8 @@ class ProductionPageWorkflowTests(unittest.TestCase):
 
             self.assertEqual(page.uuid_section._sheet_group_combo.currentText(), "3X")
             self.assertIn("Configuration File / IPQC Workbook", page.uuid_section._workbook_label.text())
+            self.assertTrue(page.uuid_section._workbook_label.text().endswith("ipqc.xlsx"))
+            self.assertEqual(page.uuid_section._workbook_label.toolTip(), str(workbook_path))
             self.assertEqual(page.uuid_section._expected_serial_value, "1223303010")
             self.assertEqual(page.uuid_section._expected_pwm_value, "100")
             self.assertEqual(page.uuid_section._expected_other_value, "N/A")
@@ -649,9 +660,24 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertTrue(page.uuid_section.write_button.isEnabled())
             self.assertTrue(page.uuid_section.save_button.isEnabled())
             self.assertEqual(runtime_window.backend_client.sent_commands, [])
-            log_texts = [page.progress_section._list.item(index).text() for index in range(page.progress_section._list.count())]
-            self.assertIn("Expected S/N / UUID: 1223303010", log_texts)
-            self.assertIn("Expected PWM: 100", log_texts)
+            log_text = page.progress_section.to_plain_text()
+            self.assertIn("Expected S/N / UUID: 1223303010", log_text)
+            self.assertIn("Expected PWM: 100", log_text)
+            self.assertIn("loaded ipqc workbook", page.progress_section.to_html().lower())
+            self.assertIn("#2e7d32", page.progress_section.to_html().lower())
+
+    def test_production_page_logs_workbook_load_failure_in_red(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with patch("gui.workspace.pages.production_page.QFileDialog.getOpenFileName", return_value=("bad.xlsx", "Excel Files (*.xlsx)")):
+            with patch.object(page._ipqc_excel_adapter, "load_template", side_effect=RuntimeError("broken workbook")):
+                page._handle_load_ipqc_workbook()
+                self._app.processEvents()
+
+        self.assertIn("IPQC workbook load failed", page.progress_section.to_plain_text())
+        self.assertIn("#c62828", page.progress_section.to_html().lower())
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook write wiring tests.")
     def test_production_page_write_uuid_sends_write_command_using_workbook_expected_value(self) -> None:
@@ -753,8 +779,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             output_sheet = page._ipqc_excel_adapter._workbook["3X"]
             self.assertEqual(output_sheet["C4"].value, str(expected_uuid))
             self.assertEqual(output_sheet["D4"].value, "PASS")
-            log_texts = [page.progress_section._list.item(index).text() for index in range(page.progress_section._list.count())]
-            self.assertIn("Check result: PASS", log_texts)
+            self.assertIn("Check result: PASS", page.progress_section.to_plain_text())
 
             self.assertIsNone(page._result_logger.result_csv_path)
 
@@ -798,8 +823,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             output_sheet = page._ipqc_excel_adapter._workbook["3X"]
             self.assertEqual(output_sheet["C4"].value, "1223303011")
             self.assertEqual(output_sheet["D4"].value, "FAIL")
-            log_texts = [page.progress_section._list.item(index).text() for index in range(page.progress_section._list.count())]
-            self.assertIn("Check result: FAIL", log_texts)
+            self.assertIn("Check result: FAIL", page.progress_section.to_plain_text())
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook save tests.")
     def test_production_page_save_completed_workbook_shows_output_path(self) -> None:
@@ -836,6 +860,25 @@ class ProductionPageWorkflowTests(unittest.TestCase):
 
             self.assertEqual(page.uuid_section.workbook_output_text, str(output_path.resolve()))
             self.assertTrue(output_path.exists())
+
+    def test_production_status_log_auto_scrolls_and_clear_button_clears(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        for index in range(40):
+            page.progress_section.append_step(f"log line {index}")
+        self._app.processEvents()
+
+        scrollbar = page.progress_section._log_output.verticalScrollBar()
+        self.assertEqual(scrollbar.value(), scrollbar.maximum())
+        self.assertIn("] log line 39", page.progress_section.to_plain_text())
+
+        clear_buttons = [button for button in page.progress_section.findChildren(QPushButton) if button.text() == "Clear"]
+        self.assertEqual(len(clear_buttons), 1)
+        clear_buttons[0].click()
+        self._app.processEvents()
+        self.assertEqual(page.progress_section.to_plain_text().strip(), "")
 
 
 class ProductionParameterControllerTests(unittest.TestCase):

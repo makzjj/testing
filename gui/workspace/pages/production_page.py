@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import html
 import re
+from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont
+from PyQt6.QtGui import QColor, QFont, QTextOption
 from PyQt6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -14,9 +16,10 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QListWidget,
     QPushButton,
+    QSizePolicy,
     QTableWidgetItem,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -118,7 +121,7 @@ class ProductionPage(BaseWorkspacePage):
         self._parameter_controller.log_message.connect(self.console_message.emit)
         self._parameter_controller.verification_finished.connect(self._handle_uuid_verification_finished)
         self.progress_section.refresh_requested.connect(self.refresh)
-        self.progress_section.clear_requested.connect(self._handle_clear_result)
+        self.progress_section.clear_requested.connect(self._handle_clear_progress_log)
         self._uuid_operation: str | None = None
         self._pending_expected_uuid: int | None = None
 
@@ -164,18 +167,22 @@ class ProductionPage(BaseWorkspacePage):
     def _handle_connect_requested(self, port: str, baud_rate: int) -> None:
         if not port:
             self.console_message.emit("[Production] Select a serial port before connecting.")
+            self.progress_section.append_step("Serial port not connected", level="error")
             self._refresh_runtime_panels()
             return
         connected = self._bridge.connect_runtime_serial(port=port, baud_rate=baud_rate)
         if connected:
             self.console_message.emit(f"[Production] Connected to {port} @ {baud_rate}")
+            self.progress_section.append_step(f"Connected to {port} @ {baud_rate}", level="success")
         else:
             self.console_message.emit(f"[Production] Failed to connect to {port} @ {baud_rate}")
+            self.progress_section.append_step(f"Failed to connect to {port} @ {baud_rate}", level="error")
         self._refresh_runtime_panels()
 
     def _handle_disconnect_requested(self) -> None:
         self._bridge.disconnect_runtime_serial()
         self.console_message.emit("[Production] Disconnected serial communication")
+        self.progress_section.append_step("Serial port not connected", level="error")
         self._refresh_runtime_panels()
 
     def _handle_runtime_node_selected(self, node_id: int) -> None:
@@ -213,6 +220,9 @@ class ProductionPage(BaseWorkspacePage):
         self._reset_result_only()
         self.console_message.emit("[Production] Cleared result summary and progress")
 
+    def _handle_clear_progress_log(self) -> None:
+        self.progress_section.clear_log()
+
     def _handle_load_ipqc_workbook(self) -> None:
         path, _selected_filter = QFileDialog.getOpenFileName(
             self,
@@ -235,7 +245,7 @@ class ProductionPage(BaseWorkspacePage):
         except Exception as exc:
             self.console_message.emit(f"[Production] Failed to load IPQC workbook: {exc}")
             self._set_status_result("FAIL", "IPQC workbook load failed.")
-            self.progress_section.append_step("IPQC workbook load failed")
+            self.progress_section.append_step("IPQC workbook load failed", level="error")
             self.uuid_section.set_workbook_validation(False, str(exc))
             self.uuid_section.set_last_workbook_action(f"Load failed: {exc}")
             self._refresh_workbook_action_states()
@@ -243,7 +253,7 @@ class ProductionPage(BaseWorkspacePage):
 
         self.uuid_section.set_workbook_validation(True, "")
         self.console_message.emit(f"[Production] Loaded IPQC workbook: {path}")
-        self.progress_section.append_step(f"Loaded IPQC workbook with {len(groups)} sheet group(s)")
+        self.progress_section.append_step(f"Loaded IPQC workbook with {len(groups)} sheet group(s)", level="success")
         self._set_status_result("READY", "IPQC workbook loaded.")
         self._refresh_workbook_action_states()
 
@@ -537,7 +547,13 @@ class ProductionPage(BaseWorkspacePage):
         self.result_summary_section.set_result(status, reason)
         entry = f"[{status}] {reason}"
         if append_to_log and entry != self._last_status_entry:
-            self.progress_section.append_step(entry)
+            level = "info"
+            normalized = status.strip().upper()
+            if normalized in {"PASS", "WRITE SENT"}:
+                level = "success"
+            elif normalized in {"FAIL", "TIMEOUT", "REPORTING ERROR"}:
+                level = "error"
+            self.progress_section.append_step(entry, level=level)
         self._last_status_entry = entry
 
 
@@ -571,6 +587,7 @@ class _ProductionInfoSection(PanelFrame):
         self._workbook_validation_text = "Workbook validation: Not loaded"
         self._last_workbook_action_text = "No workbook write yet"
         self._workbook_output_text = WORKBOOK_OUTPUT_PENDING
+        self._workbook_full_path = ""
         self._expected_serial_value = "-"
         self._expected_pwm_value = "-"
         self._expected_other_value = "-"
@@ -618,36 +635,42 @@ class _ProductionInfoSection(PanelFrame):
         self._sheet_group_combo.currentTextChanged.connect(self.sheet_group_changed.emit)
         self.body_layout.addWidget(LabeledControl("Selected sheet group", self._sheet_group_combo))
 
-        workbook_button_row = QHBoxLayout()
-        workbook_button_row.setContentsMargins(0, 0, 0, 0)
-        workbook_button_row.setSpacing(8)
+        workbook_button_grid = QGridLayout()
+        workbook_button_grid.setContentsMargins(0, 0, 0, 0)
+        workbook_button_grid.setHorizontalSpacing(8)
+        workbook_button_grid.setVerticalSpacing(6)
 
         self.load_workbook_button = QPushButton("Load IPQC Workbook")
         self.load_workbook_button.setProperty("tone", "primary")
+        self.load_workbook_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.load_workbook_button.clicked.connect(self.load_workbook_requested.emit)
-        workbook_button_row.addWidget(self.load_workbook_button)
+        workbook_button_grid.addWidget(self.load_workbook_button, 0, 0)
 
         self.write_button = QPushButton("Write Parameters to MCU")
         self.write_button.setProperty("tone", "secondary")
+        self.write_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.write_button.clicked.connect(self.write_requested.emit)
-        workbook_button_row.addWidget(self.write_button)
+        workbook_button_grid.addWidget(self.write_button, 0, 1)
 
         self.verify_button = QPushButton("Read Back / Verify")
         self.verify_button.setProperty("tone", "primary")
+        self.verify_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.verify_button.clicked.connect(self.verify_requested.emit)
-        workbook_button_row.addWidget(self.verify_button)
+        workbook_button_grid.addWidget(self.verify_button, 1, 0)
 
         self.save_button = QPushButton("Save / Download Completed Workbook")
         self.save_button.setProperty("tone", "secondary")
+        self.save_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.save_button.clicked.connect(self.save_requested.emit)
-        workbook_button_row.addWidget(self.save_button)
+        workbook_button_grid.addWidget(self.save_button, 1, 1)
 
-        self.body_layout.addLayout(workbook_button_row)
+        self.body_layout.addLayout(workbook_button_grid)
 
         self._headers = ["Node", "Firmware", "Serial(UUID)", "Node Type", "Status"]
         self._table = SimpleTableWidget(self._headers, [])
         self._table.setMinimumHeight(96)
         self._table.setMaximumHeight(144)
+        self._table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._row_node_ids: list[int] = []
         self._table.cellClicked.connect(self._handle_cell_clicked)
         self.body_layout.addWidget(self._table)
@@ -739,7 +762,10 @@ class _ProductionInfoSection(PanelFrame):
         self.node_selected.emit(self._row_node_ids[row])
 
     def set_workbook_path(self, path: str) -> None:
-        self._workbook_label.setText(f"Configuration File / IPQC Workbook: {path}")
+        self._workbook_full_path = path
+        display_name = Path(path).name if path else "None"
+        self._workbook_label.setText(f"Configuration File / IPQC Workbook: {display_name}")
+        self._workbook_label.setToolTip(path)
 
     def set_sheet_groups(self, groups: list[str], selected: str) -> None:
         self._sheet_group_combo.blockSignals(True)
@@ -1133,31 +1159,54 @@ class _TestProgressSection(PanelFrame):
         button_row.addStretch(1)
         self.body_layout.addLayout(button_row)
 
-        self._list = QListWidget()
-        self._list.setMinimumHeight(220)
-        self._list.setMaximumHeight(320)
-        self.body_layout.addWidget(self._list)
-        self._profile_step_rows: dict[str, int] = {}
+        self._log_output = QTextEdit()
+        self._log_output.setReadOnly(True)
+        self._log_output.setObjectName("StatusProgressLog")
+        self._log_output.setMinimumHeight(220)
+        self._log_output.setMaximumHeight(320)
+        self._log_output.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self._log_output.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self._log_output.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._log_output.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.body_layout.addWidget(self._log_output)
 
     def reset_steps(self, steps: list[str]) -> None:
-        self._list.clear()
-        self._list.addItems(steps)
-        self._profile_step_rows = {}
+        self._log_output.clear()
+        for step in steps:
+            self.append_step(step)
 
     def set_profile_steps(self, step_names: list[str]) -> None:
-        self._list.clear()
-        self._profile_step_rows = {}
+        self._log_output.clear()
         for index, step_name in enumerate(step_names, start=1):
-            text = f"{index}. {step_name} - PENDING"
-            self._list.addItem(text)
-            self._profile_step_rows[step_name] = index - 1
+            self.append_step(f"{index}. {step_name} - PENDING")
 
     def mark_profile_step(self, step_name: str, status: str) -> None:
-        row_index = self._profile_step_rows.get(step_name)
-        if row_index is None:
-            self.append_step(f"{step_name} - {status}")
-            return
-        self._list.item(row_index).setText(f"{row_index + 1}. {step_name} - {status}")
+        self.append_step(f"{step_name} - {status}")
 
-    def append_step(self, step: str) -> None:
-        self._list.addItem(step)
+    def append_step(self, step: str, *, level: str = "info") -> None:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        color = None
+        normalized = level.strip().lower()
+        if normalized == "success":
+            color = "#2E7D32"
+        elif normalized == "error":
+            color = "#C62828"
+        escaped = html.escape(f"[{timestamp}] {step}")
+        if color:
+            self._log_output.append(f"<span style='color:{color};'>{escaped}</span>")
+        else:
+            self._log_output.append(escaped)
+        self._scroll_to_bottom()
+
+    def clear_log(self) -> None:
+        self._log_output.clear()
+
+    def to_plain_text(self) -> str:
+        return self._log_output.toPlainText()
+
+    def to_html(self) -> str:
+        return self._log_output.toHtml()
+
+    def _scroll_to_bottom(self) -> None:
+        scrollbar = self._log_output.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
