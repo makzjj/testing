@@ -292,9 +292,9 @@ class ProductionPage(BaseWorkspacePage):
             self._refresh_workbook_action_states()
             return
         self.uuid_section.set_expected_values(
-            expected_serial,
-            expected_pwm,
-            "",
+            serial_number=expected_serial,
+            pwm=expected_pwm,
+            other_parameters="",
         )
         self.uuid_section.set_programmed_values("-", PWM_COMMAND_SUPPORT_PENDING, "-")
         self.progress_section.append_step(f"Workbook validation: {self.uuid_section.workbook_validation_text}")
@@ -514,7 +514,7 @@ class ProductionPage(BaseWorkspacePage):
         try:
             expected_pwm = self._parse_pwm_value(pwm_text)
         except ValueError as exc:
-            message = f"PWM write blocked: expected PWM in workbook B5 is invalid ({exc}). Command path remains pending."
+            message = f"PWM write blocked: expected PWM in workbook B5 is invalid: {exc}. Command path remains pending."
             self.progress_section.append_step(message, level="error")
             self.console_message.emit(f"[Production] {message}")
             return
