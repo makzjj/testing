@@ -467,6 +467,13 @@ class ProductionPageWorkflowTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls._app = QApplication.instance() or QApplication([])
 
+    def test_parse_pwm_value_validation(self) -> None:
+        self.assertEqual(ProductionPage._parse_pwm_value("100"), 100)
+        with self.assertRaisesRegex(ValueError, "required"):
+            ProductionPage._parse_pwm_value(" ")
+        with self.assertRaisesRegex(ValueError, "digits only"):
+            ProductionPage._parse_pwm_value("10x")
+
     @staticmethod
     def _create_ipqc_workbook(path: Path, *, with_optional_fields: bool = True) -> None:
         if not _HAS_OPENPYXL:
