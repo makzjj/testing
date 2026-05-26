@@ -56,8 +56,6 @@ ML20_NODE_MAP: dict[int, str] = {
 _ML20_NODE_ORDER: tuple[int, ...] = tuple(ML20_NODE_MAP)
 RUNTIME_POLL_INTERVAL_MS = 1000
 WORKBOOK_OUTPUT_PENDING = "Pending"
-PWM_COMMAND_SUPPORT_PENDING = "Pending command support"
-PWM_READBACK_PENDING_CHECK = "PENDING"
 
 
 @dataclass(frozen=True)
@@ -136,10 +134,15 @@ class ProductionPage(BaseWorkspacePage):
         self._test_controller.profile_finished.connect(self._handle_profile_finished)
         self._parameter_controller.log_message.connect(self.console_message.emit)
         self._parameter_controller.verification_finished.connect(self._handle_uuid_verification_finished)
+        self._parameter_controller.pwm_verification_finished.connect(self._handle_pwm_verification_finished)
         self.progress_section.refresh_requested.connect(self.refresh)
         self.progress_section.clear_requested.connect(self._handle_clear_progress_log)
         self._uuid_operation: str | None = None
         self._pending_expected_uuid: int | None = None
+        self._pending_expected_pwm: int | None = None
+        self._pending_verify_node: tuple[int, str] | None = None
+        self._last_uuid_verify_passed: bool | None = None
+        self._last_uuid_verify_reason: str = ""
         self._current_programmed_pwm_value = "-"
 
         self.add_weighted_row((self.communication_section, 3), (self.stage_section, 2))
@@ -427,6 +430,25 @@ class ProductionPage(BaseWorkspacePage):
 
         self._uuid_operation = "verify"
         self._pending_expected_uuid = expected_uuid
+        expected_pwm_text = self._get_workbook_expected_pwm_text()
+        if expected_pwm_text is None:
+            message = "Expected PWM is unavailable from the active IPQC workbook sheet."
+            self._set_status_result("FAIL", message)
+            self.progress_section.append_step("PWM verify blocked: expected workbook PWM missing")
+            self.console_message.emit(f"[Production] {message}")
+            return
+        try:
+            expected_pwm = parse_pwm_value(expected_pwm_text)
+        except ValueError as exc:
+            message = f"Expected PWM in workbook B5 is invalid: {exc}"
+            self._set_status_result("FAIL", message)
+            self.progress_section.append_step("PWM verify blocked: expected workbook PWM invalid")
+            self.console_message.emit(f"[Production] {message}")
+            return
+        self._pending_expected_pwm = expected_pwm
+        self._pending_verify_node = (node_id, node_name)
+        self._last_uuid_verify_passed = None
+        self._last_uuid_verify_reason = ""
         self._set_status_result("READING UUID", f"Reading and verifying UUID for Node {node_id} {node_name}.")
         started = self._parameter_controller.verify_uuid(
             node_id,
@@ -436,16 +458,19 @@ class ProductionPage(BaseWorkspacePage):
         )
         if started:
             self.progress_section.append_step(f"Started UUID read/verify for Node {node_id} {node_name}")
-            self._report_pwm_readback_pending()
         else:
             self._uuid_operation = None
             self._pending_expected_uuid = None
+            self._pending_expected_pwm = None
+            self._pending_verify_node = None
         self._refresh_connection_status()
 
     def _handle_uuid_verification_finished(self, passed: bool, reason: str) -> None:
         operation = self._uuid_operation
         self._uuid_operation = None
         self._pending_expected_uuid = None
+        self._last_uuid_verify_passed = passed
+        self._last_uuid_verify_reason = reason
         actual_value = (
             self._parameter_controller.last_verify_actual_uuid_text
             if self._parameter_controller.last_verify_actual_uuid_text
@@ -474,6 +499,51 @@ class ProductionPage(BaseWorkspacePage):
         self.progress_section.append_step(f"Check result: {check_text}")
         if self._ipqc_excel_adapter.has_loaded_workbook():
             self._update_uuid_cells_in_workbook_memory(actual_value, passed)
+        self._start_pwm_verification_after_uuid()
+
+    def _start_pwm_verification_after_uuid(self) -> None:
+        node_context = self._pending_verify_node
+        expected_pwm = self._pending_expected_pwm
+        if node_context is None or expected_pwm is None:
+            return
+        node_id, node_name = node_context
+        self._set_status_result("READING PWM", f"Reading and verifying PWM for Node {node_id} {node_name}.")
+        started = self._parameter_controller.verify_pwm(
+            node_id,
+            node_name,
+            expected_pwm,
+            expected_pwm_text=str(expected_pwm),
+        )
+        if started:
+            self.progress_section.append_step(f"Started PWM read/verify for Node {node_id} {node_name}")
+        else:
+            self._pending_expected_pwm = None
+            self._pending_verify_node = None
+
+    def _handle_pwm_verification_finished(self, passed: bool, reason: str) -> None:
+        actual_pwm_text = self._parameter_controller.last_verify_actual_pwm_text or "-"
+        self._current_programmed_pwm_value = actual_pwm_text
+        self._pending_expected_pwm = None
+        self._pending_verify_node = None
+        check_text = "PASS" if passed else "FAIL"
+        self.uuid_section.set_programmed_values(
+            self._parameter_controller.last_verify_actual_uuid_text or "-",
+            self._current_programmed_pwm_value,
+            check_text,
+        )
+        uuid_passed = bool(self._last_uuid_verify_passed)
+        combined_pass = uuid_passed and passed
+        if combined_pass:
+            self._set_status_result("PASS", reason)
+            self.progress_section.append_step(reason)
+        else:
+            combined_reason = reason if passed == uuid_passed else f"{self._last_uuid_verify_reason} | {reason}"
+            self._set_status_result("FAIL", combined_reason)
+            self.progress_section.append_step(combined_reason, level="error")
+        self.progress_section.append_step(f"Programmed/read-back PWM: {self._current_programmed_pwm_value}")
+        self.progress_section.append_step(f"PWM check result: {check_text}")
+        if self._ipqc_excel_adapter.has_loaded_workbook():
+            self._update_pwm_cells_in_workbook_memory(self._current_programmed_pwm_value, check_text)
 
     def _reset_result_only(self) -> None:
         self._set_status_result("READY", "No test has been run yet.", append_to_log=False)
@@ -557,13 +627,6 @@ class ProductionPage(BaseWorkspacePage):
     @staticmethod
     def _parse_pwm_value(pwm_text: str) -> int:
         return parse_pwm_value(pwm_text)
-
-    def _report_pwm_readback_pending(self) -> None:
-        self._current_programmed_pwm_value = PWM_COMMAND_SUPPORT_PENDING
-        message = "PWM read-back pending command support; verification is not confirmed in current parser/runtime path."
-        self.progress_section.append_step(message)
-        self.console_message.emit(f"[Production] {message}")
-        self._update_pwm_cells_in_workbook_memory(PWM_COMMAND_SUPPORT_PENDING, PWM_READBACK_PENDING_CHECK)
 
     def _update_uuid_cells_in_workbook_memory(self, actual_value: str | int | None, passed: bool) -> bool:
         return self._update_parameter_cells_in_workbook_memory(
@@ -847,7 +910,7 @@ class _ProductionInfoSection(PanelFrame):
         self._expected_pwm_value = "-"
         self._expected_other_value = "-"
         self._actual_serial_value = "-"
-        self._actual_pwm_value = PWM_COMMAND_SUPPORT_PENDING
+        self._actual_pwm_value = "-"
         self._check_result_value = "-"
 
         self._combo = QComboBox()
@@ -1273,7 +1336,7 @@ class _UuidCsvSection(PanelFrame):
         self._expected_pwm_value = "-"
         self._expected_other_value = "-"
         self._actual_serial_value = "-"
-        self._actual_pwm_value = PWM_COMMAND_SUPPORT_PENDING
+        self._actual_pwm_value = "-"
         self._check_result_value = "-"
 
         button_grid = QGridLayout()
@@ -1347,7 +1410,7 @@ class _UuidCsvSection(PanelFrame):
         self._actual_serial_label.setWordWrap(True)
         self.body_layout.addWidget(self._actual_serial_label)
 
-        self._actual_pwm_label = QLabel(f"Programmed/read-back PWM: {PWM_COMMAND_SUPPORT_PENDING}")
+        self._actual_pwm_label = QLabel("Programmed/read-back PWM: -")
         self._actual_pwm_label.setObjectName("DetailValue")
         self._actual_pwm_label.setWordWrap(True)
         self.body_layout.addWidget(self._actual_pwm_label)

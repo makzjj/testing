@@ -16,6 +16,7 @@ UUID_READ_PARAM = 0x3F
 UUID_WRITE_PARAM = 0x3D
 UUID_RESPONSE_PARAM = 0x3A
 PWM_SET_COMMAND = 0x84
+PWM_GET_COMMAND = 0x85
 UUID_VERIFY_TIMEOUT_MS = 3000
 UUID_MAX_40BIT_VALUE = 0xFFFFFFFFFF
 UUID_DECIMAL_LENGTH = 10
@@ -144,6 +145,19 @@ def build_pwm_write_payload(pwm_value: int) -> list[int]:
     return [PWM_SET_COMMAND, (safe_value >> 8) & 0xFF, safe_value & 0xFF]
 
 
+def build_pwm_read_payload() -> list[int]:
+    return [PWM_GET_COMMAND]
+
+
+def decode_pwm_response(payload: list[int] | tuple[int, ...]) -> tuple[bool, int | None, str]:
+    if len(payload) < 3:
+        return False, None, "PWM response payload is too short."
+    if payload[0] != PWM_GET_COMMAND:
+        return False, None, "PWM response command is not 0x85."
+    pwm_value = ((payload[1] & 0xFF) << 8) | (payload[2] & 0xFF)
+    return True, pwm_value, ""
+
+
 def decode_uuid_response(payload: list[int] | tuple[int, ...]) -> tuple[bool, int | None, str]:
     if len(payload) < 7:
         return False, None, "UUID response payload is too short."
@@ -172,6 +186,7 @@ class ProductionParameterController(QObject):
 
     log_message = pyqtSignal(str)
     verification_finished = pyqtSignal(bool, str)
+    pwm_verification_finished = pyqtSignal(bool, str)
 
     def __init__(
         self,
@@ -194,10 +209,17 @@ class ProductionParameterController(QObject):
         self._last_verify_actual_uuid: int | None = None
         self._last_verify_actual_uuid_text: str = ""
         self._last_verify_raw_response_hex: str = ""
+        self._pending_pwm_row: UuidCsvRow | None = None
+        self._last_verify_actual_pwm: int | None = None
+        self._last_verify_actual_pwm_text: str = ""
+        self._last_verify_pwm_raw_response_hex: str = ""
 
         self._verify_timer = QTimer(self)
         self._verify_timer.setSingleShot(True)
         self._verify_timer.timeout.connect(self._handle_verify_timeout)
+        self._pwm_verify_timer = QTimer(self)
+        self._pwm_verify_timer.setSingleShot(True)
+        self._pwm_verify_timer.timeout.connect(self._handle_pwm_verify_timeout)
 
     @property
     def csv_path(self) -> Path | None:
@@ -222,6 +244,18 @@ class ProductionParameterController(QObject):
     @property
     def last_verify_raw_response_hex(self) -> str:
         return self._last_verify_raw_response_hex
+
+    @property
+    def last_verify_actual_pwm(self) -> int | None:
+        return self._last_verify_actual_pwm
+
+    @property
+    def last_verify_actual_pwm_text(self) -> str:
+        return self._last_verify_actual_pwm_text
+
+    @property
+    def last_verify_pwm_raw_response_hex(self) -> str:
+        return self._last_verify_pwm_raw_response_hex
 
     def has_valid_rows(self) -> bool:
         return bool(self._rows) and not self._errors
@@ -360,6 +394,27 @@ class ProductionParameterController(QObject):
         )
         return self._start_verify_for_row(selected_row)
 
+    def verify_pwm(
+        self,
+        node_id: int,
+        node_name: str,
+        expected_pwm: int,
+        *,
+        expected_pwm_text: str | None = None,
+    ) -> bool:
+        supported_name, support_error = self._resolve_supported_node(node_id, node_name)
+        if support_error is not None:
+            self.pwm_verification_finished.emit(False, support_error)
+            return False
+        selected_row = UuidCsvRow(
+            row_index=0,
+            node_id=node_id,
+            node_name=supported_name or str(node_name),
+            uuid_text=(expected_pwm_text or str(expected_pwm)).strip(),
+            uuid_int=int(expected_pwm),
+        )
+        return self._start_pwm_verify_for_row(selected_row)
+
     def _start_verify_for_row(self, selected_row: UuidCsvRow, *, runtime_window=None) -> bool:
         if runtime_window is None:
             runtime_window, _backend_client, readiness_error = self._resolve_runtime_for_uuid_operation()
@@ -375,6 +430,21 @@ class ProductionParameterController(QObject):
         self._last_verify_raw_response_hex = ""
         self.log_message.emit(f"[Production] Verifying UUID for Node {selected_row.node_id} {selected_row.node_name}")
         self._send_next_verify_request()
+        return True
+
+    def _start_pwm_verify_for_row(self, selected_row: UuidCsvRow, *, runtime_window=None) -> bool:
+        if runtime_window is None:
+            runtime_window, _backend_client, readiness_error = self._resolve_runtime_for_uuid_operation()
+            if readiness_error is not None:
+                self.pwm_verification_finished.emit(False, readiness_error)
+                return False
+        self._attach_runtime_window(runtime_window)
+        self._pending_pwm_row = None
+        self._last_verify_actual_pwm = None
+        self._last_verify_actual_pwm_text = ""
+        self._last_verify_pwm_raw_response_hex = ""
+        self.log_message.emit(f"[Production] Verifying PWM for Node {selected_row.node_id} {selected_row.node_name}")
+        self._send_pwm_verify_request(selected_row)
         return True
 
     def _resolve_selected_row(self, node_id: int, node_name: str) -> tuple[UuidCsvRow | None, str | None]:
@@ -505,15 +575,26 @@ class ProductionParameterController(QObject):
         self._verify_timer.start(self._timeout_ms)
 
     def _handle_runtime_packet(self, packet: object) -> None:
-        if self._pending_row is None:
+        if self._pending_row is None and self._pending_pwm_row is None:
             return
         if not isinstance(packet, dict):
             return
         if packet.get("status") != "ok" or packet.get("type") != "can_over_uart":
             return
 
+        cmd = int(packet.get("cmd", -1))
+        if self._pending_row is not None and cmd == UUID_COMMAND:
+            self._handle_runtime_packet_uuid(packet)
+            return
+        if self._pending_pwm_row is not None and cmd == PWM_GET_COMMAND:
+            self._handle_runtime_packet_pwm(packet)
+            return
+
+    def _handle_runtime_packet_uuid(self, packet: dict) -> None:
         sender = int(packet.get("sender", -1))
         pending_row = self._pending_row
+        if pending_row is None:
+            return
         if sender != pending_row.node_id:
             self._finish_verify_failure(
                 f"UUID response came from wrong node (expected Node {pending_row.node_id}, got Node {sender})."
@@ -521,10 +602,6 @@ class ProductionParameterController(QObject):
             return
 
         cmd = int(packet.get("cmd", -1))
-        if cmd != UUID_COMMAND:
-            self._finish_verify_failure(f"UUID response does not contain command {UUID_COMMAND:#04x}.")
-            return
-
         params = packet.get("params")
         if not isinstance(params, list):
             self._finish_verify_failure("UUID response payload is missing params.")
@@ -563,11 +640,82 @@ class ProductionParameterController(QObject):
         self._pending_row = None
         self._send_next_verify_request()
 
+    def _send_pwm_verify_request(self, row: UuidCsvRow) -> None:
+        runtime_window = self._runtime_window
+        backend_client = getattr(runtime_window, "backend_client", None) if runtime_window is not None else None
+        if backend_client is None or not backend_client.is_connected():
+            self._finish_pwm_verify_failure("Serial port not connected.")
+            return
+
+        self._pending_pwm_row = row
+        payload = build_pwm_read_payload()
+        self.log_message.emit(f"[Production] Reading PWM from Node {row.node_id} {row.node_name}")
+        try:
+            backend_client.send_command_bytes(row.node_id, payload)
+        except Exception as exc:
+            self._finish_pwm_verify_failure(f"Failed to request PWM read for Node {row.node_id} {row.node_name}: {exc}")
+            return
+
+        payload_text = " ".join(f"{byte:02X}" for byte in payload)
+        self.log_message.emit(f"[Production] TX[PWM Read] -> Node {row.node_id:02d}: {payload_text}")
+        self._pwm_verify_timer.start(self._timeout_ms)
+
+    def _handle_runtime_packet_pwm(self, packet: dict) -> None:
+        sender = int(packet.get("sender", -1))
+        pending_row = self._pending_pwm_row
+        if pending_row is None:
+            return
+        if sender != pending_row.node_id:
+            self._finish_pwm_verify_failure(
+                f"PWM response came from wrong node (expected Node {pending_row.node_id}, got Node {sender})."
+            )
+            return
+
+        cmd = int(packet.get("cmd", -1))
+        params = packet.get("params")
+        if not isinstance(params, list):
+            self._finish_pwm_verify_failure("PWM response payload is missing params.")
+            return
+        decoded_ok, actual_pwm, error = decode_pwm_response([cmd, *params])
+        if not decoded_ok:
+            self._finish_pwm_verify_failure(error)
+            return
+        if actual_pwm is None:
+            self._finish_pwm_verify_failure("PWM response decode failed.")
+            return
+
+        self._last_verify_actual_pwm = actual_pwm
+        self._last_verify_actual_pwm_text = f"{actual_pwm:d}"
+        self._last_verify_pwm_raw_response_hex = " ".join(f"{value & 0xFF:02X}" for value in [cmd, *params])
+        self.log_message.emit(f"[Production] PWM read-back received for Node {pending_row.node_id:02d}: {actual_pwm}")
+
+        expected_pwm_text = pending_row.uuid_text
+        if self._last_verify_actual_pwm_text != expected_pwm_text:
+            self._finish_pwm_verify_failure(
+                f"PWM read-back mismatch for Node {pending_row.node_id} {pending_row.node_name}: "
+                f"expected {expected_pwm_text}, got {self._last_verify_actual_pwm_text}."
+            )
+            return
+
+        self._pwm_verify_timer.stop()
+        self._pending_pwm_row = None
+        self.log_message.emit(f"[Production] PWM verified for Node {pending_row.node_id} {pending_row.node_name}: {actual_pwm}")
+        self.pwm_verification_finished.emit(
+            True,
+            f"PWM read-back PASS for Node {pending_row.node_id} {pending_row.node_name}: expected {expected_pwm_text}, actual {actual_pwm}.",
+        )
+
     def _handle_verify_timeout(self) -> None:
         if self._pending_row is None:
             return
         row = self._pending_row
         self._finish_verify_failure(f"Timed out waiting for UUID read-back from Node {row.node_id} {row.node_name}.")
+
+    def _handle_pwm_verify_timeout(self) -> None:
+        if self._pending_pwm_row is None:
+            return
+        row = self._pending_pwm_row
+        self._finish_pwm_verify_failure(f"Timed out waiting for PWM read-back from Node {row.node_id} {row.node_name}.")
 
     def _finish_verify_failure(self, reason: str) -> None:
         self._verify_timer.stop()
@@ -575,3 +723,9 @@ class ProductionParameterController(QObject):
         self._pending_row = None
         self.log_message.emit(f"[Production] {reason}")
         self.verification_finished.emit(False, reason)
+
+    def _finish_pwm_verify_failure(self, reason: str) -> None:
+        self._pwm_verify_timer.stop()
+        self._pending_pwm_row = None
+        self.log_message.emit(f"[Production] {reason}")
+        self.pwm_verification_finished.emit(False, reason)
