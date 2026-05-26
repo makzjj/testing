@@ -17,10 +17,12 @@ from gui.workspace.pages.production_page import ProductionPage
 from gui.workspace.widgets import ResponsiveRow
 from gui.workspace.pages.production_parameter_controller import (
     ProductionParameterController,
+    build_pwm_write_payload,
     build_uuid_read_payload,
     build_uuid_write_payload,
     decode_uuid_response,
     format_uuid_like_source,
+    parse_pwm_value,
     parse_uuid_value,
     validate_uuid_format,
 )
@@ -469,10 +471,13 @@ class ProductionPageWorkflowTests(unittest.TestCase):
 
     def test_parse_pwm_value_validation(self) -> None:
         self.assertEqual(ProductionPage._parse_pwm_value("100"), 100)
+        self.assertEqual(parse_pwm_value("65535"), 65535)
         with self.assertRaisesRegex(ValueError, "required"):
             ProductionPage._parse_pwm_value(" ")
         with self.assertRaisesRegex(ValueError, "digits only"):
             ProductionPage._parse_pwm_value("10x")
+        with self.assertRaisesRegex(ValueError, "16-bit"):
+            ProductionPage._parse_pwm_value("70000")
 
     @staticmethod
     def _create_ipqc_workbook(path: Path, *, with_optional_fields: bool = True) -> None:
@@ -718,9 +723,10 @@ class ProductionPageWorkflowTests(unittest.TestCase):
 
             expected_uuid = 1223303010
             self.assertTrue(runtime_window.backend_client.sent_commands)
-            self.assertEqual(runtime_window.backend_client.sent_commands[-1], (3, build_uuid_write_payload(expected_uuid)))
+            self.assertIn((3, build_uuid_write_payload(expected_uuid)), runtime_window.backend_client.sent_commands)
+            self.assertIn((3, build_pwm_write_payload(100)), runtime_window.backend_client.sent_commands)
             self.assertNotIn((3, [0xE0, 0x3F]), runtime_window.backend_client.sent_commands)
-            self.assertIn("PWM command support pending", page.progress_section.to_plain_text())
+            self.assertIn("PWM write sent", page.progress_section.to_plain_text())
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook write wiring tests.")
     def test_production_page_write_uuid_logs_pwm_blocked_when_b5_invalid(self) -> None:
@@ -752,10 +758,8 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             page._handle_write_uuid()
             self._app.processEvents()
 
-            expected_uuid = 1223303010
-            self.assertTrue(runtime_window.backend_client.sent_commands)
-            self.assertEqual(runtime_window.backend_client.sent_commands[-1], (3, build_uuid_write_payload(expected_uuid)))
-            self.assertIn("PWM write blocked: expected PWM in workbook B5 is invalid", page.progress_section.to_plain_text())
+            self.assertEqual(runtime_window.backend_client.sent_commands, [])
+            self.assertIn("Expected PWM in workbook B5 is invalid", page.result_summary_section._reason_label.text())
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook write wiring tests.")
     def test_production_page_workbook_write_failure_is_reporting_error(self) -> None:
@@ -773,7 +777,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
                 page._handle_load_ipqc_workbook()
                 self._app.processEvents()
 
-            with patch.object(page._ipqc_excel_adapter, "write_uuid_actual_and_check", side_effect=OSError("disk full")):
+            with patch.object(page._ipqc_excel_adapter, "write_summary_result", side_effect=OSError("disk full")):
                 page._update_uuid_cells_in_workbook_memory("1223303011", True)
                 self._app.processEvents()
 
@@ -825,7 +829,10 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             output_sheet = page._ipqc_excel_adapter._workbook["3X"]
             self.assertEqual(output_sheet["C4"].value, str(expected_uuid))
             self.assertEqual(output_sheet["D4"].value, "PASS")
+            self.assertEqual(output_sheet["C5"].value, "Pending command support")
+            self.assertEqual(output_sheet["D5"].value, "PENDING")
             self.assertIn("Check result: PASS", page.progress_section.to_plain_text())
+            self.assertIn("PWM read-back pending command support", page.progress_section.to_plain_text())
 
             self.assertIsNone(page._result_logger.result_csv_path)
 
@@ -869,6 +876,8 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             output_sheet = page._ipqc_excel_adapter._workbook["3X"]
             self.assertEqual(output_sheet["C4"].value, "1223303011")
             self.assertEqual(output_sheet["D4"].value, "FAIL")
+            self.assertEqual(output_sheet["C5"].value, "Pending command support")
+            self.assertEqual(output_sheet["D5"].value, "PENDING")
             self.assertIn("Check result: FAIL", page.progress_section.to_plain_text())
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook save tests.")
@@ -935,8 +944,10 @@ class ProductionParameterControllerTests(unittest.TestCase):
     def test_uuid_helper_functions(self) -> None:
         self.assertEqual(parse_uuid_value("1234567890"), 1234567890)
         self.assertEqual(parse_uuid_value("0x499602D2"), 1234567890)
+        self.assertEqual(parse_pwm_value("100"), 100)
         self.assertEqual(build_uuid_read_payload(), [0xE0, 0x3F])
         self.assertEqual(build_uuid_write_payload(1234567890), [0xE0, 0x3D, 0x00, 0x49, 0x96, 0x02, 0xD2])
+        self.assertEqual(build_pwm_write_payload(100), [0x84, 0x00, 0x64])
         self.assertEqual(format_uuid_like_source(1234567890, "1234567890"), "1234567890")
         self.assertEqual(format_uuid_like_source(1234567890, "0x499602D2"), "0x499602D2")
         self.assertEqual(validate_uuid_format(1223306010, 6), (True, ""))
@@ -946,6 +957,15 @@ class ProductionParameterControllerTests(unittest.TestCase):
         decoded_ok, decoded_uuid, _ = decode_uuid_response([0xE0, 0x3A, 0x00, 0x49, 0x96, 0x02, 0xD2])
         self.assertTrue(decoded_ok)
         self.assertEqual(decoded_uuid, 1234567890)
+
+    def test_write_pwm_sends_set_pwm_payload_to_selected_node(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        controller = ProductionParameterController(bridge)
+
+        ok, _message = controller.write_pwm(6, "H", 100, expected_pwm_text="100")
+        self.assertTrue(ok)
+        self.assertEqual(runtime_window.backend_client.sent_commands[0], (6, [0x84, 0x00, 0x64]))
 
     def test_load_uuid_csv_validation_blocks_invalid_rows(self) -> None:
         runtime_window = _FakeRuntimeWindow()

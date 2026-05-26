@@ -1,4 +1,4 @@
-"""Production UUID parameter controller for writing and verification."""
+"""Production parameter controller for UUID/PWM writing and UUID verification."""
 
 from __future__ import annotations
 
@@ -15,9 +15,11 @@ UUID_COMMAND = 0xE0
 UUID_READ_PARAM = 0x3F
 UUID_WRITE_PARAM = 0x3D
 UUID_RESPONSE_PARAM = 0x3A
+PWM_SET_COMMAND = 0x84
 UUID_VERIFY_TIMEOUT_MS = 3000
 UUID_MAX_40BIT_VALUE = 0xFFFFFFFFFF
 UUID_DECIMAL_LENGTH = 10
+PWM_MAX_16BIT_VALUE = 0xFFFF
 # Decimal segment lengths: 1(prefix) + 2(year) + 2(week) + 2(node-id) + 3(running-number).
 UUID_DECIMAL_FORMAT = "1YYWWNNRRR"
 UUID_DECIMAL_FORMAT_DESCRIPTION = "Prefix-Year-Week-Node-RunningNumber"
@@ -121,6 +123,25 @@ def build_uuid_read_payload() -> list[int]:
 def build_uuid_write_payload(uuid_int: int, uuid_hi: int = 0) -> list[int]:
     hi, b3, b2, b1, b0 = split_uuid_to_bytes(uuid_int, uuid_hi)
     return [UUID_COMMAND, UUID_WRITE_PARAM, hi, b3, b2, b1, b0]
+
+
+def parse_pwm_value(value: object) -> int:
+    text = str(value).strip()
+    if not text:
+        raise ValueError("PWM value is required.")
+    if not text.isdigit():
+        raise ValueError("PWM value must contain digits only.")
+    parsed = int(text, 10)
+    if parsed < 0:
+        raise ValueError("PWM value must be non-negative.")
+    if parsed > PWM_MAX_16BIT_VALUE:
+        raise ValueError("PWM value exceeds 16-bit command encoding range.")
+    return parsed
+
+
+def build_pwm_write_payload(pwm_value: int) -> list[int]:
+    safe_value = max(0, min(PWM_MAX_16BIT_VALUE, int(pwm_value)))
+    return [PWM_SET_COMMAND, (safe_value >> 8) & 0xFF, safe_value & 0xFF]
 
 
 def decode_uuid_response(payload: list[int] | tuple[int, ...]) -> tuple[bool, int | None, str]:
@@ -264,6 +285,19 @@ class ProductionParameterController(QObject):
         )
         return self._write_uuid_row(selected_row)
 
+    def write_pwm(self, node_id: int, node_name: str, pwm_value: int, *, expected_pwm_text: str | None = None) -> tuple[bool, str]:
+        supported_name, support_error = self._resolve_supported_node(node_id, node_name)
+        if support_error is not None:
+            return False, support_error
+        selected_row = UuidCsvRow(
+            row_index=0,
+            node_id=node_id,
+            node_name=supported_name or str(node_name),
+            uuid_text=(expected_pwm_text or str(pwm_value)).strip(),
+            uuid_int=int(pwm_value),
+        )
+        return self._write_pwm_row(selected_row)
+
     def _write_uuid_row(self, selected_row: UuidCsvRow) -> tuple[bool, str]:
         _runtime_window, backend_client, readiness_error = self._resolve_runtime_for_uuid_operation()
         if readiness_error is not None:
@@ -277,6 +311,20 @@ class ProductionParameterController(QObject):
         except Exception as exc:
             return False, f"Failed to write UUID for Node {selected_row.node_id} {selected_row.node_name}: {exc}"
         return True, f"UUID write sent to Node {selected_row.node_id} {selected_row.node_name}."
+
+    def _write_pwm_row(self, selected_row: UuidCsvRow) -> tuple[bool, str]:
+        _runtime_window, backend_client, readiness_error = self._resolve_runtime_for_uuid_operation()
+        if readiness_error is not None:
+            return False, readiness_error
+        self.log_message.emit(f"[Production] Writing PWM to Node {selected_row.node_id} {selected_row.node_name}")
+        try:
+            payload = build_pwm_write_payload(selected_row.uuid_int)
+            backend_client.send_command_bytes(selected_row.node_id, payload)
+            payload_text = " ".join(f"{byte:02X}" for byte in payload)
+            self.log_message.emit(f"[Production] TX[PWM Write] -> Node {selected_row.node_id:02d}: {payload_text}")
+        except Exception as exc:
+            return False, f"Failed to write PWM for Node {selected_row.node_id} {selected_row.node_name}: {exc}"
+        return True, f"PWM write sent to Node {selected_row.node_id} {selected_row.node_name}."
 
     def verify_loaded_uuid(self, node_id: int, node_name: str) -> bool:
         if self._errors:
