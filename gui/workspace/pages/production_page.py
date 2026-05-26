@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import html
-import re
 from datetime import datetime
 from pathlib import Path
 
@@ -201,7 +200,13 @@ class ProductionPage(BaseWorkspacePage):
             self._set_status_result("READY", str(exc))
             self.console_message.emit(f"[Production] {exc}")
             return
-        expected_uuid = self._get_workbook_expected_uuid()
+        expected_uuid = None
+        expected_uuid_text = self._get_workbook_expected_uuid_text()
+        if expected_uuid_text:
+            try:
+                expected_uuid = parse_uuid_value(expected_uuid_text)
+            except ValueError:
+                expected_uuid = None
         self._test_controller.run_test(node_id, node_name, expected_uuid=expected_uuid)
         self._refresh_connection_status()
 
@@ -278,7 +283,7 @@ class ProductionPage(BaseWorkspacePage):
             self.uuid_section.set_programmed_values("-", PWM_COMMAND_SUPPORT_PENDING, "-")
             return
         try:
-            expected = self._ipqc_excel_adapter.read_expected_summary(strict=False)
+            expected_serial = self._ipqc_excel_adapter.read_expected_uuid_serial()
         except Exception as exc:
             self.uuid_section.set_workbook_validation(False, str(exc))
             self.uuid_section.set_expected_values(serial_number="", pwm="", other_parameters="")
@@ -286,16 +291,13 @@ class ProductionPage(BaseWorkspacePage):
             self._refresh_workbook_action_states()
             return
         self.uuid_section.set_expected_values(
-            expected.serial_number,
-            expected.pwm,
-            expected.other_parameters,
+            expected_serial,
+            "",
+            "",
         )
         self.uuid_section.set_programmed_values("-", PWM_COMMAND_SUPPORT_PENDING, "-")
         self.progress_section.append_step(f"Workbook validation: {self.uuid_section.workbook_validation_text}")
-        self.progress_section.append_step(f"Expected S/N / UUID: {expected.serial_number or '-'}")
-        self.progress_section.append_step(f"Expected PWM: {expected.pwm or '-'}")
-        if expected.other_parameters:
-            self.progress_section.append_step(f"Expected other parameters: {expected.other_parameters}")
+        self.progress_section.append_step(f"Expected S/N / UUID: {expected_serial or '-'}")
         self._refresh_workbook_action_states()
 
     def _handle_write_uuid(self) -> None:
@@ -306,16 +308,29 @@ class ProductionPage(BaseWorkspacePage):
             self.console_message.emit(f"[Production] {exc}")
             return
 
-        expected_uuid = self._get_workbook_expected_uuid()
-        if expected_uuid is None:
+        expected_uuid_text = self._get_workbook_expected_uuid_text()
+        if expected_uuid_text is None:
             message = "Expected S/N is unavailable from the active IPQC workbook sheet."
             self._set_status_result("FAIL", message)
             self.progress_section.append_step("UUID write blocked: expected workbook S/N missing")
             self.console_message.emit(f"[Production] {message}")
             return
+        try:
+            expected_uuid = parse_uuid_value(expected_uuid_text)
+        except ValueError as exc:
+            message = f"Expected S/N in workbook B4 is invalid: {exc}"
+            self._set_status_result("FAIL", message)
+            self.progress_section.append_step("UUID write blocked: expected workbook S/N invalid")
+            self.console_message.emit(f"[Production] {message}")
+            return
 
         self._set_status_result("WRITING UUID", f"Writing UUID to Node {node_id} {node_name}.")
-        success, message = self._parameter_controller.write_uuid(node_id, node_name, expected_uuid)
+        success, message = self._parameter_controller.write_uuid(
+            node_id,
+            node_name,
+            expected_uuid,
+            expected_uuid_text=expected_uuid_text,
+        )
         if success:
             self.progress_section.append_step(f"UUID write sent for Node {node_id} {node_name}")
             self._set_status_result("WRITE SENT", message)
@@ -337,18 +352,31 @@ class ProductionPage(BaseWorkspacePage):
             self.console_message.emit(f"[Production] {exc}")
             return
 
-        expected_uuid = self._get_workbook_expected_uuid()
-        if expected_uuid is None:
+        expected_uuid_text = self._get_workbook_expected_uuid_text()
+        if expected_uuid_text is None:
             message = "Expected S/N is unavailable from the active IPQC workbook sheet."
             self._set_status_result("FAIL", message)
             self.progress_section.append_step("UUID verify blocked: expected workbook S/N missing")
+            self.console_message.emit(f"[Production] {message}")
+            return
+        try:
+            expected_uuid = parse_uuid_value(expected_uuid_text)
+        except ValueError as exc:
+            message = f"Expected S/N in workbook B4 is invalid: {exc}"
+            self._set_status_result("FAIL", message)
+            self.progress_section.append_step("UUID verify blocked: expected workbook S/N invalid")
             self.console_message.emit(f"[Production] {message}")
             return
 
         self._uuid_operation = "verify"
         self._pending_expected_uuid = expected_uuid
         self._set_status_result("READING UUID", f"Reading and verifying UUID for Node {node_id} {node_name}.")
-        started = self._parameter_controller.verify_uuid(node_id, node_name, expected_uuid)
+        started = self._parameter_controller.verify_uuid(
+            node_id,
+            node_name,
+            expected_uuid,
+            expected_uuid_text=expected_uuid_text,
+        )
         if started:
             self.progress_section.append_step(f"Started UUID read/verify for Node {node_id} {node_name}")
         else:
@@ -361,14 +389,10 @@ class ProductionPage(BaseWorkspacePage):
         self._uuid_operation = None
         self._pending_expected_uuid = None
         actual_value = (
-            self._parameter_controller.last_verify_actual_uuid
-            if self._parameter_controller.last_verify_actual_uuid is not None
+            self._parameter_controller.last_verify_actual_uuid_text
+            if self._parameter_controller.last_verify_actual_uuid_text
             else ""
         )
-        if not passed and actual_value == "":
-            mismatch = re.search(r"expected\s+(\d+),\s+got\s+(\d+)", reason)
-            if mismatch is not None:
-                actual_value = mismatch.group(2)
         if passed:
             self._set_status_result("PASS", reason)
             if operation == "write":
@@ -444,22 +468,17 @@ class ProductionPage(BaseWorkspacePage):
     def _handle_profile_finished(self, _final_node_result: object) -> None:
         pass
 
-    def _get_workbook_expected_uuid(self) -> int | None:
+    def _get_workbook_expected_uuid_text(self) -> str | None:
         if not self._ipqc_excel_adapter.has_loaded_workbook():
             return None
         try:
-            expected = self._ipqc_excel_adapter.read_expected_summary(strict=False)
+            serial_text = self._ipqc_excel_adapter.read_expected_uuid_serial().strip()
         except Exception as exc:
             self.console_message.emit(f"[Production] Failed to read expected workbook S/N: {exc}")
             return None
-        serial_text = expected.serial_number.strip()
         if not serial_text:
             return None
-        try:
-            return parse_uuid_value(serial_text)
-        except ValueError as exc:
-            self.console_message.emit(f"[Production] Invalid workbook expected S/N '{serial_text}': {exc}")
-            return None
+        return serial_text
 
     def _update_uuid_cells_in_workbook_memory(self, actual_value: str | int | None, passed: bool) -> bool:
         """Write UUID summary result into the loaded workbook object.
@@ -528,10 +547,9 @@ class ProductionPage(BaseWorkspacePage):
         if not self._ipqc_excel_adapter.has_loaded_workbook():
             return False
         try:
-            expected = self._ipqc_excel_adapter.read_expected_summary(strict=False)
+            serial_text = self._ipqc_excel_adapter.read_expected_uuid_serial().strip()
         except (RuntimeError, ValueError):
             return False
-        serial_text = expected.serial_number.strip()
         if not serial_text:
             return False
         return self._is_valid_uuid_text(serial_text)

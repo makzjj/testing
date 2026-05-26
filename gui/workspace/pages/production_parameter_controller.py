@@ -48,6 +48,15 @@ class UuidCsvRow:
     uuid_int: int
 
 
+def format_uuid_like_source(uuid_int: int, source_text: str) -> str:
+    text = str(source_text).strip()
+    if text.lower().startswith("0x"):
+        hex_digits = text[2:]
+        width = max(len(hex_digits), 1)
+        return f"{text[:2]}{uuid_int:0{width}X}"
+    return f"{uuid_int:d}"
+
+
 def parse_uuid_value(value: object) -> int:
     text = str(value).strip()
     if not text:
@@ -161,6 +170,7 @@ class ProductionParameterController(QObject):
         self._verify_index = 0
         self._pending_row: UuidCsvRow | None = None
         self._last_verify_actual_uuid: int | None = None
+        self._last_verify_actual_uuid_text: str = ""
         self._last_verify_raw_response_hex: str = ""
 
         self._verify_timer = QTimer(self)
@@ -182,6 +192,10 @@ class ProductionParameterController(QObject):
     @property
     def last_verify_actual_uuid(self) -> int | None:
         return self._last_verify_actual_uuid
+
+    @property
+    def last_verify_actual_uuid_text(self) -> str:
+        return self._last_verify_actual_uuid_text
 
     @property
     def last_verify_raw_response_hex(self) -> str:
@@ -229,7 +243,14 @@ class ProductionParameterController(QObject):
             return False, selection_error or "Selected node UUID data is unavailable."
         return self._write_uuid_row(selected_row)
 
-    def write_uuid(self, node_id: int, node_name: str, uuid_int: int) -> tuple[bool, str]:
+    def write_uuid(
+        self,
+        node_id: int,
+        node_name: str,
+        uuid_int: int,
+        *,
+        expected_uuid_text: str | None = None,
+    ) -> tuple[bool, str]:
         supported_name, support_error = self._resolve_supported_node(node_id, node_name)
         if support_error is not None:
             return False, support_error
@@ -237,7 +258,7 @@ class ProductionParameterController(QObject):
             row_index=0,
             node_id=node_id,
             node_name=supported_name or str(node_name),
-            uuid_text=str(uuid_int),
+            uuid_text=(expected_uuid_text or str(uuid_int)).strip(),
             uuid_int=int(uuid_int),
         )
         return self._write_uuid_row(selected_row)
@@ -269,7 +290,14 @@ class ProductionParameterController(QObject):
             return False
         return self._start_verify_for_row(selected_row)
 
-    def verify_uuid(self, node_id: int, node_name: str, expected_uuid: int) -> bool:
+    def verify_uuid(
+        self,
+        node_id: int,
+        node_name: str,
+        expected_uuid: int,
+        *,
+        expected_uuid_text: str | None = None,
+    ) -> bool:
         supported_name, support_error = self._resolve_supported_node(node_id, node_name)
         if support_error is not None:
             self.verification_finished.emit(False, support_error)
@@ -278,7 +306,7 @@ class ProductionParameterController(QObject):
             row_index=0,
             node_id=node_id,
             node_name=supported_name or str(node_name),
-            uuid_text=str(expected_uuid),
+            uuid_text=(expected_uuid_text or str(expected_uuid)).strip(),
             uuid_int=int(expected_uuid),
         )
         return self._start_verify_for_row(selected_row)
@@ -294,6 +322,7 @@ class ProductionParameterController(QObject):
         self._verify_index = 0
         self._pending_row = None
         self._last_verify_actual_uuid = None
+        self._last_verify_actual_uuid_text = ""
         self._last_verify_raw_response_hex = ""
         self.log_message.emit(f"[Production] Verifying UUID for Node {selected_row.node_id} {selected_row.node_name}")
         self._send_next_verify_request()
@@ -460,12 +489,20 @@ class ProductionParameterController(QObject):
             self._finish_verify_failure("UUID response decode failed.")
             return
         self._last_verify_actual_uuid = actual_uuid
+        expected_uuid_text = pending_row.uuid_text
+        actual_uuid_text = format_uuid_like_source(actual_uuid, expected_uuid_text)
+        self._last_verify_actual_uuid_text = actual_uuid_text
         self._last_verify_raw_response_hex = " ".join(f"{value & 0xFF:02X}" for value in [cmd, *params])
 
-        if actual_uuid != pending_row.uuid_int:
+        if expected_uuid_text.lower().startswith("0x"):
+            uuids_match = actual_uuid_text.lower() == expected_uuid_text.lower()
+        else:
+            uuids_match = actual_uuid_text == expected_uuid_text
+
+        if not uuids_match:
             self._finish_verify_failure(
                 f"UUID read-back mismatch for Node {pending_row.node_id} {pending_row.node_name}: "
-                f"expected {pending_row.uuid_int}, got {actual_uuid}."
+                f"expected {expected_uuid_text}, got {actual_uuid_text}."
             )
             return
 

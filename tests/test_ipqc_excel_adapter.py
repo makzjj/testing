@@ -64,6 +64,19 @@ class IpqcExcelAdapterTests(unittest.TestCase):
         self.assertEqual(expected.operator, "operator-a")
         self.assertEqual(expected.other_parameters, "N/A")
 
+    def test_read_expected_uuid_serial_reads_b4_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template_path = self._create_ipqc_template(tmpdir)
+            workbook = load_workbook(template_path)
+            workbook["3X"]["B5"] = None
+            workbook["3X"]["B6"] = None
+            workbook.save(template_path)
+            adapter = IpqcExcelAdapter()
+            adapter.load_template(template_path)
+            serial = adapter.read_expected_uuid_serial()
+
+        self.assertEqual(serial, "1223303010")
+
     def test_missing_required_expected_cell_is_reported_clearly(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             template_path = self._create_ipqc_template(tmpdir)

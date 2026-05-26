@@ -20,6 +20,7 @@ from gui.workspace.pages.production_parameter_controller import (
     build_uuid_read_payload,
     build_uuid_write_payload,
     decode_uuid_response,
+    format_uuid_like_source,
     parse_uuid_value,
     validate_uuid_format,
 )
@@ -655,8 +656,8 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertTrue(page.uuid_section._workbook_label.text().endswith("ipqc.xlsx"))
             self.assertEqual(page.uuid_section._workbook_label.toolTip(), str(workbook_path))
             self.assertEqual(page.uuid_section._expected_serial_value, "1223303010")
-            self.assertEqual(page.uuid_section._expected_pwm_value, "100")
-            self.assertEqual(page.uuid_section._expected_other_value, "N/A")
+            self.assertEqual(page.uuid_section._expected_pwm_value, "-")
+            self.assertEqual(page.uuid_section._expected_other_value, "-")
             self.assertEqual(page.uuid_section.workbook_validation_text, "Workbook validation: PASSED")
             self.assertTrue(page.uuid_section.verify_button.isEnabled())
             self.assertTrue(page.uuid_section.write_button.isEnabled())
@@ -664,7 +665,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertEqual(runtime_window.backend_client.sent_commands, [])
             log_text = page.progress_section.to_plain_text()
             self.assertIn("Expected S/N / UUID: 1223303010", log_text)
-            self.assertIn("Expected PWM: 100", log_text)
+            self.assertNotIn("Expected PWM:", log_text)
             self.assertIn("loaded ipqc workbook", page.progress_section.to_html().lower())
             self.assertIn("#2e7d32", page.progress_section.to_html().lower())
 
@@ -893,6 +894,8 @@ class ProductionParameterControllerTests(unittest.TestCase):
         self.assertEqual(parse_uuid_value("0x499602D2"), 1234567890)
         self.assertEqual(build_uuid_read_payload(), [0xE0, 0x3F])
         self.assertEqual(build_uuid_write_payload(1234567890), [0xE0, 0x3D, 0x00, 0x49, 0x96, 0x02, 0xD2])
+        self.assertEqual(format_uuid_like_source(1234567890, "1234567890"), "1234567890")
+        self.assertEqual(format_uuid_like_source(1234567890, "0x499602D2"), "0x499602D2")
         self.assertEqual(validate_uuid_format(1223306010, 6), (True, ""))
         is_valid, invalid_message = validate_uuid_format(1223305010, 6)
         self.assertFalse(is_valid)
@@ -1084,6 +1087,34 @@ class ProductionParameterControllerTests(unittest.TestCase):
             self.assertEqual(runtime_window.backend_client.sent_commands, [])
             self.assertEqual(page.result_summary_section._status_label.text(), "FAIL")
             self.assertIn("Expected S/N is unavailable", page.result_summary_section._reason_label.text())
+
+    @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook guard tests.")
+    def test_production_page_blocks_uuid_actions_when_workbook_expected_sn_invalid(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            self._create_ipqc_workbook(workbook_path, with_optional_fields=False)
+            wb = load_workbook(workbook_path)
+            wb["3X"]["B4"] = "not-a-uuid"
+            wb.save(workbook_path)
+            with patch(
+                "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
+                return_value=(str(workbook_path), "Excel Files (*.xlsx)"),
+            ):
+                page._handle_load_ipqc_workbook()
+                self._app.processEvents()
+
+            self.assertFalse(page.uuid_section.verify_button.isEnabled())
+            self.assertFalse(page.uuid_section.write_button.isEnabled())
+            page._handle_write_uuid()
+            page._handle_verify_uuid()
+            self._app.processEvents()
+            self.assertEqual(runtime_window.backend_client.sent_commands, [])
+            self.assertEqual(page.result_summary_section._status_label.text(), "FAIL")
+            self.assertIn("Expected S/N in workbook B4 is invalid", page.result_summary_section._reason_label.text())
 
 
 if __name__ == "__main__":

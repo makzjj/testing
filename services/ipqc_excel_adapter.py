@@ -110,6 +110,11 @@ class IpqcExcelAdapter:
             other_parameters=other_parameters,
         )
 
+    def read_expected_uuid_serial(self) -> str:
+        """Read expected UUID/S/N from active base sheet cell B4."""
+        sheet = self._require_base_sheet()
+        return self._read_cell_text(sheet, "B4")
+
     def write_uuid_actual_and_check(self, actual_uuid: object, check_result: str) -> None:
         self.write_summary_result("S/N", actual_uuid, check_result)
 
