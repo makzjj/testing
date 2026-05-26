@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication, QComboBox, QPushButton, QSizePolicy
+from PyQt6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QSizePolicy
 
 from gui.program_selector_window import ProgramSelectorWindow
 from gui.workspace.constants import ROUTE_FIRMWARE, ROUTE_PRODUCTION, ROUTE_PROJECT_CONFIG, ROUTE_RUNTIME
@@ -225,25 +225,17 @@ ui:
             self._app.processEvents()
 
             production_page = window._pages[ROUTE_PRODUCTION]
-            node_table = production_page.node_status_section.table
             dropdown = production_page.test_control_section._combo
 
-            table_names = [node_table.item(row, 1).text() for row in range(node_table.rowCount())]
-            table_node_ids = [node_table.item(row, 0).text() for row in range(node_table.rowCount())]
+            node_ids = sorted(production_page.node_status_section._led_by_node_id.keys())
             dropdown_text = [dropdown.itemText(index) for index in range(dropdown.count())]
 
-            self.assertEqual(
-                table_node_ids,
-                ["1", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"],
-            )
-            self.assertEqual(
-                table_names,
-                ["MCU Master", "X", "Y", "V", "H", "NZ", "RZ", "PZ", "HMI", "NGActuator", "Z"],
-            )
+            self.assertEqual(node_ids, list(range(2, 17)))
             self.assertIn("Node 7 - NZ", dropdown_text)
             self.assertIn("Node 11 - NGActuator", dropdown_text)
             self.assertNotIn("Node 1 - MCU Master", dropdown_text)
-            self.assertFalse(any(name in table_names for name in LEGACY_ACCUESS_NODE_NAMES))
+            node_labels = [label.text() for label in production_page.node_status_section.findChildren(QLabel)]
+            self.assertFalse(any(name in node_labels for name in LEGACY_ACCUESS_NODE_NAMES))
 
     def test_project_config_reload_enables_feature_gated_navigation_from_current_editor_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

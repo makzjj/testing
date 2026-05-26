@@ -518,10 +518,8 @@ class ProductionPageWorkflowTests(unittest.TestCase):
         page._handle_run_test()
         self._app.processEvents()
 
-        self.assertEqual(page.progress_section._current_stage_label.text(), "Current Stage: Configuration Test")
-        self.assertEqual(page.progress_section._current_node_label.text(), "Current Node: Node 8")
         self.assertEqual(page.result_summary_section._status_label.text(), "TESTING")
-        self.assertIn("[TESTING] Running Production test for Node 8 RZ.", page.progress_section.to_plain_text())
+        self.assertIn("[INFO] TESTING: Running Production test for Node 8 RZ.", page.progress_section.to_plain_text())
 
         runtime_window.packet_received.emit(
             {"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xCB, "params": [0xA5, 0x5A]}
@@ -545,7 +543,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
 
         self.assertEqual(page.result_summary_section._status_label.text(), "PASS")
         self.assertIn("All profile steps passed", page.result_summary_section._reason_label.text())
-        self.assertEqual(page.stage_section._rows["configuration"][0].text(), "Passed")
+        self.assertIn("#2e7d32", page.stage_section._rows["configuration"][0].styleSheet().lower())
 
     def test_profile_step_results_do_not_append_to_csv_logger(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -607,10 +605,12 @@ class ProductionPageWorkflowTests(unittest.TestCase):
         self.assertIn("Refresh", button_texts)
         self.assertIn("Clear", button_texts)
         self.assertEqual(page.progress_section.windowTitle(), "")
-        self.assertEqual(page.progress_section._current_stage_label.text(), "Current Stage: -")
-        self.assertEqual(page.progress_section._current_node_label.text(), "Current Node: -")
-        self.assertEqual(page.progress_section._overall_result_label.text(), "Overall Result: READY")
-        self.assertEqual(page.progress_section._progress_bar.value(), 0)
+        self.assertTrue(hasattr(page.progress_section, "_log_output"))
+        self.assertGreaterEqual(page.progress_section._log_output.minimumHeight(), 220)
+        self.assertEqual(
+            page.progress_section._log_output.horizontalScrollBarPolicy(),
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
+        )
         self.assertEqual(page.horizontalScrollBarPolicy(), Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
     def test_production_page_node_status_clear_resets_led_to_dark_green(self) -> None:
@@ -622,6 +622,9 @@ class ProductionPageWorkflowTests(unittest.TestCase):
         self.assertIn("#7ed957", page.node_status_section._led_by_node_id[8].styleSheet().lower())
         page._handle_clear_nodes_requested()
         self.assertIn("#1e5e20", page.node_status_section._led_by_node_id[8].styleSheet().lower())
+        node_labels = [label.text() for label in page.node_status_section.findChildren(QLabel)]
+        self.assertEqual(node_labels.count("Node"), 1)
+        self.assertEqual(len(page.node_status_section._led_by_node_id), 15)
 
     def test_production_page_shows_communication_card_controls(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -676,7 +679,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertEqual(page.uuid_section._expected_serial_value, "1223303010")
             self.assertEqual(page.uuid_section._expected_pwm_value, "100")
             self.assertEqual(page.uuid_section._expected_other_value, "-")
-            self.assertEqual(page.uuid_section.workbook_validation_text, "Workbook Validation: PASSED")
+            self.assertEqual(page.uuid_section.workbook_validation_text, "Workbook Validation: READY")
             self.assertFalse(page.uuid_section.verify_button.isEnabled())
             self.assertTrue(page.uuid_section.write_button.isEnabled())
             self.assertFalse(page.uuid_section.save_button.isEnabled())
@@ -842,6 +845,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertEqual(output_sheet["D4"].value, "PASS")
             self.assertEqual(output_sheet["C5"].value, "100")
             self.assertEqual(output_sheet["D5"].value, "PASS")
+            self.assertEqual(page.uuid_section.workbook_validation_text, "Workbook Validation: PASSED")
             self.assertIn("Check result: PASS", page.progress_section.to_plain_text())
             self.assertIn("PWM read-back PASS", page.progress_section.to_plain_text())
 
@@ -894,6 +898,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertEqual(output_sheet["D4"].value, "FAIL")
             self.assertEqual(output_sheet["C5"].value, "50")
             self.assertEqual(output_sheet["D5"].value, "FAIL")
+            self.assertIn("Workbook Validation: FAILED", page.uuid_section.workbook_validation_text)
             self.assertIn("Check result: FAIL", page.progress_section.to_plain_text())
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook UUID verify tests.")
@@ -981,8 +986,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             page.progress_section.append_step(f"log line {index}")
         self._app.processEvents()
 
-        self.assertIn("] log line 39", page.progress_section.to_plain_text())
-        self.assertIn("Current Action: log line 39", page.progress_section._current_action_label.text())
+        self.assertIn("[INFO] log line 39", page.progress_section.to_plain_text())
 
         clear_buttons = [button for button in page.progress_section.findChildren(QPushButton) if button.text() == "Clear"]
         self.assertEqual(len(clear_buttons), 1)
@@ -1179,7 +1183,7 @@ class ProductionParameterControllerTests(unittest.TestCase):
         self.assertNotIn("Safe Movement Test", button_texts)
         self.assertFalse(hasattr(page.test_control_section, "_profile_combo"))
         stage_labels = [label.text() for label in page.stage_section.findChildren(QLabel)]
-        self.assertIn("Configuration Test", stage_labels)
+        self.assertIn("Configuration", stage_labels)
         self.assertIn("Single Axis Functional Test", stage_labels)
         self.assertIn("Performance Test", stage_labels)
         stage_button_texts = [button.text() for button in page.stage_section.findChildren(QPushButton)]
