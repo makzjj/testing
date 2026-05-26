@@ -8,7 +8,6 @@ from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QTextOption
 from PyQt6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -16,18 +15,16 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QProgressBar,
     QPushButton,
     QSizePolicy,
     QTableWidgetItem,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from ..bridges import WorkspaceRuntimeBridge
-from ..models import DetailItem
 from ..widgets import DetailListWidget, LabeledControl, PanelFrame, SimpleTableWidget
-from ..widgets.layout_utils import clear_layout
 from services.ipqc_excel_adapter import IpqcExcelAdapter
 from services.production_csv_logger import ProductionCsvLogger
 from .base_page import BaseWorkspacePage
@@ -99,11 +96,11 @@ class ProductionPage(BaseWorkspacePage):
 
         self.communication_section = _CommunicationSection()
         self.info_section = self.communication_section
-        self.robot_nodes_section = self.communication_section
+        self.robot_nodes_section = _NodeStatusSection()
         self.test_control_section = self.communication_section
         self.uuid_section = _UuidCsvSection()
         self.stage_section = _TestStagesSection()
-        self.node_status_section = _NodeStatusSection()
+        self.node_status_section = self.robot_nodes_section
         self.result_summary_section = _ResultSummarySection()
         self.progress_section = _TestProgressSection()
         self._test_controller = ProductionTestController(bridge)
@@ -116,13 +113,13 @@ class ProductionPage(BaseWorkspacePage):
         self.stage_section.single_axis_requested.connect(self._handle_single_axis_test_requested)
         self.stage_section.performance_requested.connect(self._handle_performance_test_requested)
         self.uuid_section.load_workbook_requested.connect(self._handle_load_ipqc_workbook)
-        self.uuid_section.sheet_group_changed.connect(self._handle_ipqc_sheet_group_changed)
         self.uuid_section.write_requested.connect(self._handle_write_uuid)
         self.uuid_section.verify_requested.connect(self._handle_verify_uuid)
         self.uuid_section.save_requested.connect(self._handle_save_completed_workbook)
         self.communication_section.connect_requested.connect(self._handle_connect_requested)
         self.communication_section.disconnect_requested.connect(self._handle_disconnect_requested)
-        self.robot_nodes_section.node_selected.connect(self._handle_runtime_node_selected)
+        self.node_status_section.update_nodes_requested.connect(self._handle_update_nodes_requested)
+        self.node_status_section.clear_nodes_requested.connect(self._handle_clear_nodes_requested)
         self._test_controller.log_message.connect(self.console_message.emit)
         self._test_controller.test_started.connect(self._handle_test_started)
         self._test_controller.test_passed.connect(self._handle_test_passed)
@@ -144,8 +141,12 @@ class ProductionPage(BaseWorkspacePage):
         self._last_uuid_verify_passed: bool | None = None
         self._last_uuid_verify_reason: str = ""
         self._current_programmed_pwm_value = "-"
+        self._workbook_loaded = False
+        self._workbook_write_completed = False
+        self._workbook_verification_passed = False
 
-        self.add_weighted_row((self.communication_section, 3), (self.stage_section, 2))
+        self.add_weighted_row((self.communication_section, 1), (self.stage_section, 1))
+        self.add_full_width(self.node_status_section)
         self.add_full_width(self.uuid_section)
         self.add_full_width(self.progress_section)
 
@@ -155,7 +156,9 @@ class ProductionPage(BaseWorkspacePage):
         self._runtime_poll_timer.start()
 
         self.uuid_section.set_workbook_output_path(WORKBOOK_OUTPUT_PENDING)
-        self.uuid_section.set_last_workbook_action("No workbook write yet")
+        self.uuid_section.set_workbook_path("")
+        self.uuid_section.set_last_workbook_action("-")
+        self.uuid_section.set_workbook_validation(False, "")
         self.uuid_section.set_programmed_values("-", self._current_programmed_pwm_value, "-")
         self._reset_result_only()
         self._refresh_runtime_panels()
@@ -183,7 +186,27 @@ class ProductionPage(BaseWorkspacePage):
 
     def _refresh_robot_nodes(self) -> None:
         nodes_model = self._bridge.get_runtime_robot_nodes(create_if_missing=False)
-        self.robot_nodes_section.set_nodes(nodes_model)
+        self.communication_section.set_nodes(nodes_model)
+        self.node_status_section.set_nodes(nodes_model)
+
+    def _handle_update_nodes_requested(self) -> None:
+        requested = False
+        request_scan = getattr(self._bridge, "request_runtime_node_scan", None)
+        if callable(request_scan):
+            requested = bool(request_scan())
+        if requested:
+            self.console_message.emit("[Production] Requested runtime node scan update.")
+            self.progress_section.append_step("Requested runtime node scan update")
+        else:
+            self.console_message.emit(
+                "[Production] Update Nodes requested, but no runtime scan hook is available yet (TODO backend hook)."
+            )
+            self.progress_section.append_step("Update Nodes requested (TODO backend hook)")
+        self._refresh_robot_nodes()
+
+    def _handle_clear_nodes_requested(self) -> None:
+        self.node_status_section.clear_node_states()
+        self.progress_section.append_step("Cleared displayed node states to unknown")
 
     def _handle_connect_requested(self, port: str, baud_rate: int) -> None:
         if not port:
@@ -229,6 +252,8 @@ class ProductionPage(BaseWorkspacePage):
             except ValueError:
                 expected_uuid = None
         self._test_controller.run_test(node_id, node_name, expected_uuid=expected_uuid)
+        self.progress_section.set_current_node(f"Node {node_id}")
+        self.progress_section.set_current_stage("Configuration Test")
         self._refresh_connection_status()
 
     def _handle_stop_test(self) -> None:
@@ -236,9 +261,11 @@ class ProductionPage(BaseWorkspacePage):
         self._refresh_connection_status()
 
     def _handle_single_axis_test_requested(self) -> None:
+        self.progress_section.set_current_stage("Single Axis Functional Test")
         self.progress_section.append_step("Single Axis Functional Test UI is present but command flow is not enabled yet")
 
     def _handle_performance_test_requested(self) -> None:
+        self.progress_section.set_current_stage("Performance Test")
         self.progress_section.append_step("Performance Test UI is present but command flow is not enabled yet")
 
     def _handle_clear_result(self) -> None:
@@ -263,6 +290,9 @@ class ProductionPage(BaseWorkspacePage):
         try:
             groups = self._ipqc_excel_adapter.load_template(path)
             active_group = self._ipqc_excel_adapter.active_sheet_group or ""
+            self._workbook_loaded = True
+            self._workbook_write_completed = False
+            self._workbook_verification_passed = False
             self.uuid_section.set_workbook_path(path)
             self.uuid_section.set_sheet_groups(groups, active_group)
             self._result_logger.set_output_dir(Path(path).expanduser().resolve().parent)
@@ -270,6 +300,9 @@ class ProductionPage(BaseWorkspacePage):
             self.uuid_section.set_last_workbook_action("Workbook loaded; no write performed yet")
             self._refresh_ipqc_expected_preview()
         except Exception as exc:
+            self._workbook_loaded = False
+            self._workbook_write_completed = False
+            self._workbook_verification_passed = False
             self.console_message.emit(f"[Production] Failed to load IPQC workbook: {exc}")
             self._set_status_result("FAIL", "IPQC workbook load failed.")
             self.progress_section.append_step("IPQC workbook load failed", level="error")
@@ -366,6 +399,8 @@ class ProductionPage(BaseWorkspacePage):
             self.console_message.emit(f"[Production] {message}")
             return
 
+        self.progress_section.set_current_stage("Write Parameters to MCU")
+        self.progress_section.set_current_node(f"Node {node_id}")
         self._set_status_result("WRITING PARAMETERS", f"Writing UUID/PWM to Node {node_id} {node_name}.")
         uuid_success, uuid_message = self._parameter_controller.write_uuid(
             node_id,
@@ -374,11 +409,14 @@ class ProductionPage(BaseWorkspacePage):
             expected_uuid_text=expected_uuid_text,
         )
         if not uuid_success:
+            self._workbook_write_completed = False
+            self._workbook_verification_passed = False
             self._set_status_result("FAIL", uuid_message)
             self.progress_section.append_step(f"Failed to write UUID for Node {node_id} {node_name}")
             self.console_message.emit(f"[Production] {uuid_message}")
             self._uuid_operation = None
             self._pending_expected_uuid = None
+            self._refresh_workbook_action_states()
             self._refresh_connection_status()
             return
 
@@ -389,6 +427,8 @@ class ProductionPage(BaseWorkspacePage):
             expected_pwm_text=expected_pwm_text,
         )
         if pwm_success:
+            self._workbook_write_completed = True
+            self._workbook_verification_passed = False
             self.progress_section.append_step(f"UUID write sent for Node {node_id} {node_name}")
             self.console_message.emit(f"[Production] UUID write sent for Node {node_id} {node_name}")
             self.progress_section.append_step(f"PWM write sent for Node {node_id} {node_name}")
@@ -397,6 +437,8 @@ class ProductionPage(BaseWorkspacePage):
             self.uuid_section.set_last_workbook_action("UUID/PWM write sent to MCU; awaiting read-back verification")
             self.progress_section.append_step(f"Last workbook action: {self.uuid_section.last_workbook_action_text}")
         else:
+            self._workbook_write_completed = False
+            self._workbook_verification_passed = False
             self._set_status_result("FAIL", pwm_message)
             self.progress_section.append_step(f"Failed to write PWM for Node {node_id} {node_name}")
             self.console_message.emit(f"[Production] {pwm_message}")
@@ -450,6 +492,8 @@ class ProductionPage(BaseWorkspacePage):
         self._last_uuid_verify_passed = None
         self._last_uuid_verify_reason = ""
         self._set_status_result("READING UUID", f"Reading and verifying UUID for Node {node_id} {node_name}.")
+        self.progress_section.set_current_stage("Read Back / Verify")
+        self.progress_section.set_current_node(f"Node {node_id}")
         started = self._parameter_controller.verify_uuid(
             node_id,
             node_name,
@@ -533,6 +577,7 @@ class ProductionPage(BaseWorkspacePage):
         )
         uuid_passed = bool(self._last_uuid_verify_passed)
         combined_pass = uuid_passed and passed
+        self._workbook_verification_passed = combined_pass
         if combined_pass:
             self._set_status_result("PASS", reason)
             self.progress_section.append_step(reason)
@@ -545,6 +590,7 @@ class ProductionPage(BaseWorkspacePage):
         self.progress_section.append_step(f"PWM check result: {check_text}")
         if self._ipqc_excel_adapter.has_loaded_workbook():
             self._update_pwm_cells_in_workbook_memory(self._current_programmed_pwm_value, check_text)
+        self._refresh_workbook_action_states()
 
     def _reset_result_only(self) -> None:
         self._set_status_result("READY", "No test has been run yet.", append_to_log=False)
@@ -554,11 +600,14 @@ class ProductionPage(BaseWorkspacePage):
                 "Use Refresh to reload visible runtime data",
             ]
         )
+        self.progress_section.set_current_stage("-")
+        self.progress_section.set_current_node("-")
         self.stage_section.reset_stage_states()
 
     def _handle_test_started(self, node_id: int, node_name: str) -> None:
-        self.node_status_section.set_node_status(node_id, "Testing")
         self.stage_section.set_stage_status("configuration", "testing")
+        self.progress_section.set_current_stage("Configuration Test")
+        self.progress_section.set_current_node(f"Node {node_id}")
         self._set_status_result("TESTING", f"Running Production test for Node {node_id} {node_name}.")
         self.progress_section.append_step(f"Started test profile for Node {node_id} {node_name}")
 
@@ -572,14 +621,12 @@ class ProductionPage(BaseWorkspacePage):
         self.progress_section.mark_profile_step(step_result.step_name, step_result.result)
 
     def _handle_test_passed(self, node_id: int, node_name: str, reason: str) -> None:
-        self.node_status_section.set_node_status(node_id, "Pass")
         self.stage_section.set_stage_status("configuration", "pass")
         self._set_status_result("PASS", reason)
         self.progress_section.append_step(f"Completed test profile for Node {node_id} {node_name}")
 
     def _handle_test_failed(self, node_id: int, node_name: str, reason: str) -> None:
         is_timeout = "Timed out" in reason
-        self.node_status_section.set_node_status(node_id, "Timeout" if is_timeout else "Fail")
         self.stage_section.set_stage_status("configuration", "fail")
         self._set_status_result("TIMEOUT" if is_timeout else "FAIL", reason)
         self.progress_section.append_step(
@@ -587,13 +634,11 @@ class ProductionPage(BaseWorkspacePage):
         )
 
     def _handle_test_unsupported(self, node_id: int, node_name: str, reason: str) -> None:
-        self.node_status_section.set_node_status(node_id, "Unsupported")
         self.stage_section.set_stage_status("configuration", "neutral")
         self._set_status_result("UNSUPPORTED", reason)
         self.progress_section.append_step(f"Unsupported test for Node {node_id} {node_name}")
 
     def _handle_test_aborted(self, node_id: int, node_name: str, reason: str) -> None:
-        self.node_status_section.set_node_status(node_id, "Aborted")
         self.stage_section.set_stage_status("configuration", "neutral")
         self._set_status_result("ABORTED", reason)
         self.progress_section.append_step(f"Aborted test profile for Node {node_id} {node_name}")
@@ -700,13 +745,11 @@ class ProductionPage(BaseWorkspacePage):
             self.console_message.emit(f"[Production] Failed to save completed IPQC workbook: {exc}")
 
     def _refresh_workbook_action_states(self) -> None:
-        can_use_workbook_uuid = self._has_workbook_expected_uuid()
-        can_use_workbook_pwm = self._has_workbook_expected_pwm()
-        can_use_parameter_pipeline = can_use_workbook_uuid and can_use_workbook_pwm
-        has_workbook = self._ipqc_excel_adapter.has_loaded_workbook()
-        self.uuid_section.verify_button.setEnabled(can_use_parameter_pipeline)
-        self.uuid_section.write_button.setEnabled(can_use_parameter_pipeline)
-        self.uuid_section.save_button.setEnabled(has_workbook)
+        has_workbook = self._workbook_loaded and self._ipqc_excel_adapter.has_loaded_workbook()
+        self.uuid_section.load_workbook_button.setEnabled(True)
+        self.uuid_section.write_button.setEnabled(has_workbook)
+        self.uuid_section.verify_button.setEnabled(has_workbook and self._workbook_write_completed)
+        self.uuid_section.save_button.setEnabled(has_workbook and self._workbook_verification_passed)
 
     def _has_workbook_expected_uuid(self) -> bool:
         if not self._ipqc_excel_adapter.has_loaded_workbook():
@@ -744,6 +787,8 @@ class ProductionPage(BaseWorkspacePage):
 
     def _set_status_result(self, status: str, reason: str, *, append_to_log: bool = True) -> None:
         self.result_summary_section.set_result(status, reason)
+        self.progress_section.set_overall_result(status)
+        self.progress_section.set_current_action(reason)
         entry = f"[{status}] {reason}"
         if append_to_log and entry != self._last_status_entry:
             level = "info"
@@ -777,7 +822,7 @@ class _CommunicationSection(PanelFrame):
         self._status_label.setObjectName("DetailValue")
         self._connected = False
         self._firmware_value = "-"
-        self._connected_nodes_value = "0"
+        self._nodes_firmware_value = "-"
 
         self._combo = QComboBox()
         self._combo.setObjectName("AxisSelectorCombo")
@@ -805,11 +850,12 @@ class _CommunicationSection(PanelFrame):
         self._firmware_label.setObjectName("DetailValue")
         self.body_layout.addWidget(self._firmware_label)
 
-        self._connected_label = QLabel("No. of Connection / Connected Nodes: 0")
-        self._connected_label.setObjectName("DetailValue")
-        self.body_layout.addWidget(self._connected_label)
+        self._nodes_firmware_label = QLabel("Nodes Firmware Version: -")
+        self._nodes_firmware_label.setObjectName("DetailValue")
+        self.body_layout.addWidget(self._nodes_firmware_label)
 
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setMinimumHeight(190)
 
     def set_model(self, model: dict) -> None:
         current_port = str(self._port_combo.currentData() or "")
@@ -850,16 +896,16 @@ class _CommunicationSection(PanelFrame):
             self._status_label.setStyleSheet("color: #808080; font-weight: bold;")
 
     def set_nodes(self, nodes_model: dict) -> None:
-        connected_nodes = [int(node_id) for node_id in nodes_model.get("connected_nodes", [])]
         rows = list(nodes_model.get("rows", []))
-        self._connected_nodes_value = str(len(connected_nodes))
-        self._connected_label.setText(
-            f"No. of Connection / Connected Nodes: {self._connected_nodes_value}"
-            + (f" ({', '.join(str(node) for node in connected_nodes)})" if connected_nodes else "")
-        )
         firmware_values = [str(row.get("firmware", "")).strip() for row in rows if str(row.get("firmware", "")).strip()]
         self._firmware_value = firmware_values[0] if firmware_values else "-"
+        if firmware_values:
+            unique_versions = sorted({value for value in firmware_values if value})
+            self._nodes_firmware_value = ", ".join(unique_versions)
+        else:
+            self._nodes_firmware_value = "-"
         self._firmware_label.setText(f"MCU Firmware Version: {self._firmware_value}")
+        self._nodes_firmware_label.setText(f"Nodes Firmware Version: {self._nodes_firmware_value}")
 
     def selected_node(self) -> tuple[int, str]:
         selected = self._combo.currentData()
@@ -1165,11 +1211,12 @@ class _TestStagesSection(PanelFrame):
     def __init__(self) -> None:
         super().__init__("Test Stages", "")
         self._rows: dict[str, tuple[QLabel, QPushButton]] = {}
-        self._add_stage_row("configuration", "Configuration", self.configuration_requested.emit)
+        self._add_stage_row("configuration", "Configuration Test", self.configuration_requested.emit)
         self._add_stage_row("single_axis", "Single Axis Functional Test", self.single_axis_requested.emit)
         self._add_stage_row("performance", "Performance Test", self.performance_requested.emit)
         self.reset_stage_states()
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setMinimumHeight(190)
 
     def _add_stage_row(self, key: str, label_text: str, handler) -> None:
         row = QWidget()
@@ -1177,22 +1224,21 @@ class _TestStagesSection(PanelFrame):
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(8)
 
-        indicator = QLabel()
-        indicator.setFixedSize(14, 14)
-        indicator.setFrameShape(QFrame.Shape.NoFrame)
-        indicator.setStyleSheet("border-radius: 7px; background: #B0B7C3;")
-        row_layout.addWidget(indicator, 0, Qt.AlignmentFlag.AlignVCenter)
-
         label = QLabel(label_text)
         label.setObjectName("DetailValue")
         row_layout.addWidget(label, 1)
+
+        status_label = QLabel("Not Started")
+        status_label.setObjectName("DetailValue")
+        status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        row_layout.addWidget(status_label)
 
         button = QPushButton("Start Test")
         button.setProperty("tone", "secondary")
         button.clicked.connect(handler)
         row_layout.addWidget(button)
 
-        self._rows[key] = (indicator, button)
+        self._rows[key] = (status_label, button)
         self.body_layout.addWidget(row)
 
     def reset_stage_states(self) -> None:
@@ -1203,59 +1249,71 @@ class _TestStagesSection(PanelFrame):
         row = self._rows.get(key)
         if row is None:
             return
-        indicator, button = row
+        status_label, button = row
         normalized = status.strip().lower()
-        color = "#B0B7C3"
+        text = "Not Started"
         if normalized in {"testing", "pending"}:
-            color = "#D98732"
+            text = "Running"
         elif normalized in {"pass", "success"}:
-            color = "#2E7D32"
+            text = "Passed"
         elif normalized in {"fail", "failure", "timeout"}:
-            color = "#C62828"
-        indicator.setStyleSheet(f"border-radius: 7px; background: {color};")
+            text = "Failed"
+        status_label.setText(text)
         if key != "configuration":
             button.setEnabled(True)
 
 
 class _NodeStatusSection(PanelFrame):
+    update_nodes_requested = pyqtSignal()
+    clear_nodes_requested = pyqtSignal()
+
     def __init__(self) -> None:
-        super().__init__("Node Status", "")
-        status_nodes = get_ml20_status_nodes()
-        rows = [[str(node_id), node_name, "Not Tested"] for node_id, node_name in status_nodes]
-        self._row_by_node_id = {node_id: row_index for row_index, (node_id, _name) in enumerate(status_nodes)}
-        self.table = SimpleTableWidget(["Node ID", "Node Name", "Status"], rows)
-        self.table.setMinimumHeight(170)
-        self.table.setMaximumHeight(238)
-        self.body_layout.addWidget(self.table)
-        for row_index in range(self.table.rowCount()):
-            status_item = self.table.item(row_index, 2)
-            if status_item is not None:
-                self._apply_status_style(status_item, status_item.text())
+        super().__init__("Robot Arm Node Status", "")
+        self._led_by_node_id: dict[int, QLabel] = {}
 
-    def set_node_status(self, node_id: int, status: str) -> None:
-        row_index = self._row_by_node_id.get(node_id)
-        if row_index is None:
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 0, 0, 0)
+        button_row.setSpacing(8)
+        button_row.addStretch(1)
+        update_button = QPushButton("Update Nodes")
+        update_button.setProperty("tone", "secondary")
+        update_button.clicked.connect(self.update_nodes_requested.emit)
+        button_row.addWidget(update_button)
+        clear_button = QPushButton("Clear")
+        clear_button.setProperty("tone", "secondary")
+        clear_button.clicked.connect(self.clear_nodes_requested.emit)
+        button_row.addWidget(clear_button)
+        self.body_layout.addLayout(button_row)
+
+        for node_id in range(2, 17):
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(8)
+            row_layout.addWidget(QLabel(f"Node {node_id}"), 1)
+            led = QLabel()
+            led.setFixedSize(14, 14)
+            led.setFrameShape(QFrame.Shape.NoFrame)
+            row_layout.addWidget(led, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self._led_by_node_id[node_id] = led
+            self.body_layout.addWidget(row)
+            self._set_led_state(node_id, False)
+
+    def set_nodes(self, nodes_model: dict) -> None:
+        connected_nodes = {int(node_id) for node_id in nodes_model.get("connected_nodes", [])}
+        for node_id in self._led_by_node_id:
+            self._set_led_state(node_id, node_id in connected_nodes)
+
+    def clear_node_states(self) -> None:
+        for node_id in self._led_by_node_id:
+            self._set_led_state(node_id, False)
+
+    def _set_led_state(self, node_id: int, connected: bool) -> None:
+        led = self._led_by_node_id.get(node_id)
+        if led is None:
             return
-        item = QTableWidgetItem(status)
-        item.setFlags(Qt.ItemFlag.ItemIsEnabled)
-        self._apply_status_style(item, status)
-        self.table.setItem(row_index, 2, item)
-
-    def _apply_status_style(self, item: QTableWidgetItem, status: str) -> None:
-        normalized = status.strip().upper()
-        font = item.font()
-        font.setBold(normalized in {"PASS", "FAIL", "TESTING", "ABORTED", "TIMEOUT", "UNSUPPORTED"})
-        item.setFont(font)
-        if normalized == "PASS":
-            item.setForeground(QColor("#2E7D32"))
-        elif normalized == "FAIL":
-            item.setForeground(QColor("#C62828"))
-        elif normalized == "TESTING":
-            item.setForeground(QColor("#D98732"))
-        elif normalized in {"ABORTED", "TIMEOUT", "UNSUPPORTED"}:
-            item.setForeground(QColor("#6F7783"))
-        else:
-            item.setForeground(QColor("#594C44"))
+        color = "#7ED957" if connected else "#1E5E20"
+        led.setStyleSheet(f"border-radius: 7px; background: {color};")
 
 
 class _TestControlSection(PanelFrame):
@@ -1330,9 +1388,11 @@ class _UuidCsvSection(PanelFrame):
 
     def __init__(self) -> None:
         super().__init__("IPQC Workbook Parameter Programming", "")
-        self._workbook_validation_text = "Workbook validation: Not loaded"
-        self._last_workbook_action_text = "No workbook write yet"
+        self._workbook_validation_text = "Workbook Validation: -"
+        self._last_workbook_action_text = "-"
         self._workbook_output_text = WORKBOOK_OUTPUT_PENDING
+        self._sheet_groups: list[str] = []
+        self._selected_group = ""
         self._expected_serial_value = "-"
         self._expected_pwm_value = "-"
         self._expected_other_value = "-"
@@ -1376,77 +1436,29 @@ class _UuidCsvSection(PanelFrame):
 
         self.body_layout.addLayout(button_grid)
 
-        self._workbook_label = QLabel("Configuration File / IPQC Workbook: None")
-        self._workbook_label.setObjectName("DetailValue")
-        self._workbook_label.setWordWrap(True)
-        self.body_layout.addWidget(self._workbook_label)
+        self._loaded_workbook_label = QLabel("Loaded Workbook: -")
+        self._loaded_workbook_label.setObjectName("DetailValue")
+        self._loaded_workbook_label.setWordWrap(True)
+        self.body_layout.addWidget(self._loaded_workbook_label)
 
-        self._sheet_group_combo = QComboBox()
-        self._sheet_group_combo.setEnabled(False)
-        self._sheet_group_combo.currentTextChanged.connect(self.sheet_group_changed.emit)
-        self.body_layout.addWidget(LabeledControl("IPQC Sheet Group", self._sheet_group_combo))
-
-        self._workbook_validation_label = QLabel("Workbook validation: Not loaded")
-        self._workbook_validation_label.setObjectName("DetailValue")
-        self._workbook_validation_label.setWordWrap(True)
-        self.body_layout.addWidget(self._workbook_validation_label)
-
-        self._expected_serial_label = QLabel("Expected S/N / UUID: -")
-        self._expected_serial_label.setObjectName("DetailValue")
-        self._expected_serial_label.setWordWrap(True)
-        self.body_layout.addWidget(self._expected_serial_label)
-
-        self._expected_pwm_label = QLabel("Expected PWM: -")
-        self._expected_pwm_label.setObjectName("DetailValue")
-        self._expected_pwm_label.setWordWrap(True)
-        self.body_layout.addWidget(self._expected_pwm_label)
-
-        self._expected_other_label = QLabel("Expected other parameters: -")
-        self._expected_other_label.setObjectName("DetailValue")
-        self._expected_other_label.setWordWrap(True)
-        self.body_layout.addWidget(self._expected_other_label)
-
-        self._actual_serial_label = QLabel("Programmed/read-back S/N: -")
-        self._actual_serial_label.setObjectName("DetailValue")
-        self._actual_serial_label.setWordWrap(True)
-        self.body_layout.addWidget(self._actual_serial_label)
-
-        self._actual_pwm_label = QLabel("Programmed/read-back PWM: -")
-        self._actual_pwm_label.setObjectName("DetailValue")
-        self._actual_pwm_label.setWordWrap(True)
-        self.body_layout.addWidget(self._actual_pwm_label)
-
-        self._check_result_label = QLabel("Check result: -")
-        self._check_result_label.setObjectName("DetailValue")
-        self._check_result_label.setWordWrap(True)
-        self.body_layout.addWidget(self._check_result_label)
-
-        self._workbook_output_label = QLabel("Completed workbook: Pending")
-        self._workbook_output_label.setObjectName("DetailValue")
-        self._workbook_output_label.setWordWrap(True)
-        self.body_layout.addWidget(self._workbook_output_label)
-
-        self._last_workbook_action_label = QLabel("Last workbook action: No workbook write yet")
+        self._last_workbook_action_label = QLabel("Last Workbook Action: -")
         self._last_workbook_action_label.setObjectName("DetailValue")
         self._last_workbook_action_label.setWordWrap(True)
         self.body_layout.addWidget(self._last_workbook_action_label)
 
+        self._workbook_validation_label = QLabel("Workbook Validation: -")
+        self._workbook_validation_label.setObjectName("DetailValue")
+        self._workbook_validation_label.setWordWrap(True)
+        self.body_layout.addWidget(self._workbook_validation_label)
+
     def set_workbook_path(self, path: str) -> None:
-        display_name = Path(path).name if path else "None"
-        self._workbook_label.setText(f"Configuration File / IPQC Workbook: {display_name}")
-        self._workbook_label.setToolTip(path)
+        display_name = Path(path).name if path else "-"
+        self._loaded_workbook_label.setText(f"Loaded Workbook: {display_name}")
+        self._loaded_workbook_label.setToolTip(path)
 
     def set_sheet_groups(self, groups: list[str], selected: str) -> None:
-        self._sheet_group_combo.blockSignals(True)
-        self._sheet_group_combo.clear()
-        for group in groups:
-            self._sheet_group_combo.addItem(group)
-        self._sheet_group_combo.setEnabled(bool(groups))
-        if selected and groups:
-            index = self._sheet_group_combo.findText(selected)
-            if index >= 0:
-                self._sheet_group_combo.setCurrentIndex(index)
-        self._sheet_group_combo.blockSignals(False)
+        self._sheet_groups = list(groups)
+        self._selected_group = selected
         if selected:
             self.sheet_group_changed.emit(selected)
 
@@ -1454,35 +1466,31 @@ class _UuidCsvSection(PanelFrame):
         self._expected_serial_value = serial_number or "-"
         self._expected_pwm_value = pwm or "-"
         self._expected_other_value = other_parameters or "-"
-        self._expected_serial_label.setText(f"Expected S/N / UUID: {self._expected_serial_value}")
-        self._expected_pwm_label.setText(f"Expected PWM: {self._expected_pwm_value}")
-        self._expected_other_label.setText(f"Expected other parameters: {self._expected_other_value}")
 
     def set_programmed_values(self, serial_number: str, pwm: str, check_result: str) -> None:
         self._actual_serial_value = serial_number or "-"
         self._actual_pwm_value = pwm or "-"
         self._check_result_value = check_result or "-"
-        self._actual_serial_label.setText(f"Programmed/read-back S/N: {self._actual_serial_value}")
-        self._actual_pwm_label.setText(f"Programmed/read-back PWM: {self._actual_pwm_value}")
-        self._check_result_label.setText(f"Check result: {self._check_result_value}")
 
     def set_workbook_validation(self, passed: bool, message: str) -> None:
+        if not message and not passed:
+            self._workbook_validation_text = "Workbook Validation: -"
+            self._workbook_validation_label.setText(self._workbook_validation_text)
+            return
         if passed:
-            self._workbook_validation_text = "Workbook validation: PASSED"
-            self._workbook_validation_label.setText("Workbook validation: PASSED")
+            self._workbook_validation_text = "Workbook Validation: PASSED"
+            self._workbook_validation_label.setText(self._workbook_validation_text)
             return
         reason = message or "FAILED"
-        self._workbook_validation_text = f"Workbook validation: FAILED ({reason})"
+        self._workbook_validation_text = f"Workbook Validation: FAILED ({reason})"
         self._workbook_validation_label.setText(self._workbook_validation_text)
 
     def set_workbook_output_path(self, path_or_status: str) -> None:
         self._workbook_output_text = path_or_status
-        self._workbook_output_label.setText(f"Completed workbook: {path_or_status}")
-        self._workbook_output_label.setToolTip(path_or_status)
 
     def set_last_workbook_action(self, status: str) -> None:
         self._last_workbook_action_text = status
-        self._last_workbook_action_label.setText(f"Last workbook action: {status}")
+        self._last_workbook_action_label.setText(f"Last Workbook Action: {status}")
 
     @property
     def workbook_validation_text(self) -> str:
@@ -1503,44 +1511,64 @@ class _TestProgressSection(PanelFrame):
 
     def __init__(self) -> None:
         super().__init__("Status / Test Progress", "")
-        button_row = QHBoxLayout()
-        button_row.setContentsMargins(0, 0, 0, 0)
-        button_row.setSpacing(8)
+        self._history_plain: list[str] = []
+        self._history_html: list[str] = []
+        self._profile_steps: list[str] = []
+        self._completed_profile_steps = 0
 
+        controls = QHBoxLayout()
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setSpacing(8)
         refresh_button = QPushButton("Refresh")
         refresh_button.setProperty("tone", "secondary")
         refresh_button.clicked.connect(self.refresh_requested.emit)
-        button_row.addWidget(refresh_button)
-
+        controls.addWidget(refresh_button)
         clear_button = QPushButton("Clear")
         clear_button.setProperty("tone", "secondary")
         clear_button.clicked.connect(self.clear_requested.emit)
-        button_row.addWidget(clear_button)
-        button_row.addStretch(1)
-        self.body_layout.addLayout(button_row)
+        controls.addWidget(clear_button)
+        controls.addStretch(1)
+        self.body_layout.addLayout(controls)
 
-        self._log_output = QTextEdit()
-        self._log_output.setReadOnly(True)
-        self._log_output.setObjectName("StatusProgressLog")
-        self._log_output.setMinimumHeight(220)
-        self._log_output.setMaximumHeight(320)
-        self._log_output.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
-        self._log_output.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
-        self._log_output.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._log_output.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.body_layout.addWidget(self._log_output)
+        self._current_stage_label = QLabel("Current Stage: -")
+        self._current_stage_label.setObjectName("DetailValue")
+        self.body_layout.addWidget(self._current_stage_label)
+        self._current_node_label = QLabel("Current Node: -")
+        self._current_node_label.setObjectName("DetailValue")
+        self.body_layout.addWidget(self._current_node_label)
+        self._current_action_label = QLabel("Current Action: -")
+        self._current_action_label.setObjectName("DetailValue")
+        self._current_action_label.setWordWrap(True)
+        self.body_layout.addWidget(self._current_action_label)
+        self._overall_result_label = QLabel("Overall Result: READY")
+        self._overall_result_label.setObjectName("DetailValue")
+        self.body_layout.addWidget(self._overall_result_label)
+
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setFormat("%p%")
+        self.body_layout.addWidget(self._progress_bar)
 
     def reset_steps(self, steps: list[str]) -> None:
-        self._log_output.clear()
+        self._history_plain.clear()
+        self._history_html.clear()
+        self._profile_steps = []
+        self._completed_profile_steps = 0
+        self._progress_bar.setValue(0)
         for step in steps:
             self.append_step(step)
 
     def set_profile_steps(self, step_names: list[str]) -> None:
-        self._log_output.clear()
-        for index, step_name in enumerate(step_names, start=1):
-            self.append_step(f"{index}. {step_name} - PENDING")
+        self._profile_steps = list(step_names)
+        self._completed_profile_steps = 0
+        self._update_progress()
+        if step_names:
+            self.set_current_action(f"Profile loaded with {len(step_names)} steps")
 
     def mark_profile_step(self, step_name: str, status: str) -> None:
+        self._completed_profile_steps = min(self._completed_profile_steps + 1, len(self._profile_steps))
+        self._update_progress()
         self.append_step(f"{step_name} - {status}")
 
     def append_step(self, step: str, *, level: str = "info") -> None:
@@ -1551,22 +1579,43 @@ class _TestProgressSection(PanelFrame):
             color = "#2E7D32"
         elif normalized == "error":
             color = "#C62828"
-        escaped = html.escape(f"[{timestamp}] {step}")
+        plain_text = f"[{timestamp}] {step}"
+        escaped = html.escape(plain_text)
+        self._history_plain.append(plain_text)
         if color:
-            self._log_output.append(f"<span style='color:{color};'>{escaped}</span>")
+            self._history_html.append(f"<span style='color:{color};'>{escaped}</span>")
         else:
-            self._log_output.append(escaped)
-        self._scroll_to_bottom()
+            self._history_html.append(escaped)
+        self.set_current_action(step)
 
     def clear_log(self) -> None:
-        self._log_output.clear()
+        self._history_plain.clear()
+        self._history_html.clear()
+        self.set_current_action("-")
+        self._progress_bar.setValue(0)
 
     def to_plain_text(self) -> str:
-        return self._log_output.toPlainText()
+        return "\n".join(self._history_plain)
 
     def to_html(self) -> str:
-        return self._log_output.toHtml()
+        return "<br>".join(self._history_html)
 
-    def _scroll_to_bottom(self) -> None:
-        scrollbar = self._log_output.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
+    def set_current_stage(self, text: str) -> None:
+        self._current_stage_label.setText(f"Current Stage: {text or '-'}")
+
+    def set_current_node(self, text: str) -> None:
+        self._current_node_label.setText(f"Current Node: {text or '-'}")
+
+    def set_current_action(self, text: str) -> None:
+        self._current_action_label.setText(f"Current Action: {text or '-'}")
+
+    def set_overall_result(self, text: str) -> None:
+        self._overall_result_label.setText(f"Overall Result: {text or '-'}")
+
+    def _update_progress(self) -> None:
+        total_steps = len(self._profile_steps)
+        if total_steps <= 0:
+            self._progress_bar.setValue(0)
+            return
+        value = int((self._completed_profile_steps / total_steps) * 100)
+        self._progress_bar.setValue(max(0, min(100, value)))

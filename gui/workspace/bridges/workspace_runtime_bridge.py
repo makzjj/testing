@@ -370,6 +370,23 @@ class WorkspaceRuntimeBridge:
             )
         return {"connected_nodes": connected_nodes, "rows": rows}
 
+    def request_runtime_node_scan(self) -> bool:
+        """Trigger runtime node scan/query flow when the legacy runtime exposes one."""
+        runtime_window = self.get_runtime_window(create_if_missing=True)
+        if runtime_window is None:
+            return False
+        for method_name in (
+            "start_node_scan",
+            "start_node_detection",
+            "initialize_node_detection",
+            "update_node_status_display",
+        ):
+            callback = getattr(runtime_window, method_name, None)
+            if callable(callback):
+                callback()
+                return True
+        return False
+
     @property
     def project_definition(self) -> ProjectDefinition:
         return self._project_definition
