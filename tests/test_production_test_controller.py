@@ -656,7 +656,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertTrue(page.uuid_section._workbook_label.text().endswith("ipqc.xlsx"))
             self.assertEqual(page.uuid_section._workbook_label.toolTip(), str(workbook_path))
             self.assertEqual(page.uuid_section._expected_serial_value, "1223303010")
-            self.assertEqual(page.uuid_section._expected_pwm_value, "-")
+            self.assertEqual(page.uuid_section._expected_pwm_value, "100")
             self.assertEqual(page.uuid_section._expected_other_value, "-")
             self.assertEqual(page.uuid_section.workbook_validation_text, "Workbook validation: PASSED")
             self.assertTrue(page.uuid_section.verify_button.isEnabled())
@@ -665,7 +665,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertEqual(runtime_window.backend_client.sent_commands, [])
             log_text = page.progress_section.to_plain_text()
             self.assertIn("Expected S/N / UUID: 1223303010", log_text)
-            self.assertNotIn("Expected PWM:", log_text)
+            self.assertIn("Expected PWM: 100", log_text)
             self.assertIn("loaded ipqc workbook", page.progress_section.to_html().lower())
             self.assertIn("#2e7d32", page.progress_section.to_html().lower())
 
@@ -713,6 +713,42 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertTrue(runtime_window.backend_client.sent_commands)
             self.assertEqual(runtime_window.backend_client.sent_commands[-1], (3, build_uuid_write_payload(expected_uuid)))
             self.assertNotIn((3, [0xE0, 0x3F]), runtime_window.backend_client.sent_commands)
+            self.assertIn("PWM command support pending", page.progress_section.to_plain_text())
+
+    @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook write wiring tests.")
+    def test_production_page_write_uuid_logs_pwm_blocked_when_b5_invalid(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        runtime_window.node_status[3] = {
+            "connected": True,
+            "firmware": "v1.0.0",
+            "uuid": "",
+            "type": "X",
+            "interrupt": "OK",
+        }
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            self._create_ipqc_workbook(workbook_path, with_optional_fields=False)
+            wb = load_workbook(workbook_path)
+            wb["3X"]["B5"] = "bad-pwm"
+            wb.save(workbook_path)
+
+            with patch(
+                "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
+                return_value=(str(workbook_path), "Excel Files (*.xlsx)"),
+            ):
+                page._handle_load_ipqc_workbook()
+                self._app.processEvents()
+
+            page._handle_write_uuid()
+            self._app.processEvents()
+
+            expected_uuid = 1223303010
+            self.assertTrue(runtime_window.backend_client.sent_commands)
+            self.assertEqual(runtime_window.backend_client.sent_commands[-1], (3, build_uuid_write_payload(expected_uuid)))
+            self.assertIn("PWM write blocked: expected PWM in workbook B5 is invalid", page.progress_section.to_plain_text())
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook write wiring tests.")
     def test_production_page_workbook_write_failure_is_reporting_error(self) -> None:

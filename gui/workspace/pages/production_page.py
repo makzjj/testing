@@ -284,6 +284,7 @@ class ProductionPage(BaseWorkspacePage):
             return
         try:
             expected_serial = self._ipqc_excel_adapter.read_expected_uuid_serial()
+            expected_pwm = self._ipqc_excel_adapter.read_expected_pwm_value()
         except Exception as exc:
             self.uuid_section.set_workbook_validation(False, str(exc))
             self.uuid_section.set_expected_values(serial_number="", pwm="", other_parameters="")
@@ -292,12 +293,13 @@ class ProductionPage(BaseWorkspacePage):
             return
         self.uuid_section.set_expected_values(
             expected_serial,
-            "",
+            expected_pwm,
             "",
         )
         self.uuid_section.set_programmed_values("-", PWM_COMMAND_SUPPORT_PENDING, "-")
         self.progress_section.append_step(f"Workbook validation: {self.uuid_section.workbook_validation_text}")
         self.progress_section.append_step(f"Expected S/N / UUID: {expected_serial or '-'}")
+        self.progress_section.append_step(f"Expected PWM: {expected_pwm or '-'}")
         self._refresh_workbook_action_states()
 
     def _handle_write_uuid(self) -> None:
@@ -336,6 +338,7 @@ class ProductionPage(BaseWorkspacePage):
             self._set_status_result("WRITE SENT", message)
             self.uuid_section.set_last_workbook_action("UUID write sent to MCU; awaiting read-back verification")
             self.progress_section.append_step(f"Last workbook action: {self.uuid_section.last_workbook_action_text}")
+            self._report_pwm_write_readiness()
         else:
             self._set_status_result("FAIL", message)
             self.progress_section.append_step(f"Failed to write UUID for Node {node_id} {node_name}")
@@ -479,6 +482,48 @@ class ProductionPage(BaseWorkspacePage):
         if not serial_text:
             return None
         return serial_text
+
+    def _get_workbook_expected_pwm_text(self) -> str | None:
+        if not self._ipqc_excel_adapter.has_loaded_workbook():
+            return None
+        try:
+            pwm_text = self._ipqc_excel_adapter.read_expected_pwm_value()
+        except Exception as exc:
+            self.console_message.emit(f"[Production] Failed to read expected workbook PWM: {exc}")
+            return None
+        if not pwm_text:
+            return None
+        return pwm_text
+
+    @staticmethod
+    def _parse_pwm_value(pwm_text: str) -> int:
+        text = str(pwm_text).strip()
+        if not text:
+            raise ValueError("PWM value is required.")
+        if not text.isdigit():
+            raise ValueError("PWM value must contain digits only.")
+        return int(text, 10)
+
+    def _report_pwm_write_readiness(self) -> None:
+        pwm_text = self._get_workbook_expected_pwm_text()
+        if pwm_text is None:
+            message = "PWM write blocked: expected PWM is unavailable from workbook B5. Command path remains pending."
+            self.progress_section.append_step(message, level="error")
+            self.console_message.emit(f"[Production] {message}")
+            return
+        try:
+            expected_pwm = self._parse_pwm_value(pwm_text)
+        except ValueError as exc:
+            message = f"PWM write blocked: expected PWM in workbook B5 is invalid ({exc}). Command path remains pending."
+            self.progress_section.append_step(message, level="error")
+            self.console_message.emit(f"[Production] {message}")
+            return
+        message = (
+            f"PWM command support pending: expected PWM {expected_pwm} loaded from B5, "
+            "but firmware write/read-back command path is not yet confirmed."
+        )
+        self.progress_section.append_step(message)
+        self.console_message.emit(f"[Production] {message}")
 
     def _update_uuid_cells_in_workbook_memory(self, actual_value: str | int | None, passed: bool) -> bool:
         """Write UUID summary result into the loaded workbook object.

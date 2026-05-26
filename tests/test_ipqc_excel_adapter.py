@@ -77,6 +77,15 @@ class IpqcExcelAdapterTests(unittest.TestCase):
 
         self.assertEqual(serial, "1223303010")
 
+    def test_read_expected_pwm_value_reads_b5(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template_path = self._create_ipqc_template(tmpdir)
+            adapter = IpqcExcelAdapter()
+            adapter.load_template(template_path)
+            pwm_value = adapter.read_expected_pwm_value()
+
+        self.assertEqual(pwm_value, "100")
+
     def test_missing_required_expected_cell_is_reported_clearly(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             template_path = self._create_ipqc_template(tmpdir)

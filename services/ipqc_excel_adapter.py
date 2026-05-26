@@ -115,6 +115,11 @@ class IpqcExcelAdapter:
         sheet = self._require_base_sheet()
         return self._read_cell_text(sheet, "B4")
 
+    def read_expected_pwm_value(self) -> str:
+        """Read expected PWM from active base sheet cell B5."""
+        sheet = self._require_base_sheet()
+        return self._read_cell_text(sheet, "B5")
+
     def write_uuid_actual_and_check(self, actual_uuid: object, check_result: str) -> None:
         self.write_summary_result("S/N", actual_uuid, check_result)
 
