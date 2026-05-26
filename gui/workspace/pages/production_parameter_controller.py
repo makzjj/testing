@@ -53,7 +53,8 @@ def format_uuid_like_source(uuid_int: int, source_text: str) -> str:
     if text.lower().startswith("0x"):
         hex_digits = text[2:]
         width = max(len(hex_digits), 1)
-        return f"{text[:2]}{uuid_int:0{width}X}"
+        formatter = "X" if text.startswith("0X") else "x"
+        return f"{text[:2]}{uuid_int:0{width}{formatter}}"
     return f"{uuid_int:d}"
 
 

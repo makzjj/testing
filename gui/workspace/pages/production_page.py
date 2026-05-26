@@ -472,7 +472,7 @@ class ProductionPage(BaseWorkspacePage):
         if not self._ipqc_excel_adapter.has_loaded_workbook():
             return None
         try:
-            serial_text = self._ipqc_excel_adapter.read_expected_uuid_serial().strip()
+            serial_text = self._ipqc_excel_adapter.read_expected_uuid_serial()
         except Exception as exc:
             self.console_message.emit(f"[Production] Failed to read expected workbook S/N: {exc}")
             return None
@@ -547,7 +547,7 @@ class ProductionPage(BaseWorkspacePage):
         if not self._ipqc_excel_adapter.has_loaded_workbook():
             return False
         try:
-            serial_text = self._ipqc_excel_adapter.read_expected_uuid_serial().strip()
+            serial_text = self._ipqc_excel_adapter.read_expected_uuid_serial()
         except (RuntimeError, ValueError):
             return False
         if not serial_text:
