@@ -1,4 +1,4 @@
-"""Production parameter controller for UUID/PWM writing and UUID verification."""
+"""Production parameter controller for UUID/PWM writing and verification."""
 
 from __future__ import annotations
 

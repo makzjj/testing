@@ -537,7 +537,8 @@ class ProductionPage(BaseWorkspacePage):
             self._set_status_result("PASS", reason)
             self.progress_section.append_step(reason)
         else:
-            combined_reason = reason if passed == uuid_passed else f"{self._last_uuid_verify_reason} | {reason}"
+            # When one of UUID/PWM passed and the other failed, show both reasons together.
+            combined_reason = reason if (passed == uuid_passed) else f"{self._last_uuid_verify_reason} | {reason}"
             self._set_status_result("FAIL", combined_reason)
             self.progress_section.append_step(combined_reason, level="error")
         self.progress_section.append_step(f"Programmed/read-back PWM: {self._current_programmed_pwm_value}")
