@@ -120,6 +120,11 @@ class IpqcExcelAdapter:
         sheet = self._require_base_sheet()
         return self._read_cell_text(sheet, "B5")
 
+    def read_cell_text(self, cell_ref: str) -> str:
+        """Read one text cell from the active base sheet."""
+        sheet = self._require_base_sheet()
+        return self._read_cell_text(sheet, cell_ref)
+
     def write_uuid_actual_and_check(self, actual_uuid: object, check_result: str) -> None:
         self.write_summary_result("S/N", actual_uuid, check_result)
 
@@ -131,6 +136,18 @@ class IpqcExcelAdapter:
         row = self._resolve_summary_row(parameter_name)
         sheet[f"C{row}"] = "" if actual_value is None else str(actual_value)
         sheet[f"D{row}"] = str(check_result)
+
+    def write_parameter_result(
+        self,
+        actual_cell: str,
+        result_cell: str,
+        actual_value: object,
+        check_result: str,
+    ) -> None:
+        """Write one parameter's actual/result cells on the active base sheet."""
+        sheet = self._require_base_sheet()
+        sheet[actual_cell] = "" if actual_value is None else str(actual_value)
+        sheet[result_cell] = str(check_result)
 
     def _resolve_summary_row(self, parameter_name: str) -> int:
         normalized = parameter_name.strip().lower().replace("_", " ")

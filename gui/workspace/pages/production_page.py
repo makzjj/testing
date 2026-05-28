@@ -130,6 +130,7 @@ class ProductionPage(BaseWorkspacePage):
         self._parameter_controller.verification_finished.connect(self._handle_uuid_verification_finished)
         self._parameter_controller.pwm_verification_finished.connect(self._handle_pwm_verification_finished)
         self._parameter_controller.parameter_verification_finished.connect(self._handle_parameter_verification_finished)
+        self._parameter_controller.eeprom_save_finished.connect(self._handle_eeprom_save_finished)
         self.progress_section.refresh_requested.connect(self.refresh)
         self.progress_section.clear_requested.connect(self._handle_clear_progress_log)
         self._uuid_operation: str | None = None
@@ -371,10 +372,13 @@ class ProductionPage(BaseWorkspacePage):
         self._set_status_result("WRITING PARAMETERS", f"Writing {labels} to Node {node_id} {node_name}.")
         success, message = self._parameter_controller.write_parameters(requests)
         if success:
-            self._workbook_write_completed = True
+            self._workbook_write_completed = False
             self._workbook_verification_passed = False
             self._set_status_result("WRITE SENT", message)
-            self.uuid_section.set_last_workbook_action(f"{labels} write sent to MCU; awaiting read-back verification")
+            self.uuid_section.set_last_workbook_action(f"{labels} written to MCU; requesting EEPROM save")
+            save_started = self._parameter_controller.save_parameters_to_eeprom(node_id, node_name)
+            if save_started:
+                self.progress_section.append_step(f"EEPROM save requested for Node {node_id} {node_name}")
         else:
             self._workbook_write_completed = False
             self._workbook_verification_passed = False
@@ -425,10 +429,6 @@ class ProductionPage(BaseWorkspacePage):
                 message = f"Expected {definition.label} in workbook {definition.expected_cell} is invalid: {exc}"
                 if "unavailable" in str(exc):
                     message = f"Expected {definition.label} is unavailable from the active IPQC workbook sheet."
-                if definition.name == "UUID":
-                    message = f"Expected S/N in workbook {definition.expected_cell} is invalid: {exc}"
-                    if "unavailable" in str(exc):
-                        message = "Expected S/N is unavailable from the active IPQC workbook sheet."
                 self._set_status_result("FAIL", message)
                 self.console_message.emit(f"[Production] {message}")
                 return None
@@ -441,12 +441,7 @@ class ProductionPage(BaseWorkspacePage):
         return requests
 
     def _read_parameter_expected_text(self, definition: ParameterDefinition) -> str:
-        if definition.name == "UUID":
-            return self._ipqc_excel_adapter.read_expected_uuid_serial()
-        if definition.name == "PWM":
-            text = self._ipqc_excel_adapter.read_expected_pwm_value()
-            return text or "80"
-        raise ValueError(f"No workbook reader is configured for {definition.name}.")
+        return self._ipqc_excel_adapter.read_cell_text(definition.expected_cell)
 
     def _handle_parameter_verification_finished(
         self,
@@ -467,7 +462,7 @@ class ProductionPage(BaseWorkspacePage):
         if self._ipqc_excel_adapter.has_loaded_workbook():
             for result in results:
                 workbook_ok = self._update_parameter_cells_in_workbook_memory(
-                    parameter_name=result.definition.name,
+                    definition=result.definition,
                     actual_value=result.actual_text,
                     check_result="PASS" if result.passed else "FAIL",
                     silent=True,
@@ -479,8 +474,29 @@ class ProductionPage(BaseWorkspacePage):
         if self._workbook_verification_passed:
             self._set_status_result("PASS", "Workbook parameter read-back verification")
         else:
-            self._set_status_result("FAIL", reason)
+            self._set_status_result("FAIL", reason, append_to_log=False)
+            for result in results:
+                actual_text = result.actual_text if result.actual_text else "timeout"
+                self.progress_section.append_step(
+                    f"{result.definition.name} read-back verification - expected {result.expected_text}, actual {actual_text}",
+                    level="error",
+                )
         self._pending_parameter_requests = []
+        self._refresh_workbook_action_states()
+
+    def _handle_eeprom_save_finished(self, passed: bool, reason: str) -> None:
+        if passed:
+            self._workbook_write_completed = True
+            self._workbook_verification_passed = False
+            self.uuid_section.set_workbook_validation_ready()
+            self.uuid_section.set_last_workbook_action("EEPROM save completed; ready for read-back verification")
+            self._set_status_result("READY", "EEPROM save completed; ready for read-back verification.")
+        else:
+            self._workbook_write_completed = False
+            self._workbook_verification_passed = False
+            self.uuid_section.set_workbook_validation_result(False, reason)
+            self.uuid_section.set_last_workbook_action(f"EEPROM save failed: {reason}")
+            self._set_status_result("FAIL", reason)
         self._refresh_workbook_action_states()
 
     def _handle_uuid_verification_finished(self, passed: bool, reason: str) -> None:
@@ -496,16 +512,8 @@ class ProductionPage(BaseWorkspacePage):
         )
         if passed:
             self._set_status_result("PASS", reason)
-            if operation == "write":
-                self.progress_section.append_step("UUID write + read-back verification passed")
-            else:
-                self.progress_section.append_step("UUID verification passed")
         else:
             self._set_status_result("FAIL", reason)
-            if operation == "write":
-                self.progress_section.append_step("UUID write + read-back verification failed")
-            else:
-                self.progress_section.append_step("UUID verification failed")
         check_text = "PASS" if passed else "FAIL"
         self.uuid_section.set_programmed_values(
             actual_value if actual_value != "" else "-",
@@ -516,7 +524,11 @@ class ProductionPage(BaseWorkspacePage):
         self.progress_section.append_step(f"Programmed/read-back PWM: {self._current_programmed_pwm_value}")
         self.progress_section.append_step(f"Check result: {check_text}")
         if self._ipqc_excel_adapter.has_loaded_workbook():
-            self._update_uuid_cells_in_workbook_memory(actual_value, passed)
+            self._update_parameter_cells_in_workbook_memory(
+                definition=WORKBOOK_PARAMETER_DEFINITIONS["UUID"],
+                actual_value=actual_value,
+                check_result=check_text,
+            )
         self._start_pwm_verification_after_uuid()
 
     def _start_pwm_verification_after_uuid(self) -> None:
@@ -565,8 +577,28 @@ class ProductionPage(BaseWorkspacePage):
         self.progress_section.append_step(f"Programmed/read-back PWM: {self._current_programmed_pwm_value}")
         self.progress_section.append_step(f"PWM check result: {check_text}")
         if self._ipqc_excel_adapter.has_loaded_workbook():
-            self._update_pwm_cells_in_workbook_memory(self._current_programmed_pwm_value, check_text)
+            self._update_parameter_cells_in_workbook_memory(
+                definition=WORKBOOK_PARAMETER_DEFINITIONS["PWM"],
+                actual_value=self._current_programmed_pwm_value,
+                check_result=check_text,
+            )
         self._refresh_workbook_action_states()
+
+    def _update_uuid_cells_in_workbook_memory(self, actual_value: str | int | None, passed: bool) -> bool:
+        """Compatibility wrapper for the UUID workbook row update path."""
+        return self._update_parameter_cells_in_workbook_memory(
+            definition=WORKBOOK_PARAMETER_DEFINITIONS["UUID"],
+            actual_value=actual_value,
+            check_result="PASS" if passed else "FAIL",
+        )
+
+    def _update_pwm_cells_in_workbook_memory(self, actual_value: str | int | None, passed: bool) -> bool:
+        """Compatibility wrapper for the PWM workbook row update path."""
+        return self._update_parameter_cells_in_workbook_memory(
+            definition=WORKBOOK_PARAMETER_DEFINITIONS["PWM"],
+            actual_value=actual_value,
+            check_result="PASS" if passed else "FAIL",
+        )
 
     def _reset_result_only(self) -> None:
         self._set_status_result("READY", "No test has been run yet.", append_to_log=False)
@@ -630,61 +662,42 @@ class ProductionPage(BaseWorkspacePage):
             return None
         return serial_text
 
-    def _get_workbook_expected_pwm_text(self) -> str | None:
-        if not self._ipqc_excel_adapter.has_loaded_workbook():
-            return None
-        try:
-            pwm_text = self._ipqc_excel_adapter.read_expected_pwm_value()
-        except Exception as exc:
-            self.console_message.emit(f"[Production] Failed to read expected workbook PWM: {exc}")
-            return None
-        if not pwm_text:
-            return None
-        return pwm_text
-
     @staticmethod
     def _parse_pwm_value(pwm_text: str) -> int:
         return parse_pwm_value(pwm_text)
 
-    def _update_uuid_cells_in_workbook_memory(self, actual_value: str | int | None, passed: bool) -> bool:
-        return self._update_parameter_cells_in_workbook_memory(
-            parameter_name="UUID",
-            actual_value=actual_value,
-            check_result="PASS" if passed else "FAIL",
-        )
-
-    def _update_pwm_cells_in_workbook_memory(self, actual_value: str | int | None, check_result: str) -> bool:
-        return self._update_parameter_cells_in_workbook_memory(
-            parameter_name="PWM",
-            actual_value=actual_value,
-            check_result=check_result,
-        )
-
     def _update_parameter_cells_in_workbook_memory(
         self,
         *,
-        parameter_name: str,
+        definition: ParameterDefinition,
         actual_value: str | int | None,
         check_result: str,
         silent: bool = False,
     ) -> bool:
         if not self._ipqc_excel_adapter.has_loaded_workbook():
             return False
-        parameter_definition = WORKBOOK_PARAMETER_DEFINITIONS.get(parameter_name)
-        workbook_label = parameter_name
-        if parameter_definition is not None:
-            workbook_label = f"{parameter_definition.name}({parameter_definition.actual_cell}/{parameter_definition.result_cell})"
         try:
             actual_value_or_empty: str | int = "" if actual_value is None else actual_value
-            self._ipqc_excel_adapter.write_summary_result(parameter_name, actual_value_or_empty, check_result)
+            if definition.name in {"UUID", "PWM"}:
+                self._ipqc_excel_adapter.write_summary_result(definition.name, actual_value_or_empty, check_result)
+            else:
+                self._ipqc_excel_adapter.write_parameter_result(
+                    definition.actual_cell,
+                    definition.result_cell,
+                    actual_value_or_empty,
+                    check_result,
+                )
             if not silent:
-                self.uuid_section.set_last_workbook_action(f"{parameter_name} report row updated in workbook memory")
-                self.console_message.emit(f"[Production] IPQC workbook {workbook_label} report row updated in memory")
+                self.uuid_section.set_last_workbook_action(f"{definition.name} report row updated in workbook memory")
+                self.console_message.emit(
+                    f"[Production] IPQC workbook {definition.name}({definition.actual_cell}/{definition.result_cell}) "
+                    "report row updated in memory"
+                )
             return True
         except Exception as exc:
-            self.console_message.emit(f"[Production] Failed to update IPQC workbook {parameter_name} report row: {exc}")
-            self.progress_section.append_step(f"IPQC workbook {parameter_name} result write failed")
-            self.uuid_section.set_last_workbook_action(f"{parameter_name} report row write failed: {exc}")
+            self.console_message.emit(f"[Production] Failed to update IPQC workbook {definition.name} report row: {exc}")
+            self.progress_section.append_step(f"IPQC workbook {definition.name} result write failed")
+            self.uuid_section.set_last_workbook_action(f"{definition.name} report row write failed: {exc}")
             self._set_status_result(
                 "REPORTING ERROR",
                 "Device result is available, but writing IPQC workbook report failed.",
@@ -711,7 +724,6 @@ class ProductionPage(BaseWorkspacePage):
             self.uuid_section.set_last_workbook_action("Completed workbook saved")
             self.console_message.emit(f"[Production] Completed IPQC workbook saved: {saved_path}")
             self.progress_section.append_step(f"Completed workbook: {saved_path}")
-            self.progress_section.append_step(f"Last workbook action: {self.uuid_section.last_workbook_action_text}")
         except Exception as exc:
             self.uuid_section.set_last_workbook_action(f"Completed workbook save failed: {exc}")
             self._set_status_result("REPORTING ERROR", "Failed to save completed IPQC workbook.")
@@ -735,32 +747,6 @@ class ProductionPage(BaseWorkspacePage):
             self._parameter_controller.build_parameter_request(definition, 0, "", expected_text)
             return True
         except (RuntimeError, ValueError):
-            return False
-
-    def _has_workbook_expected_uuid(self) -> bool:
-        if not self._ipqc_excel_adapter.has_loaded_workbook():
-            return False
-        try:
-            serial_text = self._ipqc_excel_adapter.read_expected_uuid_serial()
-        except (RuntimeError, ValueError):
-            return False
-        if not serial_text:
-            return False
-        return self._is_valid_uuid_text(serial_text)
-
-    def _has_workbook_expected_pwm(self) -> bool:
-        if not self._ipqc_excel_adapter.has_loaded_workbook():
-            return False
-        try:
-            pwm_text = self._ipqc_excel_adapter.read_expected_pwm_value()
-        except (RuntimeError, ValueError):
-            return False
-        if not pwm_text:
-            return False
-        try:
-            parse_pwm_value(pwm_text)
-            return True
-        except ValueError:
             return False
 
     @staticmethod

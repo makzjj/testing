@@ -17,6 +17,7 @@ UUID_WRITE_PARAM = 0x3D
 UUID_RESPONSE_PARAM = 0x3A
 PWM_SET_COMMAND = 0x84
 PWM_GET_COMMAND = 0x85
+EEPROM_SAVE_COMMAND = 0xC5
 UUID_VERIFY_TIMEOUT_MS = 3000
 UUID_MAX_40BIT_VALUE = 0xFFFFFFFFFF
 UUID_DECIMAL_LENGTH = 10
@@ -187,6 +188,10 @@ def build_pwm_read_payload() -> list[int]:
     return [PWM_GET_COMMAND]
 
 
+def build_eeprom_save_payload() -> list[int]:
+    return [EEPROM_SAVE_COMMAND]
+
+
 def decode_pwm_response(payload: list[int] | tuple[int, ...]) -> tuple[bool, int | None, str]:
     if len(payload) < 3:
         return False, None, "PWM response payload is too short."
@@ -194,6 +199,26 @@ def decode_pwm_response(payload: list[int] | tuple[int, ...]) -> tuple[bool, int
         return False, None, "PWM response command is not 0x85."
     pwm_value = ((payload[1] & 0xFF) << 8) | (payload[2] & 0xFF)
     return True, pwm_value, ""
+
+
+def decode_eeprom_save_response(payload: list[int] | tuple[int, ...]) -> tuple[bool, str | None, str]:
+    if len(payload) < 3:
+        return False, None, "EEPROM save response payload is too short."
+    if payload[0] != EEPROM_SAVE_COMMAND:
+        return False, None, "EEPROM save response command is not 0xC5."
+    if payload[1] != 0x3A:
+        return False, None, "EEPROM save response prefix is not 0x3A."
+
+    response_text = "".join(chr(byte & 0xFF) for byte in payload[2:] if 32 <= (byte & 0xFF) <= 126).strip().upper()
+    if response_text in {"ACK", "OK"} or "ACK" in response_text:
+        return True, response_text or "ACK", ""
+    if response_text in {"NACK", "FAIL", "ERROR"} or "ERR" in response_text or "REJECT" in response_text:
+        return False, response_text or None, f"EEPROM save rejected: {response_text or 'NACK'}."
+    if len(payload) == 3 and payload[2] in {0x00, 0x01}:
+        return payload[2] == 0x01, "OK" if payload[2] == 0x01 else "NACK", (
+            "" if payload[2] == 0x01 else "EEPROM save rejected by device."
+        )
+    return False, response_text or None, f"EEPROM save response not recognized: {' '.join(f'{byte & 0xFF:02X}' for byte in payload)}."
 
 
 def decode_uuid_response(payload: list[int] | tuple[int, ...]) -> tuple[bool, int | None, str]:
@@ -236,7 +261,7 @@ def default_workbook_parameter_definitions() -> tuple[ParameterDefinition, ...]:
     return (
         ParameterDefinition(
             name="UUID",
-            display_label="UUID",
+            display_label="S/N",
             expected_cell="B4",
             actual_cell="C4",
             result_cell="D4",
@@ -277,6 +302,7 @@ class ProductionParameterController(QObject):
     verification_finished = pyqtSignal(bool, str)
     pwm_verification_finished = pyqtSignal(bool, str)
     parameter_verification_finished = pyqtSignal(bool, str, object)
+    eeprom_save_finished = pyqtSignal(bool, str)
 
     def __init__(
         self,
@@ -317,6 +343,10 @@ class ProductionParameterController(QObject):
         self._parameter_verify_timer = QTimer(self)
         self._parameter_verify_timer.setSingleShot(True)
         self._parameter_verify_timer.timeout.connect(self._handle_parameter_verify_timeout)
+        self._eeprom_save_timer = QTimer(self)
+        self._eeprom_save_timer.setSingleShot(True)
+        self._eeprom_save_timer.timeout.connect(self._handle_eeprom_save_timeout)
+        self._pending_eeprom_save: tuple[int, str] | None = None
 
     @property
     def csv_path(self) -> Path | None:
@@ -455,7 +485,7 @@ class ProductionParameterController(QObject):
         _supported_name, support_error = self._resolve_supported_node(first.node_id, first.node_name)
         if support_error is not None:
             return False, support_error
-        _runtime_window, backend_client, readiness_error = self._resolve_runtime_for_uuid_operation()
+        _runtime_window, backend_client, readiness_error = self._resolve_runtime_for_parameter_operation()
         if readiness_error is not None:
             return False, readiness_error
         assert backend_client is not None
@@ -475,6 +505,32 @@ class ProductionParameterController(QObject):
             return True, "No writable workbook parameters were defined."
         return True, f"{'/'.join(written_labels)} write sent to Node {first.node_id} {first.node_name}."
 
+    def save_parameters_to_eeprom(self, node_id: int, node_name: str) -> bool:
+        supported_name, support_error = self._resolve_supported_node(node_id, node_name)
+        if support_error is not None:
+            self.eeprom_save_finished.emit(False, support_error)
+            return False
+        runtime_window, backend_client, readiness_error = self._resolve_runtime_for_parameter_operation()
+        if readiness_error is not None:
+            self.eeprom_save_finished.emit(False, readiness_error)
+            return False
+        assert backend_client is not None
+
+        self._attach_runtime_window(runtime_window)
+        self._pending_eeprom_save = (node_id, supported_name or str(node_name))
+        self._eeprom_save_timer.start(self._timeout_ms)
+        payload = build_eeprom_save_payload()
+        self.log_message.emit(f"[Production] Saving parameters to EEPROM for Node {node_id} {supported_name or node_name}")
+        try:
+            backend_client.send_command_bytes(node_id, payload)
+        except Exception as exc:
+            self._finish_eeprom_save_failure(f"Failed to request EEPROM save for Node {node_id} {supported_name or node_name}: {exc}")
+            return False
+
+        payload_text = " ".join(f"{byte:02X}" for byte in payload)
+        self.log_message.emit(f"[Production] TX[EEPROM Save] -> Node {node_id:02d}: {payload_text}")
+        return True
+
     def verify_parameters(self, requests: list[ParameterRequest] | tuple[ParameterRequest, ...]) -> bool:
         if not requests:
             self.parameter_verification_finished.emit(False, "No workbook parameters are available to verify.", [])
@@ -484,7 +540,7 @@ class ProductionParameterController(QObject):
         if support_error is not None:
             self.parameter_verification_finished.emit(False, support_error, [])
             return False
-        runtime_window, _backend_client, readiness_error = self._resolve_runtime_for_uuid_operation()
+        runtime_window, _backend_client, readiness_error = self._resolve_runtime_for_parameter_operation()
         if readiness_error is not None:
             self.parameter_verification_finished.emit(False, readiness_error, [])
             return False
@@ -503,7 +559,7 @@ class ProductionParameterController(QObject):
         return True
 
     def _write_uuid_row(self, selected_row: UuidCsvRow) -> tuple[bool, str]:
-        _runtime_window, backend_client, readiness_error = self._resolve_runtime_for_uuid_operation()
+        _runtime_window, backend_client, readiness_error = self._resolve_runtime_for_parameter_operation()
         if readiness_error is not None:
             return False, readiness_error
         self.log_message.emit(f"[Production] Writing UUID to Node {selected_row.node_id} {selected_row.node_name}")
@@ -517,7 +573,7 @@ class ProductionParameterController(QObject):
         return True, f"UUID write sent to Node {selected_row.node_id} {selected_row.node_name}."
 
     def _write_pwm_row(self, selected_row: UuidCsvRow) -> tuple[bool, str]:
-        _runtime_window, backend_client, readiness_error = self._resolve_runtime_for_uuid_operation()
+        _runtime_window, backend_client, readiness_error = self._resolve_runtime_for_parameter_operation()
         if readiness_error is not None:
             return False, readiness_error
         self.log_message.emit(f"[Production] Writing PWM to Node {selected_row.node_id} {selected_row.node_name}")
@@ -745,7 +801,12 @@ class ProductionParameterController(QObject):
         self._verify_timer.start(self._timeout_ms)
 
     def _handle_runtime_packet(self, packet: object) -> None:
-        if self._pending_row is None and self._pending_pwm_row is None and self._pending_parameter_request is None:
+        if (
+            self._pending_row is None
+            and self._pending_pwm_row is None
+            and self._pending_parameter_request is None
+            and self._pending_eeprom_save is None
+        ):
             return
         if not isinstance(packet, dict):
             return
@@ -755,6 +816,9 @@ class ProductionParameterController(QObject):
         cmd = int(packet.get("cmd", -1))
         if self._pending_parameter_request is not None and cmd == self._pending_parameter_request.definition.response_command:
             self._handle_runtime_packet_parameter(packet)
+            return
+        if self._pending_eeprom_save is not None and cmd == EEPROM_SAVE_COMMAND:
+            self._handle_runtime_packet_eeprom_save(packet)
             return
         if self._pending_row is not None and cmd == UUID_COMMAND:
             self._handle_runtime_packet_uuid(packet)
@@ -1013,6 +1077,34 @@ class ProductionParameterController(QObject):
         self._parameter_verify_index += 1
         self._send_next_parameter_verify_request()
 
+    def _handle_runtime_packet_eeprom_save(self, packet: dict) -> None:
+        pending_save = self._pending_eeprom_save
+        if pending_save is None:
+            return
+        node_id, node_name = pending_save
+        sender = int(packet.get("sender", -1))
+        if sender != node_id:
+            self._finish_eeprom_save_failure(
+                f"EEPROM save response came from wrong node (expected Node {node_id}, got Node {sender})."
+            )
+            return
+
+        params = packet.get("params")
+        if not isinstance(params, list):
+            self._finish_eeprom_save_failure("EEPROM save response payload is missing params.")
+            return
+        cmd = int(packet.get("cmd", -1))
+        decoded_ok, response_text, error = decode_eeprom_save_response([cmd, *params])
+        if not decoded_ok:
+            self._finish_eeprom_save_failure(error or f"EEPROM save failed for Node {node_id} {node_name}.")
+            return
+
+        self._eeprom_save_timer.stop()
+        self._pending_eeprom_save = None
+        response_label = response_text or "ACK"
+        self.log_message.emit(f"[Production] EEPROM save confirmed for Node {node_id} {node_name}: {response_label}")
+        self.eeprom_save_finished.emit(True, f"EEPROM save completed for Node {node_id} {node_name}.")
+
     def _handle_parameter_verify_timeout(self) -> None:
         request = self._pending_parameter_request
         if request is None:
@@ -1038,3 +1130,31 @@ class ProductionParameterController(QObject):
         self._pending_parameter_request = None
         self._parameter_verify_index += 1
         self._send_next_parameter_verify_request()
+
+    def _handle_eeprom_save_timeout(self) -> None:
+        pending_save = self._pending_eeprom_save
+        if pending_save is None:
+            return
+        node_id, node_name = pending_save
+        self._finish_eeprom_save_failure(f"Timed out waiting for EEPROM save response from Node {node_id} {node_name}.")
+
+    def _finish_eeprom_save_failure(self, reason: str) -> None:
+        pending_save = self._pending_eeprom_save
+        self._eeprom_save_timer.stop()
+        self._pending_eeprom_save = None
+        if pending_save is not None:
+            self.log_message.emit(f"[Production] {reason}")
+        self.eeprom_save_finished.emit(False, reason)
+
+    def _resolve_runtime_for_parameter_operation(self) -> tuple[Any | None, Any | None, str | None]:
+        runtime_window = self._bridge.get_runtime_window(create_if_missing=True)
+        if runtime_window is None:
+            return None, None, "Runtime backend is unavailable for Production operations."
+
+        backend_client = getattr(runtime_window, "backend_client", None)
+        if backend_client is None or not backend_client.is_connected():
+            return None, None, "Serial port not connected."
+
+        if not hasattr(runtime_window, "packet_received"):
+            return None, None, "Runtime packet listener is unavailable."
+        return runtime_window, backend_client, None
