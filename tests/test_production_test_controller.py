@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import QApplication, QLabel, QPushButton
 from gui.workspace.pages.production_page import ProductionPage
 from gui.workspace.widgets import ResponsiveRow
 from gui.workspace.pages.production_parameter_controller import (
+    ParameterDefinition,
     ProductionParameterController,
     build_pwm_read_payload,
     build_pwm_write_payload,
@@ -23,6 +24,7 @@ from gui.workspace.pages.production_parameter_controller import (
     build_uuid_write_payload,
     decode_pwm_response,
     decode_uuid_response,
+    default_workbook_parameter_definitions,
     format_uuid_like_source,
     parse_pwm_value,
     parse_uuid_value,
@@ -846,8 +848,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertEqual(output_sheet["C5"].value, "100")
             self.assertEqual(output_sheet["D5"].value, "PASS")
             self.assertEqual(page.uuid_section.workbook_validation_text, "Workbook Validation: PASSED")
-            self.assertIn("Check result: PASS", page.progress_section.to_plain_text())
-            self.assertIn("PWM read-back PASS", page.progress_section.to_plain_text())
+            self.assertEqual(page.progress_section.to_plain_text().count("[PASS] Workbook parameter read-back verification"), 1)
 
             self.assertIsNone(page._result_logger.result_csv_path)
 
@@ -899,7 +900,8 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertEqual(output_sheet["C5"].value, "50")
             self.assertEqual(output_sheet["D5"].value, "FAIL")
             self.assertIn("Workbook Validation: FAILED", page.uuid_section.workbook_validation_text)
-            self.assertIn("Check result: FAIL", page.progress_section.to_plain_text())
+            self.assertIn("[FAIL] UUID read-back verification", page.progress_section.to_plain_text())
+            self.assertIn("expected 1223303010, actual 1223303011", page.progress_section.to_plain_text())
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook UUID verify tests.")
     def test_production_page_verify_pwm_mismatch_writes_fail_for_pwm_cells(self) -> None:
@@ -940,6 +942,50 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertEqual(output_sheet["D4"].value, "PASS")
             self.assertEqual(output_sheet["C5"].value, "50")
             self.assertEqual(output_sheet["D5"].value, "FAIL")
+
+    @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook UUID verify tests.")
+    def test_production_page_verify_pwm_timeout_writes_fail_after_read_back_only(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        runtime_window.node_status[3] = {
+            "connected": True,
+            "firmware": "v1.0.0",
+            "uuid": "",
+            "type": "X",
+            "interrupt": "OK",
+        }
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            self._create_ipqc_workbook(workbook_path, with_optional_fields=False)
+            with patch(
+                "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
+                return_value=(str(workbook_path), "Excel Files (*.xlsx)"),
+            ):
+                page._handle_load_ipqc_workbook()
+                self._app.processEvents()
+
+            output_sheet = page._ipqc_excel_adapter._workbook["3X"]
+            self.assertIn(output_sheet["C5"].value, (None, ""))
+            self.assertIn(output_sheet["D5"].value, (None, ""))
+            page._handle_verify_uuid()
+            self._app.processEvents()
+            runtime_window.packet_received.emit(
+                {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0xE0, "params": [0x3A, *build_uuid_write_payload(1223303010)[2:]]}
+            )
+            self._app.processEvents()
+            self.assertIn(output_sheet["C5"].value, (None, ""))
+            self.assertIn(output_sheet["D5"].value, (None, ""))
+            page._parameter_controller._handle_parameter_verify_timeout()
+            self._app.processEvents()
+
+            self.assertEqual(output_sheet["C4"].value, "1223303010")
+            self.assertEqual(output_sheet["D4"].value, "PASS")
+            self.assertEqual(output_sheet["C5"].value, "")
+            self.assertEqual(output_sheet["D5"].value, "FAIL")
+            self.assertIn("actual timeout", page.progress_section.to_plain_text())
+            self.assertIn("Workbook Validation: FAILED", page.uuid_section.workbook_validation_text)
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook save tests.")
     def test_production_page_save_completed_workbook_shows_output_path(self) -> None:
@@ -1000,6 +1046,10 @@ class ProductionParameterControllerTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls._app = QApplication.instance() or QApplication([])
 
+    @staticmethod
+    def _create_ipqc_workbook(path: Path, *, with_optional_fields: bool = True) -> None:
+        ProductionPageWorkflowTests._create_ipqc_workbook(path, with_optional_fields=with_optional_fields)
+
     def test_uuid_helper_functions(self) -> None:
         self.assertEqual(parse_uuid_value("1234567890"), 1234567890)
         self.assertEqual(parse_uuid_value("0x499602D2"), 1234567890)
@@ -1047,6 +1097,69 @@ class ProductionParameterControllerTests(unittest.TestCase):
         self.assertTrue(events[-1][0])
         self.assertEqual(controller.last_verify_actual_pwm, 80)
         self.assertEqual(controller.last_verify_actual_pwm_text, "80")
+
+    def test_parameter_pipeline_verifies_uuid_and_pwm_with_shared_definitions(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        controller = ProductionParameterController(bridge, timeout_ms=100)
+        definitions = {definition.name: definition for definition in default_workbook_parameter_definitions()}
+        requests = [
+            controller.build_parameter_request(definitions["UUID"], 6, "H", "1223306010"),
+            controller.build_parameter_request(definitions["PWM"], 6, "H", "80"),
+        ]
+        events: list[tuple[bool, str, object]] = []
+        controller.parameter_verification_finished.connect(lambda passed, reason, results: events.append((passed, reason, results)))
+
+        self.assertTrue(controller.verify_parameters(requests))
+        self.assertEqual(runtime_window.backend_client.sent_commands[0], (6, [0xE0, 0x3F]))
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0xE0, "params": [0x3A, *build_uuid_write_payload(1223306010)[2:]]}
+        )
+        self._app.processEvents()
+        self.assertEqual(runtime_window.backend_client.sent_commands[-1], (6, [0x85]))
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x85, "params": [0x00, 0x50]}
+        )
+        self._app.processEvents()
+
+        self.assertTrue(events)
+        self.assertTrue(events[-1][0])
+        result_names = [result.definition.name for result in events[-1][2]]
+        self.assertEqual(result_names, ["UUID", "PWM"])
+
+    def test_parameter_pipeline_dummy_definition_uses_shared_flow(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        controller = ProductionParameterController(bridge, timeout_ms=100)
+        dummy = ParameterDefinition(
+            name="DUMMY",
+            expected_cell="B9",
+            actual_cell="C9",
+            result_cell="D9",
+            parse_expected=lambda value: int(str(value).strip()),
+            build_write_command=lambda value: [0x91, int(value) & 0xFF],
+            build_read_command=lambda: [0x92],
+            response_command=0x92,
+            decode_response=lambda payload: (True, payload[1], "") if len(payload) > 1 else (False, None, "short"),
+            format_actual=lambda actual, _expected: str(actual),
+            compare=lambda expected, _expected_text, actual, _actual_text: int(expected) == int(actual),
+        )
+        request = controller.build_parameter_request(dummy, 6, "H", "7")
+        events: list[tuple[bool, str, object]] = []
+        controller.parameter_verification_finished.connect(lambda passed, reason, results: events.append((passed, reason, results)))
+
+        ok, message = controller.write_parameters([request])
+        self.assertTrue(ok, message)
+        self.assertEqual(runtime_window.backend_client.sent_commands[-1], (6, [0x91, 0x07]))
+        self.assertTrue(controller.verify_parameters([request]))
+        self.assertEqual(runtime_window.backend_client.sent_commands[-1], (6, [0x92]))
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x92, "params": [0x07]}
+        )
+        self._app.processEvents()
+
+        self.assertTrue(events[-1][0])
+        self.assertEqual(events[-1][2][0].definition.name, "DUMMY")
 
     def test_load_uuid_csv_validation_blocks_invalid_rows(self) -> None:
         runtime_window = _FakeRuntimeWindow()

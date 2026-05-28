@@ -5,7 +5,7 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
@@ -51,12 +51,50 @@ class UuidCsvRow:
     uuid_int: int
 
 
+@dataclass(frozen=True)
+class ParameterDefinition:
+    name: str
+    expected_cell: str
+    actual_cell: str
+    result_cell: str
+    parse_expected: Callable[[object], Any]
+    build_write_command: Callable[[Any], list[int]] | None
+    build_read_command: Callable[[], list[int]] | None
+    response_command: int | None
+    decode_response: Callable[[list[int] | tuple[int, ...]], tuple[bool, Any | None, str]] | None
+    format_actual: Callable[[Any, str], str]
+    compare: Callable[[Any, str, Any, str], bool]
+    display_label: str = ""
+
+    @property
+    def label(self) -> str:
+        return self.display_label or self.name
+
+
+@dataclass(frozen=True)
+class ParameterRequest:
+    definition: ParameterDefinition
+    node_id: int
+    node_name: str
+    expected_text: str
+    expected_value: Any
+
+
+@dataclass(frozen=True)
+class ParameterVerificationResult:
+    definition: ParameterDefinition
+    expected_text: str
+    actual_text: str
+    passed: bool
+    reason: str
+
+
 def format_uuid_like_source(uuid_int: int, source_text: str) -> str:
     text = str(source_text).strip()
     if text.lower().startswith("0x"):
         hex_digits = text[2:]
         width = max(len(hex_digits), 1)
-        formatter = "X" if text.startswith("0X") else "x"
+        formatter = "X" if any(char.isalpha() and char.isupper() for char in hex_digits) else "x"
         return f"{text[:2]}{uuid_int:0{width}{formatter}}"
     return f"{uuid_int:d}"
 
@@ -176,6 +214,57 @@ def decode_uuid_response(payload: list[int] | tuple[int, ...]) -> tuple[bool, in
     return True, uuid_value, ""
 
 
+def _format_uuid_actual(actual_value: object, expected_text: str) -> str:
+    return format_uuid_like_source(int(actual_value), expected_text)
+
+
+def _format_decimal_actual(actual_value: object, _expected_text: str) -> str:
+    return f"{int(actual_value):d}"
+
+
+def _compare_text_case_aware(_expected_value: object, expected_text: str, _actual_value: object, actual_text: str) -> bool:
+    if expected_text.lower().startswith("0x"):
+        return actual_text.lower() == expected_text.lower()
+    return actual_text == expected_text
+
+
+def _compare_integer_text(expected_value: object, _expected_text: str, actual_value: object, _actual_text: str) -> bool:
+    return int(expected_value) == int(actual_value)
+
+
+def default_workbook_parameter_definitions() -> tuple[ParameterDefinition, ...]:
+    return (
+        ParameterDefinition(
+            name="UUID",
+            display_label="UUID",
+            expected_cell="B4",
+            actual_cell="C4",
+            result_cell="D4",
+            parse_expected=parse_uuid_value,
+            build_write_command=build_uuid_write_payload,
+            build_read_command=build_uuid_read_payload,
+            response_command=UUID_COMMAND,
+            decode_response=decode_uuid_response,
+            format_actual=_format_uuid_actual,
+            compare=_compare_text_case_aware,
+        ),
+        ParameterDefinition(
+            name="PWM",
+            display_label="PWM",
+            expected_cell="B5",
+            actual_cell="C5",
+            result_cell="D5",
+            parse_expected=parse_pwm_value,
+            build_write_command=build_pwm_write_payload,
+            build_read_command=build_pwm_read_payload,
+            response_command=PWM_GET_COMMAND,
+            decode_response=decode_pwm_response,
+            format_actual=_format_decimal_actual,
+            compare=_compare_integer_text,
+        ),
+    )
+
+
 class ProductionParameterController(QObject):
     """Manage Production UUID write/read runtime orchestration.
 
@@ -187,6 +276,7 @@ class ProductionParameterController(QObject):
     log_message = pyqtSignal(str)
     verification_finished = pyqtSignal(bool, str)
     pwm_verification_finished = pyqtSignal(bool, str)
+    parameter_verification_finished = pyqtSignal(bool, str, object)
 
     def __init__(
         self,
@@ -213,6 +303,10 @@ class ProductionParameterController(QObject):
         self._last_verify_actual_pwm: int | None = None
         self._last_verify_actual_pwm_text: str = ""
         self._last_verify_pwm_raw_response_hex: str = ""
+        self._parameter_requests: list[ParameterRequest] = []
+        self._parameter_results: list[ParameterVerificationResult] = []
+        self._parameter_verify_index = 0
+        self._pending_parameter_request: ParameterRequest | None = None
 
         self._verify_timer = QTimer(self)
         self._verify_timer.setSingleShot(True)
@@ -220,6 +314,9 @@ class ProductionParameterController(QObject):
         self._pwm_verify_timer = QTimer(self)
         self._pwm_verify_timer.setSingleShot(True)
         self._pwm_verify_timer.timeout.connect(self._handle_pwm_verify_timeout)
+        self._parameter_verify_timer = QTimer(self)
+        self._parameter_verify_timer.setSingleShot(True)
+        self._parameter_verify_timer.timeout.connect(self._handle_parameter_verify_timeout)
 
     @property
     def csv_path(self) -> Path | None:
@@ -331,6 +428,79 @@ class ProductionParameterController(QObject):
             uuid_int=int(pwm_value),
         )
         return self._write_pwm_row(selected_row)
+
+    def build_parameter_request(
+        self,
+        definition: ParameterDefinition,
+        node_id: int,
+        node_name: str,
+        expected_text: object,
+    ) -> ParameterRequest:
+        text = str(expected_text).strip()
+        if not text:
+            raise ValueError(f"Expected {definition.label} is unavailable from workbook cell {definition.expected_cell}.")
+        expected_value = definition.parse_expected(text)
+        return ParameterRequest(
+            definition=definition,
+            node_id=int(node_id),
+            node_name=str(node_name),
+            expected_text=text,
+            expected_value=expected_value,
+        )
+
+    def write_parameters(self, requests: list[ParameterRequest] | tuple[ParameterRequest, ...]) -> tuple[bool, str]:
+        if not requests:
+            return False, "No workbook parameters are available to write."
+        first = requests[0]
+        _supported_name, support_error = self._resolve_supported_node(first.node_id, first.node_name)
+        if support_error is not None:
+            return False, support_error
+        _runtime_window, backend_client, readiness_error = self._resolve_runtime_for_uuid_operation()
+        if readiness_error is not None:
+            return False, readiness_error
+        assert backend_client is not None
+
+        written_labels: list[str] = []
+        for request in requests:
+            builder = request.definition.build_write_command
+            if builder is None:
+                continue
+            try:
+                payload = builder(request.expected_value)
+                backend_client.send_command_bytes(request.node_id, payload)
+            except Exception as exc:
+                return False, f"Failed to write {request.definition.label} for Node {request.node_id} {request.node_name}: {exc}"
+            written_labels.append(request.definition.label)
+        if not written_labels:
+            return True, "No writable workbook parameters were defined."
+        return True, f"{'/'.join(written_labels)} write sent to Node {first.node_id} {first.node_name}."
+
+    def verify_parameters(self, requests: list[ParameterRequest] | tuple[ParameterRequest, ...]) -> bool:
+        if not requests:
+            self.parameter_verification_finished.emit(False, "No workbook parameters are available to verify.", [])
+            return False
+        first = requests[0]
+        _supported_name, support_error = self._resolve_supported_node(first.node_id, first.node_name)
+        if support_error is not None:
+            self.parameter_verification_finished.emit(False, support_error, [])
+            return False
+        runtime_window, _backend_client, readiness_error = self._resolve_runtime_for_uuid_operation()
+        if readiness_error is not None:
+            self.parameter_verification_finished.emit(False, readiness_error, [])
+            return False
+        self._attach_runtime_window(runtime_window)
+        self._parameter_requests = list(requests)
+        self._parameter_results = []
+        self._parameter_verify_index = 0
+        self._pending_parameter_request = None
+        self._last_verify_actual_uuid = None
+        self._last_verify_actual_uuid_text = ""
+        self._last_verify_raw_response_hex = ""
+        self._last_verify_actual_pwm = None
+        self._last_verify_actual_pwm_text = ""
+        self._last_verify_pwm_raw_response_hex = ""
+        self._send_next_parameter_verify_request()
+        return True
 
     def _write_uuid_row(self, selected_row: UuidCsvRow) -> tuple[bool, str]:
         _runtime_window, backend_client, readiness_error = self._resolve_runtime_for_uuid_operation()
@@ -575,7 +745,7 @@ class ProductionParameterController(QObject):
         self._verify_timer.start(self._timeout_ms)
 
     def _handle_runtime_packet(self, packet: object) -> None:
-        if self._pending_row is None and self._pending_pwm_row is None:
+        if self._pending_row is None and self._pending_pwm_row is None and self._pending_parameter_request is None:
             return
         if not isinstance(packet, dict):
             return
@@ -583,6 +753,9 @@ class ProductionParameterController(QObject):
             return
 
         cmd = int(packet.get("cmd", -1))
+        if self._pending_parameter_request is not None and cmd == self._pending_parameter_request.definition.response_command:
+            self._handle_runtime_packet_parameter(packet)
+            return
         if self._pending_row is not None and cmd == UUID_COMMAND:
             self._handle_runtime_packet_uuid(packet)
             return
@@ -729,3 +902,139 @@ class ProductionParameterController(QObject):
         self._pending_pwm_row = None
         self.log_message.emit(f"[Production] {reason}")
         self.pwm_verification_finished.emit(False, reason)
+
+    def _send_next_parameter_verify_request(self) -> None:
+        if self._parameter_verify_index >= len(self._parameter_requests):
+            self._parameter_verify_timer.stop()
+            self._pending_parameter_request = None
+            passed = all(result.passed for result in self._parameter_results)
+            if passed:
+                reason = "Workbook parameter read-back verification"
+            else:
+                failures = [result.reason for result in self._parameter_results if not result.passed]
+                reason = " | ".join(failures) if failures else "Workbook parameter read-back verification failed."
+            self.parameter_verification_finished.emit(passed, reason, list(self._parameter_results))
+            return
+
+        request = self._parameter_requests[self._parameter_verify_index]
+        definition = request.definition
+        if definition.build_read_command is None or definition.decode_response is None or definition.response_command is None:
+            self._parameter_results.append(
+                ParameterVerificationResult(
+                    definition=definition,
+                    expected_text=request.expected_text,
+                    actual_text="",
+                    passed=False,
+                    reason=f"{definition.label} read-back is unavailable.",
+                )
+            )
+            self._parameter_verify_index += 1
+            self._send_next_parameter_verify_request()
+            return
+
+        runtime_window = self._runtime_window
+        backend_client = getattr(runtime_window, "backend_client", None) if runtime_window is not None else None
+        if backend_client is None or not backend_client.is_connected():
+            self._parameter_results.append(
+                ParameterVerificationResult(
+                    definition=definition,
+                    expected_text=request.expected_text,
+                    actual_text="",
+                    passed=False,
+                    reason=f"{definition.label} read-back failed: serial port not connected.",
+                )
+            )
+            self._parameter_verify_index += 1
+            self._send_next_parameter_verify_request()
+            return
+
+        self._pending_parameter_request = request
+        payload = definition.build_read_command()
+        self.log_message.emit(f"[Production] Reading {definition.label} for Node {request.node_id}")
+        try:
+            backend_client.send_command_bytes(request.node_id, payload)
+        except Exception as exc:
+            self._record_parameter_failure(f"Failed to request {definition.label} read for Node {request.node_id}: {exc}")
+            return
+        self._parameter_verify_timer.start(self._timeout_ms)
+
+    def _handle_runtime_packet_parameter(self, packet: dict) -> None:
+        request = self._pending_parameter_request
+        if request is None:
+            return
+        definition = request.definition
+        sender = int(packet.get("sender", -1))
+        if sender != request.node_id:
+            self._record_parameter_failure(
+                f"{definition.label} response came from wrong node (expected Node {request.node_id}, got Node {sender})."
+            )
+            return
+
+        params = packet.get("params")
+        if not isinstance(params, list):
+            self._record_parameter_failure(f"{definition.label} response payload is missing params.")
+            return
+        cmd = int(packet.get("cmd", -1))
+        assert definition.decode_response is not None
+        decoded_ok, actual_value, error = definition.decode_response([cmd, *params])
+        if not decoded_ok:
+            self._record_parameter_failure(error or f"{definition.label} response decode failed.")
+            return
+        if actual_value is None:
+            self._record_parameter_failure(f"{definition.label} response decode failed.")
+            return
+
+        actual_text = definition.format_actual(actual_value, request.expected_text)
+        passed = definition.compare(request.expected_value, request.expected_text, actual_value, actual_text)
+        if definition.name == "UUID":
+            self._last_verify_actual_uuid = int(actual_value)
+            self._last_verify_actual_uuid_text = actual_text
+            self._last_verify_raw_response_hex = " ".join(f"{value & 0xFF:02X}" for value in [cmd, *params])
+        elif definition.name == "PWM":
+            self._last_verify_actual_pwm = int(actual_value)
+            self._last_verify_actual_pwm_text = actual_text
+            self._last_verify_pwm_raw_response_hex = " ".join(f"{value & 0xFF:02X}" for value in [cmd, *params])
+
+        if passed:
+            reason = f"{definition.label} read-back verification"
+        else:
+            reason = f"{definition.label} read-back verification - expected {request.expected_text}, actual {actual_text}"
+        self._parameter_results.append(
+            ParameterVerificationResult(
+                definition=definition,
+                expected_text=request.expected_text,
+                actual_text=actual_text,
+                passed=passed,
+                reason=reason,
+            )
+        )
+        self._parameter_verify_timer.stop()
+        self._pending_parameter_request = None
+        self._parameter_verify_index += 1
+        self._send_next_parameter_verify_request()
+
+    def _handle_parameter_verify_timeout(self) -> None:
+        request = self._pending_parameter_request
+        if request is None:
+            return
+        self._record_parameter_failure(
+            f"{request.definition.label} read-back verification - expected {request.expected_text}, actual timeout"
+        )
+
+    def _record_parameter_failure(self, reason: str) -> None:
+        request = self._pending_parameter_request
+        if request is None:
+            return
+        self._parameter_verify_timer.stop()
+        self._parameter_results.append(
+            ParameterVerificationResult(
+                definition=request.definition,
+                expected_text=request.expected_text,
+                actual_text="",
+                passed=False,
+                reason=reason,
+            )
+        )
+        self._pending_parameter_request = None
+        self._parameter_verify_index += 1
+        self._send_next_parameter_verify_request()
