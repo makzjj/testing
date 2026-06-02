@@ -1157,6 +1157,9 @@ class ProductionParameterController(QObject):
         self.log_message.emit("[Production] Timed out waiting for EEPROM save ACK.")
         self._finish_eeprom_save_failure("EEPROM save ACK not received; check command payload and quiet mode.")
 
+    def finish_eeprom_settle(self) -> None:
+        self._handle_eeprom_settle_timeout()
+
     def _handle_eeprom_settle_timeout(self) -> None:
         self._eeprom_settle_timer.stop()
         self._eeprom_settle_active = False

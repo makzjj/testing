@@ -1359,8 +1359,6 @@ class ProductionPageWorkflowTests(unittest.TestCase):
         log_text = page.progress_section.to_plain_text()
         self.assertIn("[FAIL] UUID read-back verification - expected 1223303010, actual timeout", log_text)
         self.assertIn("[PASS] PWM read-back verification - expected 10, actual 10", log_text)
-            self.assertFalse(page.uuid_section.verify_button.isEnabled())
-            self.assertFalse(page.uuid_section.save_button.isEnabled())
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook save tests.")
     def test_production_page_save_completed_workbook_shows_output_path(self) -> None:

@@ -539,6 +539,7 @@ class ProductionPage(BaseWorkspacePage):
 
     def _handle_eeprom_save_settle_finished(self) -> None:
         self._eeprom_save_settle_timer.stop()
+        self._parameter_controller.finish_eeprom_settle()
         self._workbook_eeprom_settle_active = False
         self._refresh_workbook_action_states()
 
