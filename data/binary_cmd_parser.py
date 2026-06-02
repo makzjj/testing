@@ -204,18 +204,48 @@ def parse_get_sys_mode(params):
 
 
 def parse_tpos(params):
-    """Decode TPOS (Target/Total Position) response (0x81).
-    Format: [type_char] [pos_hi] [pos_mid_hi] [pos_mid_lo] [pos_lo]
-    Example: 45 00 02 40 03 -> ('E', 147459)
+    """Decode TPOS/status response (0x81).
+
+    Supported formats:
+    - [ch]                                   -> ('L'|'R'|'I', None)
+    - [ch, 0x82, pos:4]                      -> (ch in 'S','E','N', position)
+    - [ch, pos:4]                            -> (ch, position) legacy
+    - [0x5A 'Z', 0x4C|'L' or 0x52|'R']       -> ('Z', 'L'|'R')
     """
-    if len(params) >= 5:
+    if not params:
+        return None
+    # Single-letter events without position
+    if len(params) == 1:
+        ch = chr(params[0])
+        if ch in ("L", "R", "I"):
+            return ch, None
+        return None
+
+    # Zeroed/stopped by flag: 5A 4C/52 => 'Z','L' or 'Z','R'
+    if len(params) >= 2 and params[0] == 0x5A:  # 'Z'
+        second = params[1]
+        if second in (0x4C, 0x52):  # 'L' or 'R'
+            return 'Z', chr(second)
+        return None
+
+    # With explicit 0x82 marker before position
+    if len(params) >= 6 and params[1] == 0x82:
         try:
-            type_char = chr(params[0])
-            # Use int.from_bytes for signed 32-bit big-endian position
-            position = int.from_bytes(bytes(params[1:5]), byteorder='big', signed=True)
-            return type_char, position
+            ch = chr(params[0])
+            position = int.from_bytes(bytes(params[2:6]), byteorder='big', signed=True)
+            return ch, position
         except Exception:
             return None
+
+    # Legacy format: type + 4-byte pos directly
+    if len(params) >= 5:
+        try:
+            ch = chr(params[0])
+            position = int.from_bytes(bytes(params[1:5]), byteorder='big', signed=True)
+            return ch, position
+        except Exception:
+            return None
+    return None
 def parse_getpos(params):
     """Decode GETPOS response (0x82).
     Format 1: 3A [pos:4]
@@ -253,10 +283,42 @@ def decode_command(cmd, params):
     elif cmd == 0xBC:
         return ("comm_stats", parse_comm_stats(params))
     elif cmd == 0x81:
-        # Return raw (type_char, position) tuple for cleaner processing
-        return ("tpos", parse_tpos(params))
+        # TPOS/status events
+        parsed = parse_tpos(params)
+        if not parsed:
+            return ("tpos", None)
+        ch, val = parsed
+        # Normalize event categories for tests/consumers
+        if ch in ("L", "R", "I") and val is None:
+            return ("tpos_status", {"event": ch})
+        if ch == 'Z':
+            return ("tpos_status", {"event": 'Z', "by": val})
+        if ch in ("S", "E", "N") and isinstance(val, int):
+            # Started/Reached/NoMove with position value
+            event_map = {"S": "started", "E": "reached", "N": "no_move"}
+            return ("tpos_status", {"event": event_map[ch], "position": val})
+        # Fallback raw tuple
+        return ("tpos", parsed)
     elif cmd == 0x82:
         return ("getpos", parse_getpos(params))
+    elif cmd == 0x88:
+        # RUN started confirmation: 53 84 <vel_hi> <vel_lo>
+        if len(params) >= 4 and params[0] == 0x53 and params[1] == 0x84:
+            vel = int.from_bytes(bytes(params[2:4]), byteorder='big', signed=True)
+            return ("run_started", vel)
+        return ("run_started", None)
+    elif cmd == 0xC3:
+        # HUNTING results: 41=Accepted, 4E=Rejected/NACK, 54=Timeout
+        if not params:
+            return ("hunting", None)
+        code = params[0]
+        if code == 0x41:  # 'A'
+            return ("hunting", "accepted")
+        if code == 0x4E:  # 'N'
+            return ("hunting", "rejected")
+        if code == 0x54:  # 'T'
+            return ("hunting", "timeout")
+        return ("hunting", None)
     elif cmd == 0xBE:
         # ACK response from MCU: 3A 41 43 4B ('ACK')
         if len(params) >= 4 and params[0] == 0x3A and params[1:4] == [0x41, 0x43, 0x4B]:

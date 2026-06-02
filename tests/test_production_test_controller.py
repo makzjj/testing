@@ -14,7 +14,8 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication, QLabel, QPushButton
 
-from gui.workspace.pages.production_page import ProductionPage, SingleAxisFunctionalPopup
+from gui.workspace.pages.production_page import ProductionPage
+from gui.workspace.pages.single_axis_functional_popup import SingleAxisFunctionalPopup
 from gui.workspace.widgets import ResponsiveRow
 from gui.workspace.pages.production_parameter_controller import (
     EEPROM_SAVE_COMMAND,
@@ -1867,7 +1868,7 @@ class ProductionParameterControllerTests(unittest.TestCase):
 
     def test_single_axis_popup_warns_when_run_without_node(self) -> None:
         popup = SingleAxisFunctionalPopup(node_options=[(3, "X")])
-        with patch("gui.workspace.pages.production_page.QMessageBox.warning") as warning_mock:
+        with patch("gui.workspace.pages.single_axis_functional_popup.QMessageBox.warning") as warning_mock:
             popup._handle_run_clicked()
         self.assertTrue(warning_mock.called)
         self.assertTrue(popup.run_button.isEnabled())
