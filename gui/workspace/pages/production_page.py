@@ -461,6 +461,8 @@ class ProductionPage(BaseWorkspacePage):
         workbook_ok = True
         if self._ipqc_excel_adapter.has_loaded_workbook():
             for result in results:
+                if not result.actual_text:
+                    continue
                 workbook_ok = self._update_parameter_cells_in_workbook_memory(
                     definition=result.definition,
                     actual_value=result.actual_text,
@@ -736,7 +738,7 @@ class ProductionPage(BaseWorkspacePage):
         )
         self.uuid_section.load_workbook_button.setEnabled(True)
         self.uuid_section.write_button.setEnabled(has_required_parameters)
-        self.uuid_section.verify_button.setEnabled(has_required_parameters and self._workbook_write_completed)
+        self.uuid_section.verify_button.setEnabled(has_required_parameters)
         self.uuid_section.save_button.setEnabled(has_workbook and self._workbook_verification_passed)
 
     def _has_valid_workbook_parameter(self, definition: ParameterDefinition) -> bool:
