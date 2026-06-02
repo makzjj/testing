@@ -560,7 +560,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
         self.assertIn("All profile steps passed", page.result_summary_section._reason_label.text())
         self.assertIn("#2e7d32", page.stage_section._rows["configuration"][0].styleSheet().lower())
 
-    def test_profile_step_results_do_not_append_to_csv_logger(self) -> None:
+    def test_profile_step_results_keep_workbook_flow_only(self) -> None:
         runtime_window = _FakeRuntimeWindow()
         bridge = _FakeBridge(runtime_window)
         page = ProductionPage(bridge)
@@ -572,7 +572,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
         runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0xD8, "params": [0, 1]})
         self._app.processEvents()
 
-        self.assertIsNone(page._result_logger.result_csv_path)
+        self.assertFalse(hasattr(page, "_result_logger"))
 
     def test_production_page_hides_test_profile_selector(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -807,7 +807,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertEqual(page.uuid_section.workbook_validation_text, "Workbook Validation: PASSED")
             self.assertTrue(page.uuid_section.save_button.isEnabled())
             self.assertEqual(page.progress_section.to_plain_text().count("[PASS] Workbook parameter read-back verification"), 1)
-            self.assertIsNone(page._result_logger.result_csv_path)
+            self.assertFalse(hasattr(page, "_result_logger"))
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook write wiring tests.")
     def test_production_page_write_uuid_timeout_disables_verify_and_reports_quiet_mode_issue(self) -> None:
@@ -926,7 +926,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertEqual(output_sheet["D5"].value, "PASS")
             self.assertEqual(page.uuid_section.workbook_validation_text, "Workbook Validation: PASSED")
             self.assertTrue(page.uuid_section.save_button.isEnabled())
-            self.assertIsNone(page._result_logger.result_csv_path)
+            self.assertFalse(hasattr(page, "_result_logger"))
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook UUID verify tests.")
     def test_production_page_verify_after_load_without_prior_write_sets_failed_on_mismatch(self) -> None:
@@ -1109,7 +1109,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertTrue(page.uuid_section.save_button.isEnabled())
             self.assertEqual(page.progress_section.to_plain_text().count("[PASS] Workbook parameter read-back verification"), 1)
 
-            self.assertIsNone(page._result_logger.result_csv_path)
+            self.assertFalse(hasattr(page, "_result_logger"))
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook UUID verify tests.")
     def test_production_page_verify_mismatch_writes_fail_result_cells(self) -> None:

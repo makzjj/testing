@@ -25,7 +25,6 @@ from PyQt6.QtWidgets import (
 from ..bridges import WorkspaceRuntimeBridge
 from ..widgets import DetailListWidget, LabeledControl, PanelFrame, SimpleTableWidget
 from services.ipqc_excel_adapter import IpqcExcelAdapter
-from services.production_csv_logger import ProductionCsvLogger
 from .base_page import BaseWorkspacePage
 from .production_parameter_controller import (
     ParameterDefinition,
@@ -104,7 +103,6 @@ class ProductionPage(BaseWorkspacePage):
         self._test_controller = ProductionTestController(bridge)
         self._parameter_controller = ProductionParameterController(bridge, node_map=ML20_NODE_MAP)
         self._ipqc_excel_adapter = IpqcExcelAdapter()
-        self._result_logger = ProductionCsvLogger()
         self._last_status_entry = ""
 
         self.stage_section.configuration_requested.connect(self._handle_run_test)
@@ -128,18 +126,10 @@ class ProductionPage(BaseWorkspacePage):
         self._test_controller.step_finished.connect(self._handle_step_finished)
         self._test_controller.profile_finished.connect(self._handle_profile_finished)
         self._parameter_controller.log_message.connect(self.console_message.emit)
-        self._parameter_controller.verification_finished.connect(self._handle_uuid_verification_finished)
-        self._parameter_controller.pwm_verification_finished.connect(self._handle_pwm_verification_finished)
         self._parameter_controller.parameter_verification_finished.connect(self._handle_parameter_verification_finished)
         self._parameter_controller.eeprom_save_finished.connect(self._handle_eeprom_save_finished)
         self.progress_section.refresh_requested.connect(self.refresh)
         self.progress_section.clear_requested.connect(self._handle_clear_progress_log)
-        self._uuid_operation: str | None = None
-        self._pending_expected_uuid: int | None = None
-        self._pending_expected_pwm: int | None = None
-        self._pending_verify_node: tuple[int, str] | None = None
-        self._last_uuid_verify_passed: bool | None = None
-        self._last_uuid_verify_reason: str = ""
         self._current_programmed_pwm_value = "-"
         self._parameter_definitions = list(WORKBOOK_PARAMETER_DEFINITIONS.values())
         self._pending_parameter_requests: list[ParameterRequest] = []
@@ -304,7 +294,6 @@ class ProductionPage(BaseWorkspacePage):
             self._eeprom_save_settle_timer.stop()
             self.uuid_section.set_workbook_path(path)
             self.uuid_section.set_sheet_groups(groups, active_group)
-            self._result_logger.set_output_dir(Path(path).expanduser().resolve().parent)
             self.uuid_section.set_workbook_output_path(WORKBOOK_OUTPUT_PENDING)
             self.uuid_section.set_last_workbook_action("Workbook loaded; no write performed yet")
             self._refresh_ipqc_expected_preview()
@@ -419,8 +408,6 @@ class ProductionPage(BaseWorkspacePage):
         if requests is None:
             return
         self._pending_parameter_requests = requests
-        self._last_uuid_verify_passed = None
-        self._last_uuid_verify_reason = ""
         self._set_status_result("READING PARAMETERS", f"Reading and verifying workbook parameters for Node {node_id} {node_name}.")
         started = self._parameter_controller.verify_parameters(requests)
         if not started:
@@ -541,91 +528,6 @@ class ProductionPage(BaseWorkspacePage):
         self._eeprom_save_settle_timer.stop()
         self._parameter_controller.finish_eeprom_settle()
         self._workbook_eeprom_settle_active = False
-        self._refresh_workbook_action_states()
-
-    def _handle_uuid_verification_finished(self, passed: bool, reason: str) -> None:
-        operation = self._uuid_operation
-        self._uuid_operation = None
-        self._pending_expected_uuid = None
-        self._last_uuid_verify_passed = passed
-        self._last_uuid_verify_reason = reason
-        actual_value = (
-            self._parameter_controller.last_verify_actual_uuid_text
-            if self._parameter_controller.last_verify_actual_uuid_text
-            else ""
-        )
-        if passed:
-            self._set_status_result("PASS", reason)
-        else:
-            self._set_status_result("FAIL", reason)
-        check_text = "PASS" if passed else "FAIL"
-        self.uuid_section.set_programmed_values(
-            actual_value if actual_value != "" else "-",
-            self._current_programmed_pwm_value,
-            check_text,
-        )
-        self.progress_section.append_step(f"Programmed/read-back S/N: {actual_value if actual_value != '' else '-'}")
-        self.progress_section.append_step(f"Programmed/read-back PWM: {self._current_programmed_pwm_value}")
-        self.progress_section.append_step(f"Check result: {check_text}")
-        if self._ipqc_excel_adapter.has_loaded_workbook():
-            self._update_parameter_cells_in_workbook_memory(
-                definition=WORKBOOK_PARAMETER_DEFINITIONS["UUID"],
-                actual_value=actual_value,
-                check_result=check_text,
-            )
-        self._start_pwm_verification_after_uuid()
-
-    def _start_pwm_verification_after_uuid(self) -> None:
-        node_context = self._pending_verify_node
-        expected_pwm = self._pending_expected_pwm
-        if node_context is None or expected_pwm is None:
-            return
-        node_id, node_name = node_context
-        self._set_status_result("READING PWM", f"Reading and verifying PWM for Node {node_id} {node_name}.")
-        started = self._parameter_controller.verify_pwm(
-            node_id,
-            node_name,
-            expected_pwm,
-            expected_pwm_text=str(expected_pwm),
-        )
-        if started:
-            self.progress_section.append_step(f"Started PWM read/verify for Node {node_id} {node_name}")
-        else:
-            self._pending_expected_pwm = None
-            self._pending_verify_node = None
-
-    def _handle_pwm_verification_finished(self, passed: bool, reason: str) -> None:
-        actual_pwm_text = self._parameter_controller.last_verify_actual_pwm_text or "-"
-        self._current_programmed_pwm_value = actual_pwm_text
-        self._pending_expected_pwm = None
-        self._pending_verify_node = None
-        check_text = "PASS" if passed else "FAIL"
-        self.uuid_section.set_programmed_values(
-            self._parameter_controller.last_verify_actual_uuid_text or "-",
-            self._current_programmed_pwm_value,
-            check_text,
-        )
-        uuid_passed = bool(self._last_uuid_verify_passed)
-        combined_pass = uuid_passed and passed
-        self._workbook_verification_passed = combined_pass
-        self.uuid_section.set_workbook_validation_result(
-            combined_pass,
-            reason if not combined_pass else "",
-        )
-        if combined_pass:
-            self._set_status_result("PASS", reason)
-        else:
-            # When one of UUID/PWM passed and the other failed, show both reasons together.
-            combined_reason = reason if (passed == uuid_passed) else f"{self._last_uuid_verify_reason} | {reason}"
-            self._set_status_result("FAIL", combined_reason)
-        self.progress_section.append_step(f"Programmed/read-back PWM: {self._current_programmed_pwm_value}")
-        self.progress_section.append_step(f"PWM check result: {check_text}")
-        if self._ipqc_excel_adapter.has_loaded_workbook():
-            self._update_parameter_cells_in_workbook_memory(
-                definition=WORKBOOK_PARAMETER_DEFINITIONS["PWM"],
-                actual_value=self._current_programmed_pwm_value,
-                check_result=check_text,
-            )
         self._refresh_workbook_action_states()
 
     def _update_uuid_cells_in_workbook_memory(self, actual_value: str | int | None, passed: bool) -> bool:
