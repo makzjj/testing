@@ -1,0 +1,389 @@
+"""Single Axis Functional Test controller/state machine.
+
+Fake-transport friendly: emits command payloads via `command_requested(list[int])`
+and consumes incoming packets via `handle_runtime_packet(packet)` where `packet`
+is a `list[int]` or `bytes` in the format `[cmd, <params...>]`.
+
+Architecture:
+- Uses existing command builders from gui.workspace.pages.production_parameter_controller
+  via the thin shim module `data.binary_cmd_builders`.
+- Uses existing parser helpers from `data.binary_cmd_parser.decode_command`.
+
+This module intentionally contains no real serial I/O.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Callable
+
+from data.binary_cmd_builders import (
+    build_hunting_timeout,
+    build_getpos,
+    build_run,
+    build_tpos,
+    build_stopmotor,
+)
+from data.binary_cmd_parser import decode_command
+
+
+@dataclass
+class FunctionalTestConfig:
+    hunt_timeout_ms: int = 10_000
+    velocity_left_to_right: int = 190
+    velocity_right_to_left: int = -190
+    zero_tolerance: int = 5
+    range_tolerance: int = 10
+    middle_position_tolerance: int = 10
+
+
+class SingleAxisFunctionalTestController:
+    """Implements the state machine described in the issue specification.
+
+    Signals are exposed as methods; tests can monkeypatch/override them to observe events.
+    """
+
+    # States (string constants)
+    S_IDLE = "IDLE"
+    S_HUNTING = "HUNTING"
+    S_WAIT_HUNTING_SENSOR = "WAIT_FOR_HUNTING_COMPLETION"
+    S_WAIT_ZERO = "WAIT_FOR_ENCODER_INITIALIZATION"
+    S_VERIFY_ZERO = "VERIFY_HOME_POSITION_ZERO"
+    S_RUN_TO_RIGHT = "MOVE_TO_OPPOSITE_SENSOR_R"
+    S_WAIT_RIGHT = "WAIT_FOR_RIGHT_SENSOR"
+    S_READ_RANGE1 = "READ_AND_STORE_RANGE_1"
+    S_RUN_TO_LEFT = "MOVE_TO_OPPOSITE_SENSOR_L"
+    S_WAIT_LEFT = "WAIT_FOR_LEFT_SENSOR"
+    S_READ_RANGE2 = "READ_AND_STORE_RANGE_2"
+    S_COMPARE = "COMPARE_RANGE"
+    S_MOVE_MIDDLE = "MOVE_TO_MIDDLE"
+    S_WAIT_MIDDLE = "WAIT_FOR_MIDDLE_COMPLETION"
+    S_PASSED = "PASSED"
+    S_FAILED = "FAILED"
+
+    def __init__(self, config: FunctionalTestConfig | None = None) -> None:
+        self.cfg = config or FunctionalTestConfig()
+        self._node_id: int | None = None
+        self._state: str = self.S_IDLE
+
+        # Measurements
+        self._signed_range_1: int | None = None
+        self._range_1: int | None = None
+        self._signed_range_2: int | None = None
+        self._range_2: int | None = None
+        # Positions per corrected plan
+        self._opposite_pos: int | None = None
+        self._returned_home_pos: int | None = None
+        self._middle_target: int | None = None
+
+        # Internal wait kind for timeouts
+        self._wait_for: str | None = None
+
+    # --- Signal-like methods (override/monkeypatch in tests) ---
+    def command_requested(self, payload: list[int]) -> None:  # pragma: no cover - overridden in tests
+        pass
+
+    def status_changed(self, text: str) -> None:  # pragma: no cover - overridden in tests
+        pass
+
+    def position_changed(self, pos: int) -> None:  # pragma: no cover - overridden in tests
+        pass
+
+    def range1_changed(self, value: int) -> None:  # pragma: no cover - overridden in tests
+        pass
+
+    def range2_changed(self, value: int) -> None:  # pragma: no cover - overridden in tests
+        pass
+
+    def difference_changed(self, value: int) -> None:  # pragma: no cover - overridden in tests
+        pass
+
+    def left_flag_changed(self, active: bool) -> None:  # pragma: no cover - overridden in tests
+        pass
+
+    def right_flag_changed(self, active: bool) -> None:  # pragma: no cover - overridden in tests
+        pass
+
+    def test_passed(self) -> None:  # pragma: no cover - overridden in tests
+        pass
+
+    def test_failed(self, reason: str) -> None:  # pragma: no cover - overridden in tests
+        pass
+
+    # --- Public API ---
+    def start(self, node_id: int) -> None:
+        """Start state machine. Transitions IDLE -> HUNTING and sends HUNTING command."""
+        self._node_id = int(node_id)
+        self._set_state(self.S_IDLE)
+        # Immediately go to hunting (State 2)
+        self._set_state(self.S_HUNTING)
+        payload = build_hunting_timeout(self.cfg.hunt_timeout_ms)
+        self._emit_command(payload)
+        # Expect an immediate 0xC3 hunting acceptance/reject or timeout later
+        self._wait_for = "hunting_ack"
+
+    def stop(self) -> None:
+        # Explicit stop request from UI; treat as failure/abort
+        self._request_stopmotor()
+        self._set_state(self.S_FAILED)
+        self.test_failed("Stopped by user")
+
+    def on_timeout(self) -> None:
+        """Tests can invoke to simulate a timeout for the current wait condition."""
+        if self._state == self.S_HUNTING and self._wait_for == "hunting_ack":
+            # No ACK/NACK -> fail
+            self._request_stopmotor()
+            return self._fail("HUNTING no ACK/NACK/timeout")
+        if self._state == self.S_WAIT_HUNTING_SENSOR and self._wait_for == "left_sensor":
+            self._request_stopmotor()
+            return self._fail("HUNTING timed out before Left sensor event")
+        if self._state == self.S_WAIT_ZERO and self._wait_for == "zeroed":
+            self._request_stopmotor()
+            return self._fail("Encoder init timeout after Left sensor")
+        if self._state == self.S_VERIFY_ZERO and self._wait_for == "getpos_zero":
+            self._request_stopmotor()
+            return self._fail("GETPOS timeout during zero verification")
+        if self._state == self.S_RUN_TO_RIGHT and self._wait_for == "run_right_ack":
+            self._request_stopmotor()
+            return self._fail("RUN-to-right ACK not received")
+        if self._state == self.S_WAIT_RIGHT and self._wait_for == "right_sensor":
+            self._request_stopmotor()
+            return self._fail("Right sensor event timeout")
+        if self._state == self.S_READ_RANGE1 and self._wait_for == "getpos_r1":
+            self._request_stopmotor()
+            return self._fail("GETPOS timeout after right sensor")
+        if self._state == self.S_RUN_TO_LEFT and self._wait_for == "run_left_ack":
+            self._request_stopmotor()
+            return self._fail("RUN-to-left ACK not received")
+        if self._state == self.S_WAIT_LEFT and self._wait_for == "left_sensor":
+            self._request_stopmotor()
+            return self._fail("Left sensor event timeout")
+        if self._state == self.S_READ_RANGE2 and self._wait_for == "getpos_r2":
+            self._request_stopmotor()
+            return self._fail("GETPOS timeout after left sensor")
+        if self._state == self.S_MOVE_MIDDLE and self._wait_for == "tpos_ack":
+            self._request_stopmotor()
+            return self._fail("TPOS ACK not received")
+        if self._state == self.S_WAIT_MIDDLE and self._wait_for == "tpos_complete":
+            self._request_stopmotor()
+            return self._fail("TPOS completion timeout")
+
+    def handle_runtime_packet(self, packet: list[int] | bytes) -> None:
+        if not packet:
+            return
+        if isinstance(packet, (bytes, bytearray)):
+            data = list(packet)
+        else:
+            data = list(packet)
+        cmd = data[0]
+        params = data[1:]
+
+        kind, value = decode_command(cmd, params)
+
+        # Route based on expected wait/state
+        if kind == "hunting":
+            self._handle_hunting_response(value)
+            return
+        if kind == "tpos_status":
+            self._handle_tpos_status(value)
+            return
+        if kind == "getpos":
+            self._handle_getpos(value)
+            return
+        if kind == "run_started":
+            self._handle_run_started(value)
+            return
+
+    # --- Internal helpers ---
+    def _emit_command(self, payload: list[int]) -> None:
+        self.command_requested(payload)
+
+    def _set_state(self, state: str) -> None:
+        self._state = state
+        self.status_changed(state)
+
+    def _request_stopmotor(self) -> None:
+        self._emit_command(build_stopmotor())
+
+    def _fail(self, reason: str) -> None:
+        self._set_state(self.S_FAILED)
+        self.test_failed(reason)
+
+    # --- Handlers ---
+    def _handle_hunting_response(self, value) -> None:
+        if self._state != self.S_HUNTING or self._wait_for != "hunting_ack":
+            return
+        if value == "accepted":
+            # Proceed to wait for left sensor 81 4C
+            self._set_state(self.S_WAIT_HUNTING_SENSOR)
+            self._wait_for = "left_sensor"
+        elif value == "rejected" or value is None:
+            self._request_stopmotor()
+            self._fail("HUNTING rejected/NACK")
+        elif value == "timeout":
+            self._request_stopmotor()
+            self._fail("HUNTING timeout")
+
+    def _handle_tpos_status(self, value: dict | None) -> None:
+        if not isinstance(value, dict) or "event" not in value:
+            return
+        event = value["event"]
+        # Sensor flags from simple events
+        if event == "L":
+            self.left_flag_changed(True)
+            if self._state == self.S_WAIT_HUNTING_SENSOR and self._wait_for == "left_sensor":
+                # State 3 -> 4: after left sensor, wait for encoder init 81 49 'I'
+                self._set_state(self.S_WAIT_ZERO)
+                self._wait_for = "zeroed"
+                return
+            if self._state == self.S_WAIT_LEFT and self._wait_for == "left_sensor":
+                # Completed return direction
+                self._set_state(self.S_READ_RANGE2)
+                self._wait_for = "getpos_r2"
+                # Request GETPOS
+                self._emit_command(build_getpos())
+                return
+            # Wrong sensor during move-to-right
+            if self._state == self.S_WAIT_RIGHT and self._wait_for == "right_sensor":
+                self._request_stopmotor()
+                self._fail("Wrong sensor event during right move (got L)")
+                return
+
+        if event == "R":
+            self.right_flag_changed(True)
+            if self._state == self.S_WAIT_RIGHT and self._wait_for == "right_sensor":
+                # Completed first leg; now read range_1
+                self._set_state(self.S_READ_RANGE1)
+                self._wait_for = "getpos_r1"
+                self._emit_command(build_getpos())
+                return
+            # Wrong sensor during move-to-left
+            if self._state == self.S_WAIT_LEFT and self._wait_for == "left_sensor":
+                self._request_stopmotor()
+                self._fail("Wrong sensor event during left move (got R)")
+                return
+
+        if event == "I":
+            # Encoder zeroed
+            if self._state == self.S_WAIT_ZERO and self._wait_for == "zeroed":
+                self.position_changed(0)
+                self._set_state(self.S_VERIFY_ZERO)
+                self._wait_for = "getpos_zero"
+                self._emit_command(build_getpos())
+                return
+
+        # TPOS middle movement events with explicit position
+        if event in ("started", "reached", "no_move"):
+            pos = int(value.get("position", 0))
+            self.position_changed(pos)
+            if self._state == self.S_MOVE_MIDDLE and self._wait_for == "tpos_ack":
+                if event == "started":
+                    # Wait for completion
+                    self._set_state(self.S_WAIT_MIDDLE)
+                    self._wait_for = "tpos_complete"
+                    return
+                if event == "no_move":
+                    # Already at target; accept only if within tolerance
+                    if self._middle_target is None:
+                        self._request_stopmotor()
+                        return self._fail("Middle target unknown on no-move")
+                    if abs(pos - self._middle_target) <= self.cfg.middle_position_tolerance:
+                        # Stop motor and pass
+                        self._request_stopmotor()
+                        self._set_state(self.S_PASSED)
+                        self.test_passed()
+                        return
+                    self._request_stopmotor()
+                    return self._fail("Already at middle but outside tolerance")
+            elif self._state == self.S_WAIT_MIDDLE and self._wait_for == "tpos_complete":
+                if event == "reached":
+                    if self._middle_target is None:
+                        self._request_stopmotor()
+                        return self._fail("Middle target unknown on reached")
+                    if abs(pos - self._middle_target) <= self.cfg.middle_position_tolerance:
+                        self._request_stopmotor()
+                        self._set_state(self.S_PASSED)
+                        self.test_passed()
+                        return
+                    self._request_stopmotor()
+                    return self._fail("Middle reached but outside tolerance")
+
+    def _handle_getpos(self, value) -> None:
+        if not isinstance(value, tuple) or len(value) != 2:
+            return
+        tag, pos = value
+        if tag != 'G':
+            return
+        position = int(pos)
+        self.position_changed(position)
+
+        if self._state == self.S_VERIFY_ZERO and self._wait_for == "getpos_zero":
+            if abs(position) <= self.cfg.zero_tolerance:
+                # Move to opposite sensor using RUN (to right)
+                self._set_state(self.S_RUN_TO_RIGHT)
+                payload = build_run(self.cfg.velocity_left_to_right)
+                self._emit_command(payload)
+                self._wait_for = "run_right_ack"
+            else:
+                self._request_stopmotor()
+                self._fail("Zero position outside tolerance")
+            return
+
+        if self._state == self.S_READ_RANGE1 and self._wait_for == "getpos_r1":
+            # Store opposite sensor position and range_1
+            self._signed_range_1 = position
+            self._opposite_pos = position
+            self._range_1 = abs(position)
+            self.range1_changed(self._range_1)
+            # Now send RUN in opposite direction (left)
+            self._set_state(self.S_RUN_TO_LEFT)
+            payload = build_run(self.cfg.velocity_right_to_left)
+            self._emit_command(payload)
+            self._wait_for = "run_left_ack"
+            return
+
+        if self._state == self.S_READ_RANGE2 and self._wait_for == "getpos_r2":
+            # Store returned-home position then compute range_2 as delta from opposite_pos
+            self._signed_range_2 = position
+            self._returned_home_pos = position
+            # Compute per corrected plan: range_2 = abs(opposite_pos - returned_home_pos)
+            if self._opposite_pos is None:
+                self._request_stopmotor()
+                return self._fail("Opposite position unavailable for range_2 computation")
+            self._range_2 = abs(int(self._opposite_pos) - position)
+            self.range2_changed(self._range_2)
+            # Compare ranges
+            self._set_state(self.S_COMPARE)
+            if self._range_1 is None or self._range_2 is None:
+                self._request_stopmotor()
+                return self._fail("Range values unavailable for compare")
+            difference = abs(self._range_1 - self._range_2)
+            self.difference_changed(difference)
+            if difference > self.cfg.range_tolerance:
+                self._request_stopmotor()
+                return self._fail("Range difference exceeds tolerance")
+            # Compute middle from opposite_pos only (absolute leg from zero)
+            self._middle_target = int(self._opposite_pos // 2)
+            self._set_state(self.S_MOVE_MIDDLE)
+            self._wait_for = "tpos_ack"
+            self._emit_command(build_tpos(self._middle_target))
+            return
+
+    def _handle_run_started(self, value) -> None:
+        # value is confirmed velocity (int) or None
+        if self._state == self.S_RUN_TO_RIGHT and self._wait_for == "run_right_ack":
+            if value is None:
+                self._request_stopmotor()
+                return self._fail("RUN-to-right ACK missing/invalid")
+            # Now wait for right sensor cut
+            self._set_state(self.S_WAIT_RIGHT)
+            self._wait_for = "right_sensor"
+            return
+        if self._state == self.S_RUN_TO_LEFT and self._wait_for == "run_left_ack":
+            if value is None:
+                self._request_stopmotor()
+                return self._fail("RUN-to-left ACK missing/invalid")
+            # Now wait for left sensor cut
+            self._set_state(self.S_WAIT_LEFT)
+            self._wait_for = "left_sensor"
+            return
