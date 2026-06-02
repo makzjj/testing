@@ -288,11 +288,11 @@ def default_workbook_parameter_definitions() -> tuple[ParameterDefinition, ...]:
 
 
 class ProductionParameterController(QObject):
-    """Manage Production UUID write/read runtime orchestration.
+    """Manage Production workbook parameter writing and verification.
 
-    Responsibilities include UUID parsing and format checks, optional legacy CSV
-    validation, selected-node runtime write operations, and explicit read-back
-    verification when requested by the operator.
+    Responsibilities include generic ParameterDefinition pipeline orchestration,
+    EEPROM save operations, and read-back verification. Legacy UUID/PWM paths
+    are maintained as compatibility wrappers.
     """
 
     log_message = pyqtSignal(str)
@@ -337,6 +337,7 @@ class ProductionParameterController(QObject):
         self._pwm_verify_timer = QTimer(self)
         self._pwm_verify_timer.setSingleShot(True)
         self._pwm_verify_timer.timeout.connect(self._handle_pwm_verify_timeout)
+
         self._parameter_verify_timer = QTimer(self)
         self._parameter_verify_timer.setSingleShot(True)
         self._parameter_verify_timer.timeout.connect(self._handle_parameter_verify_timeout)
