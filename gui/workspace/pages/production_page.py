@@ -9,11 +9,13 @@ from pathlib import Path
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QComboBox,
+    QDialog,
     QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QTableWidgetItem,
@@ -82,6 +84,252 @@ def get_ml20_testable_nodes() -> list[tuple[int, str]]:
     return [(node_id, get_ml20_node_name(node_id)) for node_id in _ML20_NODE_ORDER if node_id != 1]
 
 
+class SingleAxisFunctionalPopup(QDialog):
+    """Compact Functional popup shell for future single-axis controller integration."""
+
+    _INACTIVE_FLAG_COLOR = "#7A4D1F"
+    _ACTIVE_FLAG_COLOR = "#FF8C00"
+
+    def __init__(self, parent: QWidget | None = None, node_options: list[tuple[int, str]] | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Functional")
+        self.setModal(False)
+        self.resize(420, 320)
+        self.setMinimumSize(400, 300)
+
+        self._is_running = False
+        self._placeholder_steps: list[tuple[int, str]] = []
+        self._placeholder_step_index = 0
+
+        self._step_timer = QTimer(self)
+        self._step_timer.setSingleShot(True)
+        self._step_timer.timeout.connect(self._process_next_placeholder_step)
+
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(10, 10, 10, 10)
+        root_layout.setSpacing(8)
+
+        top_row = QGridLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setHorizontalSpacing(8)
+        top_row.setVerticalSpacing(4)
+
+        node_label = QLabel("Node")
+        self.node_combo = QComboBox()
+        self.node_combo.setMinimumWidth(130)
+        self.node_combo.addItem("Select Node", None)
+        for node_id, node_name in node_options or []:
+            self.node_combo.addItem(f"Node {node_id} ({node_name})", (int(node_id), str(node_name)))
+
+        self.position_field = QLabel("0")
+        self.position_field.setObjectName("DetailValue")
+        self.range_field = QLabel("-")
+        self.range_field.setObjectName("DetailValue")
+
+        top_row.addWidget(node_label, 0, 0)
+        top_row.addWidget(self.node_combo, 0, 1)
+        top_row.addWidget(QLabel("Position"), 1, 0)
+        top_row.addWidget(self.position_field, 1, 1)
+        top_row.addWidget(QLabel("Range"), 2, 0)
+        top_row.addWidget(self.range_field, 2, 1)
+
+        flags_layout = QVBoxLayout()
+        flags_layout.setContentsMargins(0, 0, 0, 0)
+        flags_layout.setSpacing(6)
+        self.left_flag_led = self._build_led_widget()
+        self.right_flag_led = self._build_led_widget()
+        flags_layout.addLayout(self._build_flag_row(self.left_flag_led, "Left Flag (INT0)"))
+        flags_layout.addLayout(self._build_flag_row(self.right_flag_led, "Right Flag (INT1)"))
+        flags_layout.addStretch(1)
+        top_row.addLayout(flags_layout, 0, 2, 3, 1)
+        top_row.setColumnStretch(1, 1)
+        root_layout.addLayout(top_row)
+
+        status_row = QHBoxLayout()
+        status_row.setContentsMargins(0, 0, 0, 0)
+        status_row.setSpacing(8)
+
+        self.status_block = QTextEdit()
+        self.status_block.setReadOnly(True)
+        self.status_block.setMinimumHeight(140)
+        status_row.addWidget(self.status_block, 1)
+
+        side_buttons = QVBoxLayout()
+        side_buttons.setContentsMargins(0, 0, 0, 0)
+        side_buttons.setSpacing(6)
+        self.log_button = QPushButton("Log")
+        self.log_button.setProperty("tone", "secondary")
+        self.log_button.clicked.connect(self._show_log_placeholder)
+        self.clear_button = QPushButton("Clear")
+        self.clear_button.setProperty("tone", "secondary")
+        self.clear_button.clicked.connect(self.status_block.clear)
+        side_buttons.addWidget(self.log_button)
+        side_buttons.addWidget(self.clear_button)
+        side_buttons.addStretch(1)
+        status_row.addLayout(side_buttons)
+        root_layout.addLayout(status_row)
+
+        footer_row = QHBoxLayout()
+        footer_row.addStretch(1)
+        self.run_button = QPushButton("Run")
+        self.run_button.clicked.connect(self._handle_run_clicked)
+        self.close_button = QPushButton("Close")
+        self.close_button.setProperty("tone", "secondary")
+        self.close_button.clicked.connect(self.close)
+        footer_row.addWidget(self.run_button)
+        footer_row.addWidget(self.close_button)
+        root_layout.addLayout(footer_row)
+
+        self.reset_flags()
+
+    def append_status(self, message: str) -> None:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.status_block.append(f"[{timestamp}] {message}")
+
+    def update_position(self, value: object) -> None:
+        self.position_field.setText(str(value))
+
+    def update_range(self, value: object) -> None:
+        self.range_field.setText(str(value))
+
+    def set_left_flag_active(self, active: bool) -> None:
+        self._set_led_state(self.left_flag_led, active)
+
+    def set_right_flag_active(self, active: bool) -> None:
+        self._set_led_state(self.right_flag_led, active)
+
+    def reset_flags(self) -> None:
+        self.set_left_flag_active(False)
+        self.set_right_flag_active(False)
+
+    def mark_passed(self) -> None:
+        node_text = self._selected_node_text()
+        self.append_status(f"Node {node_text}: Functional test PASSED.")
+        self.ask_start_sampling()
+
+    def mark_failed(self, reason: str) -> None:
+        node_text = self._selected_node_text()
+        self.append_status(f"Node {node_text}: Functional test FAILED. Reason: {reason}")
+        QMessageBox.warning(self, "Functional Test Failed", str(reason))
+        self._finish_placeholder_run()
+
+    def ask_start_sampling(self) -> bool:
+        message_box = QMessageBox(self)
+        message_box.setIcon(QMessageBox.Icon.Question)
+        message_box.setWindowTitle("Functional")
+        message_box.setText("Functional Test Passed. Do you want to start collecting 32 samples now?")
+        start_sampling_button = message_box.addButton("Start Sampling", QMessageBox.ButtonRole.AcceptRole)
+        message_box.addButton("Not Now", QMessageBox.ButtonRole.RejectRole)
+        message_box.exec()
+        return message_box.clickedButton() is start_sampling_button
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        if self._is_running:
+            event.ignore()
+            QMessageBox.information(self, "Functional", "Test is running. Please wait for completion.")
+            return
+        super().closeEvent(event)
+
+    def _handle_run_clicked(self) -> None:
+        if self._is_running:
+            return
+        node_data = self.node_combo.currentData()
+        if not isinstance(node_data, tuple) or len(node_data) != 2:
+            QMessageBox.warning(self, "Functional", "Please select a node before running the functional test.")
+            return
+        node_id, _node_name = node_data
+        self._start_placeholder_run(int(node_id))
+
+    def _start_placeholder_run(self, node_id: int) -> None:
+        self._is_running = True
+        self.run_button.setEnabled(False)
+        self.node_combo.setEnabled(False)
+        self.update_position(0)
+        self.update_range("-")
+        self.reset_flags()
+
+        self._placeholder_steps = [
+            (0, f"Node {node_id}: Functional test started."),
+            (500, f"Node {node_id}: Hunting to home sensor."),
+            (500, f"Node {node_id}: Left sensor has been cut."),
+            (500, f"Node {node_id}: Position initialized to zero."),
+            (500, f"Node {node_id}: Moving to opposite sensor."),
+            (500, f"Node {node_id}: Right sensor has been cut."),
+            (500, f"Node {node_id}: Range 1 recorded: 1200."),
+            (500, f"Node {node_id}: Returning to first sensor."),
+            (500, f"Node {node_id}: Range 2 recorded/calculated: 1200."),
+            (500, f"Node {node_id}: Moving to middle position."),
+            (500, f"Node {node_id}: Functional test PASSED."),
+        ]
+        self._placeholder_step_index = 0
+        self._process_next_placeholder_step()
+
+    def _process_next_placeholder_step(self) -> None:
+        if self._placeholder_step_index >= len(self._placeholder_steps):
+            self._finish_placeholder_run()
+            return
+
+        delay_ms, message = self._placeholder_steps[self._placeholder_step_index]
+        self.append_status(message)
+
+        if "Left sensor has been cut" in message:
+            self.set_left_flag_active(True)
+        if "Right sensor has been cut" in message:
+            self.set_right_flag_active(True)
+        if "Position initialized to zero" in message:
+            self.update_position(0)
+        if "Range 1 recorded" in message:
+            self.update_range(1200)
+        if "Moving to middle position" in message:
+            self.update_position(600)
+
+        self._placeholder_step_index += 1
+        if self._placeholder_step_index < len(self._placeholder_steps):
+            self._step_timer.start(max(0, int(delay_ms)))
+            return
+
+        self._finish_placeholder_run()
+
+    def _finish_placeholder_run(self) -> None:
+        self._step_timer.stop()
+        self._is_running = False
+        self.run_button.setEnabled(True)
+        self.node_combo.setEnabled(True)
+
+    def _show_log_placeholder(self) -> None:
+        log_text = self.status_block.toPlainText().strip() or "No status messages available."
+        QMessageBox.information(self, "Functional Log", log_text)
+
+    def _selected_node_text(self) -> str:
+        node_data = self.node_combo.currentData()
+        if not isinstance(node_data, tuple) or len(node_data) != 2:
+            return "-"
+        return str(node_data[0])
+
+    @classmethod
+    def _build_led_widget(cls) -> QLabel:
+        led = QLabel()
+        led.setFixedSize(12, 12)
+        led.setFrameShape(QFrame.Shape.NoFrame)
+        cls._set_led_state(led, False)
+        return led
+
+    @classmethod
+    def _set_led_state(cls, led: QLabel, active: bool) -> None:
+        color = cls._ACTIVE_FLAG_COLOR if active else cls._INACTIVE_FLAG_COLOR
+        led.setStyleSheet(f"border-radius: 6px; background: {color};")
+
+    @staticmethod
+    def _build_flag_row(led: QLabel, label_text: str) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        row.addWidget(led, 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(QLabel(label_text), 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addStretch(1)
+        return row
+
+
 class ProductionPage(BaseWorkspacePage):
     """Operator-focused Production page for runtime-backed node testing."""
 
@@ -104,6 +352,7 @@ class ProductionPage(BaseWorkspacePage):
         self._parameter_controller = ProductionParameterController(bridge, node_map=ML20_NODE_MAP)
         self._ipqc_excel_adapter = IpqcExcelAdapter()
         self._last_status_entry = ""
+        self._single_axis_popup: SingleAxisFunctionalPopup | None = None
 
         self.stage_section.configuration_requested.connect(self._handle_run_test)
         self.stage_section.single_axis_requested.connect(self._handle_single_axis_test_requested)
@@ -258,7 +507,11 @@ class ProductionPage(BaseWorkspacePage):
         self._refresh_connection_status()
 
     def _handle_single_axis_test_requested(self) -> None:
-        self.progress_section.append_step("Single Axis Functional Test UI is present but command flow is not enabled yet")
+        if self._single_axis_popup is None:
+            self._single_axis_popup = SingleAxisFunctionalPopup(self, node_options=get_ml20_testable_nodes())
+        self._single_axis_popup.show()
+        self._single_axis_popup.raise_()
+        self._single_axis_popup.activateWindow()
 
     def _handle_performance_test_requested(self) -> None:
         self.progress_section.append_step("Performance Test UI is present but command flow is not enabled yet")

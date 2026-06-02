@@ -14,7 +14,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication, QLabel, QPushButton
 
-from gui.workspace.pages.production_page import ProductionPage
+from gui.workspace.pages.production_page import ProductionPage, SingleAxisFunctionalPopup
 from gui.workspace.widgets import ResponsiveRow
 from gui.workspace.pages.production_parameter_controller import (
     EEPROM_SAVE_COMMAND,
@@ -1851,6 +1851,45 @@ class ProductionParameterControllerTests(unittest.TestCase):
         self.assertIn("Performance Test", stage_labels)
         stage_button_texts = [button.text() for button in page.stage_section.findChildren(QPushButton)]
         self.assertEqual(stage_button_texts.count("Start Test"), 3)
+
+    def test_single_axis_stage_opens_functional_popup(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        page._handle_single_axis_test_requested()
+        self._app.processEvents()
+
+        self.assertIsNotNone(page._single_axis_popup)
+        assert page._single_axis_popup is not None
+        self.assertIsInstance(page._single_axis_popup, SingleAxisFunctionalPopup)
+        self.assertEqual(page._single_axis_popup.windowTitle(), "Functional")
+
+    def test_single_axis_popup_warns_when_run_without_node(self) -> None:
+        popup = SingleAxisFunctionalPopup(node_options=[(3, "X")])
+        with patch("gui.workspace.pages.production_page.QMessageBox.warning") as warning_mock:
+            popup._handle_run_clicked()
+        self.assertTrue(warning_mock.called)
+        self.assertTrue(popup.run_button.isEnabled())
+        self.assertTrue(popup.node_combo.isEnabled())
+
+    def test_single_axis_popup_placeholder_run_updates_status_and_reenables_controls(self) -> None:
+        popup = SingleAxisFunctionalPopup(node_options=[(3, "X")])
+        popup.node_combo.setCurrentIndex(1)
+        popup._handle_run_clicked()
+
+        while popup._is_running:
+            popup._process_next_placeholder_step()
+
+        status_text = popup.status_block.toPlainText()
+        self.assertIn("Node 3: Functional test started.", status_text)
+        self.assertIn("Node 3: Functional test PASSED.", status_text)
+        self.assertEqual(popup.position_field.text(), "600")
+        self.assertEqual(popup.range_field.text(), "1200")
+        self.assertIn("#ff8c00", popup.left_flag_led.styleSheet().lower())
+        self.assertIn("#ff8c00", popup.right_flag_led.styleSheet().lower())
+        self.assertTrue(popup.run_button.isEnabled())
+        self.assertTrue(popup.node_combo.isEnabled())
 
     def test_production_page_blocks_write_and_verify_when_no_workbook_loaded(self) -> None:
         runtime_window = _FakeRuntimeWindow()
