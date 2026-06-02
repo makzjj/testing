@@ -18,6 +18,7 @@ UUID_RESPONSE_PARAM = 0x3A
 PWM_SET_COMMAND = 0x84
 PWM_GET_COMMAND = 0x85
 EEPROM_SAVE_COMMAND = 0xC5
+SET_COMMAND_SUFFIX = 0x21
 UUID_VERIFY_TIMEOUT_MS = 3000
 UUID_MAX_40BIT_VALUE = 0xFFFFFFFFFF
 UUID_DECIMAL_LENGTH = 10
@@ -189,7 +190,7 @@ def build_pwm_read_payload() -> list[int]:
 
 
 def build_eeprom_save_payload() -> list[int]:
-    return [EEPROM_SAVE_COMMAND]
+    return [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]
 
 
 def decode_pwm_response(payload: list[int] | tuple[int, ...]) -> tuple[bool, int | None, str]:
@@ -202,23 +203,18 @@ def decode_pwm_response(payload: list[int] | tuple[int, ...]) -> tuple[bool, int
 
 
 def decode_eeprom_save_response(payload: list[int] | tuple[int, ...]) -> tuple[bool, str | None, str]:
-    if len(payload) < 3:
+    if len(payload) < 2:
         return False, None, "EEPROM save response payload is too short."
     if payload[0] != EEPROM_SAVE_COMMAND:
         return False, None, "EEPROM save response command is not 0xC5."
-    if payload[1] != 0x3A:
-        return False, None, "EEPROM save response prefix is not 0x3A."
-
-    response_text = "".join(chr(byte & 0xFF) for byte in payload[2:] if 32 <= (byte & 0xFF) <= 126).strip().upper()
-    if response_text in {"ACK", "OK"} or "ACK" in response_text:
-        return True, response_text or "ACK", ""
-    if response_text in {"NACK", "FAIL", "ERROR"} or "ERR" in response_text or "REJECT" in response_text:
-        return False, response_text or None, f"EEPROM save rejected: {response_text or 'NACK'}."
-    if len(payload) == 3 and payload[2] in {0x00, 0x01}:
-        return payload[2] == 0x01, "OK" if payload[2] == 0x01 else "NACK", (
-            "" if payload[2] == 0x01 else "EEPROM save rejected by device."
-        )
-    return False, response_text or None, f"EEPROM save response not recognized: {' '.join(f'{byte & 0xFF:02X}' for byte in payload)}."
+    ack_status = int(payload[1]) & 0xFF
+    if ack_status not in {0x0A, ord("A")}:
+        return False, None, f"EEPROM save response status is not ACK: {ack_status:02X}."
+    if len(payload) > 3:
+        return False, None, f"EEPROM save ACK response is too long: {' '.join(f'{byte & 0xFF:02X}' for byte in payload)}."
+    if len(payload) == 3 and (int(payload[2]) & 0xFF) != 0x00:
+        return False, None, f"EEPROM save ACK status byte is not 00: {int(payload[2]) & 0xFF:02X}."
+    return True, "ACK", ""
 
 
 def decode_uuid_response(payload: list[int] | tuple[int, ...]) -> tuple[bool, int | None, str]:
@@ -254,7 +250,7 @@ def _compare_text_case_aware(_expected_value: object, expected_text: str, _actua
 
 
 def _compare_integer_text(expected_value: object, _expected_text: str, actual_value: object, _actual_text: str) -> bool:
-    return int(expected_value) == int(actual_value)
+    return parse_pwm_value(expected_value) == parse_pwm_value(actual_value)
 
 
 def default_workbook_parameter_definitions() -> tuple[ParameterDefinition, ...]:
@@ -1049,7 +1045,24 @@ class ProductionParameterController(QObject):
             return
 
         actual_text = definition.format_actual(actual_value, request.expected_text)
-        passed = definition.compare(request.expected_value, request.expected_text, actual_value, actual_text)
+        normalized_expected_value = request.expected_value
+        normalized_actual_value = actual_value
+        if definition.parse_expected is not None:
+            try:
+                normalized_expected_value = definition.parse_expected(request.expected_text)
+            except Exception:
+                normalized_expected_value = request.expected_value
+            try:
+                normalized_actual_value = definition.parse_expected(actual_text)
+            except Exception:
+                normalized_actual_value = actual_value
+
+        passed = definition.compare(
+            normalized_expected_value,
+            request.expected_text,
+            normalized_actual_value,
+            actual_text,
+        )
         if definition.name == "UUID":
             self._last_verify_actual_uuid = int(actual_value)
             self._last_verify_actual_uuid_text = actual_text
@@ -1078,32 +1091,23 @@ class ProductionParameterController(QObject):
         self._send_next_parameter_verify_request()
 
     def _handle_runtime_packet_eeprom_save(self, packet: dict) -> None:
-        pending_save = self._pending_eeprom_save
-        if pending_save is None:
-            return
-        node_id, node_name = pending_save
-        sender = int(packet.get("sender", -1))
-        if sender != node_id:
-            self._finish_eeprom_save_failure(
-                f"EEPROM save response came from wrong node (expected Node {node_id}, got Node {sender})."
-            )
+        if self._pending_eeprom_save is None:
             return
 
         params = packet.get("params")
         if not isinstance(params, list):
-            self._finish_eeprom_save_failure("EEPROM save response payload is missing params.")
+            self._finish_eeprom_save_failure("EEPROM save ACK not received; check command payload and quiet mode.")
             return
         cmd = int(packet.get("cmd", -1))
-        decoded_ok, response_text, error = decode_eeprom_save_response([cmd, *params])
+        decoded_ok, _response_text, error = decode_eeprom_save_response([cmd, *params])
         if not decoded_ok:
-            self._finish_eeprom_save_failure(error or f"EEPROM save failed for Node {node_id} {node_name}.")
+            self._finish_eeprom_save_failure(error or "EEPROM save ACK not received; check command payload and quiet mode.")
             return
 
         self._eeprom_save_timer.stop()
         self._pending_eeprom_save = None
-        response_label = response_text or "ACK"
-        self.log_message.emit(f"[Production] EEPROM save confirmed for Node {node_id} {node_name}: {response_label}")
-        self.eeprom_save_finished.emit(True, f"EEPROM save completed for Node {node_id} {node_name}.")
+        self.log_message.emit("[Production] EEPROM save ACK received.")
+        self.eeprom_save_finished.emit(True, "EEPROM save ACK received.")
 
     def _handle_parameter_verify_timeout(self) -> None:
         request = self._pending_parameter_request
@@ -1132,18 +1136,15 @@ class ProductionParameterController(QObject):
         self._send_next_parameter_verify_request()
 
     def _handle_eeprom_save_timeout(self) -> None:
-        pending_save = self._pending_eeprom_save
-        if pending_save is None:
+        if self._pending_eeprom_save is None:
             return
-        node_id, node_name = pending_save
-        self._finish_eeprom_save_failure(f"Timed out waiting for EEPROM save response from Node {node_id} {node_name}.")
+        self.log_message.emit("[Production] Timed out waiting for EEPROM save ACK.")
+        self._finish_eeprom_save_failure("EEPROM save ACK not received; check command payload and quiet mode.")
 
     def _finish_eeprom_save_failure(self, reason: str) -> None:
-        pending_save = self._pending_eeprom_save
         self._eeprom_save_timer.stop()
         self._pending_eeprom_save = None
-        if pending_save is not None:
-            self.log_message.emit(f"[Production] {reason}")
+        self.log_message.emit(f"[Production] {reason}")
         self.eeprom_save_finished.emit(False, reason)
 
     def _resolve_runtime_for_parameter_operation(self) -> tuple[Any | None, Any | None, str | None]:

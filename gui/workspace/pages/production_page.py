@@ -59,6 +59,7 @@ ML20_NODE_MAP: dict[int, str] = {
 }
 _ML20_NODE_ORDER: tuple[int, ...] = tuple(ML20_NODE_MAP)
 RUNTIME_POLL_INTERVAL_MS = 1000
+EEPROM_SAVE_SETTLE_MS = 2000
 WORKBOOK_OUTPUT_PENDING = "Pending"
 
 
@@ -145,6 +146,9 @@ class ProductionPage(BaseWorkspacePage):
         self._workbook_loaded = False
         self._workbook_write_completed = False
         self._workbook_verification_passed = False
+        self._workbook_eeprom_save_pending = False
+        self._workbook_eeprom_save_failed = False
+        self._workbook_eeprom_settle_active = False
 
         self.add_weighted_row((self.communication_section, 1), (self.stage_section, 1))
         self.add_full_width(self.node_status_section)
@@ -155,6 +159,10 @@ class ProductionPage(BaseWorkspacePage):
         self._runtime_poll_timer.setInterval(RUNTIME_POLL_INTERVAL_MS)
         self._runtime_poll_timer.timeout.connect(self._refresh_runtime_panels)
         self._runtime_poll_timer.start()
+
+        self._eeprom_save_settle_timer = QTimer(self)
+        self._eeprom_save_settle_timer.setSingleShot(True)
+        self._eeprom_save_settle_timer.timeout.connect(self._handle_eeprom_save_settle_finished)
 
         self.uuid_section.set_workbook_output_path(WORKBOOK_OUTPUT_PENDING)
         self.uuid_section.set_workbook_path("")
@@ -290,6 +298,10 @@ class ProductionPage(BaseWorkspacePage):
             self._workbook_loaded = True
             self._workbook_write_completed = False
             self._workbook_verification_passed = False
+            self._workbook_eeprom_save_pending = False
+            self._workbook_eeprom_save_failed = False
+            self._workbook_eeprom_settle_active = False
+            self._eeprom_save_settle_timer.stop()
             self.uuid_section.set_workbook_path(path)
             self.uuid_section.set_sheet_groups(groups, active_group)
             self._result_logger.set_output_dir(Path(path).expanduser().resolve().parent)
@@ -300,6 +312,10 @@ class ProductionPage(BaseWorkspacePage):
             self._workbook_loaded = False
             self._workbook_write_completed = False
             self._workbook_verification_passed = False
+            self._workbook_eeprom_save_pending = False
+            self._workbook_eeprom_save_failed = False
+            self._workbook_eeprom_settle_active = False
+            self._eeprom_save_settle_timer.stop()
             self.console_message.emit(f"[Production] Failed to load IPQC workbook: {exc}")
             self._set_status_result("FAIL", "IPQC workbook load failed.")
             self.progress_section.append_step("IPQC workbook load failed", level="error")
@@ -374,6 +390,7 @@ class ProductionPage(BaseWorkspacePage):
         if success:
             self._workbook_write_completed = False
             self._workbook_verification_passed = False
+            self._workbook_eeprom_save_pending = True
             self._set_status_result("WRITE SENT", message)
             self.uuid_section.set_last_workbook_action(f"{labels} written to MCU; requesting EEPROM save")
             save_started = self._parameter_controller.save_parameters_to_eeprom(node_id, node_name)
@@ -389,6 +406,8 @@ class ProductionPage(BaseWorkspacePage):
         self._refresh_connection_status()
 
     def _handle_verify_uuid(self) -> None:
+        if self._workbook_eeprom_save_pending or self._workbook_eeprom_settle_active:
+            return
         try:
             node_id, node_name = self.test_control_section.selected_node()
         except RuntimeError as exc:
@@ -490,15 +509,34 @@ class ProductionPage(BaseWorkspacePage):
         if passed:
             self._workbook_write_completed = True
             self._workbook_verification_passed = False
+            self._workbook_eeprom_save_pending = False
+            self._workbook_eeprom_save_failed = False
+            self._workbook_eeprom_settle_active = True
             self.uuid_section.set_workbook_validation_ready()
             self.uuid_section.set_last_workbook_action("EEPROM save completed; ready for read-back verification")
-            self._set_status_result("READY", "EEPROM save completed; ready for read-back verification.")
+            self.progress_section.append_step("EEPROM save ACK received.", level="info")
+            self._set_status_result("READY", "EEPROM save completed; ready for read-back verification.", append_to_log=False)
+            self._eeprom_save_settle_timer.start(EEPROM_SAVE_SETTLE_MS)
         else:
             self._workbook_write_completed = False
             self._workbook_verification_passed = False
+            self._workbook_eeprom_save_pending = False
+            self._workbook_eeprom_save_failed = True
+            self._workbook_eeprom_settle_active = False
+            self._eeprom_save_settle_timer.stop()
             self.uuid_section.set_workbook_validation_result(False, reason)
             self.uuid_section.set_last_workbook_action(f"EEPROM save failed: {reason}")
-            self._set_status_result("FAIL", reason)
+            progress_message = reason
+            reason_lower = reason.lower()
+            if "ack not received" in reason_lower or "quiet mode" in reason_lower:
+                progress_message = "Timed out waiting for EEPROM save ACK."
+            self.progress_section.append_step(progress_message, level="error")
+            self._set_status_result("FAIL", reason, append_to_log=False)
+        self._refresh_workbook_action_states()
+
+    def _handle_eeprom_save_settle_finished(self) -> None:
+        self._eeprom_save_settle_timer.stop()
+        self._workbook_eeprom_settle_active = False
         self._refresh_workbook_action_states()
 
     def _handle_uuid_verification_finished(self, passed: bool, reason: str) -> None:
@@ -738,7 +776,12 @@ class ProductionPage(BaseWorkspacePage):
         )
         self.uuid_section.load_workbook_button.setEnabled(True)
         self.uuid_section.write_button.setEnabled(has_required_parameters)
-        self.uuid_section.verify_button.setEnabled(has_required_parameters)
+        self.uuid_section.verify_button.setEnabled(
+            has_required_parameters
+            and not self._workbook_eeprom_save_pending
+            and not self._workbook_eeprom_save_failed
+            and not self._workbook_eeprom_settle_active
+        )
         self.uuid_section.save_button.setEnabled(has_workbook and self._workbook_verification_passed)
 
     def _has_valid_workbook_parameter(self, definition: ParameterDefinition) -> bool:
@@ -767,10 +810,10 @@ class ProductionPage(BaseWorkspacePage):
             level = "info"
             log_message = f"{status}: {reason}"
             if normalized == "PASS":
-                level = "success"
+                level = "pass"
                 log_message = reason
             elif normalized in {"FAIL", "TIMEOUT", "REPORTING ERROR"}:
-                level = "error"
+                level = "fail"
                 log_message = reason
             self.progress_section.append_step(log_message, level=level)
         self._last_status_entry = entry
@@ -1543,13 +1586,13 @@ class _TestProgressSection(PanelFrame):
 
     def append_step(self, step: str, *, level: str = "info") -> None:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        color = None
+        color = "#000000"
         level_tag = "INFO"
         normalized = level.strip().lower()
-        if normalized == "success":
+        if normalized in {"success", "pass"}:
             color = "#2E7D32"
             level_tag = "PASS"
-        elif normalized == "error":
+        elif normalized in {"error", "fail"}:
             color = "#C62828"
             level_tag = "FAIL"
         plain_text = f"[{timestamp}] [{level_tag}] {step}"

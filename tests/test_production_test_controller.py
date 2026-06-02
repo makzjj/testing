@@ -18,12 +18,15 @@ from gui.workspace.pages.production_page import ProductionPage
 from gui.workspace.widgets import ResponsiveRow
 from gui.workspace.pages.production_parameter_controller import (
     EEPROM_SAVE_COMMAND,
+    SET_COMMAND_SUFFIX,
     ParameterDefinition,
     ProductionParameterController,
+    build_eeprom_save_payload,
     build_pwm_read_payload,
     build_pwm_write_payload,
     build_uuid_read_payload,
     build_uuid_write_payload,
+    decode_eeprom_save_response,
     decode_pwm_response,
     decode_uuid_response,
     default_workbook_parameter_definitions,
@@ -341,6 +344,9 @@ class ProductionTestControllerTests(unittest.TestCase):
             decode_interrupt_response([0x01, 0x00]),
             (True, {"int0_status": 1, "int1_status": 0}, ""),
         )
+        self.assertEqual(build_eeprom_save_payload(), [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX])
+        self.assertEqual(decode_eeprom_save_response([EEPROM_SAVE_COMMAND, 0x0A, 0x00]), (True, "ACK", ""))
+        self.assertFalse(decode_eeprom_save_response([EEPROM_SAVE_COMMAND, 0x0B, 0x00])[0])
 
     def test_uuid_0xe0_remains_supported_in_profile_when_expected_uuid_present(self) -> None:
         profile = build_basic_test_profile(6, "H", timeout_ms=100, expected_uuid=1223306010)
@@ -742,23 +748,126 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertTrue(runtime_window.backend_client.sent_commands)
             self.assertIn((3, build_uuid_write_payload(expected_uuid)), runtime_window.backend_client.sent_commands)
             self.assertIn((3, build_pwm_write_payload(100)), runtime_window.backend_client.sent_commands)
-            self.assertEqual(runtime_window.backend_client.sent_commands[-1], (3, [EEPROM_SAVE_COMMAND]))
-            self.assertTrue(page.uuid_section.verify_button.isEnabled())
+            self.assertEqual(
+                runtime_window.backend_client.sent_commands[-1],
+                (3, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]),
+            )
+            self.assertFalse(page.uuid_section.verify_button.isEnabled())
             self.assertFalse(page.uuid_section.save_button.isEnabled())
+            sent_count = len(runtime_window.backend_client.sent_commands)
+            page._handle_verify_uuid()
+            self._app.processEvents()
+            self.assertEqual(len(runtime_window.backend_client.sent_commands), sent_count)
             runtime_window.packet_received.emit(
                 {
                     "status": "ok",
                     "type": "can_over_uart",
                     "sender": 3,
                     "cmd": EEPROM_SAVE_COMMAND,
-                    "params": [0x3A, 0x41, 0x43, 0x4B],
+                    "params": [0x0A, 0x00],
                 }
             )
             self._app.processEvents()
             self.assertEqual(page.uuid_section.workbook_validation_text, "Workbook Validation: READY")
-            self.assertTrue(page.uuid_section.verify_button.isEnabled())
+            self.assertFalse(page.uuid_section.verify_button.isEnabled())
             self.assertFalse(page.uuid_section.save_button.isEnabled())
-            self.assertIn("EEPROM save requested", page.progress_section.to_plain_text())
+            self.assertIn("[INFO] EEPROM save ACK received.", page.progress_section.to_plain_text())
+
+            page._handle_eeprom_save_settle_finished()
+            self._app.processEvents()
+            self.assertTrue(page.uuid_section.verify_button.isEnabled())
+
+            page._handle_verify_uuid()
+            self._app.processEvents()
+            self.assertEqual(runtime_window.backend_client.sent_commands[-1], (3, [0xE0, 0x3F]))
+
+            runtime_window.packet_received.emit(
+                {
+                    "status": "ok",
+                    "type": "can_over_uart",
+                    "sender": 3,
+                    "cmd": 0xE0,
+                    "params": [0x3A, *build_uuid_write_payload(expected_uuid)[2:]],
+                }
+            )
+            self._app.processEvents()
+            self.assertEqual(runtime_window.backend_client.sent_commands[-1], (3, [0x85]))
+            runtime_window.packet_received.emit(
+                {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0x85, "params": [0x00, 0x64]}
+            )
+            self._app.processEvents()
+
+            output_sheet = page._ipqc_excel_adapter._workbook["3X"]
+            self.assertEqual(output_sheet["C4"].value, str(expected_uuid))
+            self.assertEqual(output_sheet["D4"].value, "PASS")
+            self.assertEqual(output_sheet["C5"].value, "100")
+            self.assertEqual(output_sheet["D5"].value, "PASS")
+            self.assertEqual(page.result_summary_section._status_label.text(), "PASS")
+            self.assertEqual(page.uuid_section.workbook_validation_text, "Workbook Validation: PASSED")
+            self.assertTrue(page.uuid_section.save_button.isEnabled())
+            self.assertEqual(page.progress_section.to_plain_text().count("[PASS] Workbook parameter read-back verification"), 1)
+            self.assertIsNone(page._result_logger.result_csv_path)
+
+    @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook write wiring tests.")
+    def test_production_page_write_uuid_timeout_disables_verify_and_reports_quiet_mode_issue(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        runtime_window.node_status[3] = {
+            "connected": True,
+            "firmware": "v1.0.0",
+            "uuid": "",
+            "type": "X",
+            "interrupt": "OK",
+        }
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+        page._parameter_controller._timeout_ms = 20
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            self._create_ipqc_workbook(workbook_path, with_optional_fields=False)
+
+            with patch(
+                "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
+                return_value=(str(workbook_path), "Excel Files (*.xlsx)"),
+            ):
+                page._handle_load_ipqc_workbook()
+                self._app.processEvents()
+
+            page._handle_write_uuid()
+            self._app.processEvents()
+
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline and page.uuid_section.workbook_validation_text != "Workbook Validation: FAILED (EEPROM save ACK not received; check command payload and quiet mode.)":
+                self._app.processEvents()
+                time.sleep(0.01)
+
+            self.assertEqual(
+                page.uuid_section.workbook_validation_text,
+                "Workbook Validation: FAILED (EEPROM save ACK not received; check command payload and quiet mode.)",
+            )
+            self.assertFalse(page.uuid_section.verify_button.isEnabled())
+            self.assertIn("EEPROM save ACK not received; check command payload and quiet mode.", page.result_summary_section._reason_label.text())
+            timeout_line = next(
+                line for line in page.progress_section.to_plain_text().splitlines() if "Timed out waiting for EEPROM save ACK." in line
+            )
+            self.assertIn("[FAIL] Timed out waiting for EEPROM save ACK.", timeout_line)
+            self.assertNotIn("Node", timeout_line)
+            self.assertNotIn("Axis", timeout_line)
+
+    def test_progress_log_coloring_uses_black_green_and_red(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        page.progress_section.clear_log()
+        page.progress_section.append_step("Info entry")
+        page.progress_section.append_step("Pass entry", level="pass")
+        page.progress_section.append_step("Fail entry", level="fail")
+
+        html = page.progress_section.to_html().lower()
+        self.assertIn("#000000", html)
+        self.assertIn("#2e7d32", html)
+        self.assertIn("#c62828", html)
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook UUID verify tests.")
     def test_production_page_verify_after_load_without_prior_write_sets_passed_and_enables_save(self) -> None:
@@ -955,10 +1064,16 @@ class ProductionPageWorkflowTests(unittest.TestCase):
 
             page._handle_write_uuid()
             self._app.processEvents()
-            self.assertEqual(runtime_window.backend_client.sent_commands[-1], (3, [EEPROM_SAVE_COMMAND]))
-            runtime_window.packet_received.emit(
-                {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": EEPROM_SAVE_COMMAND, "params": [0x3A, 0x41, 0x43, 0x4B]}
+            self.assertEqual(
+                runtime_window.backend_client.sent_commands[-1],
+                (3, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]),
             )
+            runtime_window.packet_received.emit(
+                {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": EEPROM_SAVE_COMMAND, "params": [0x0A, 0x00]}
+            )
+            self._app.processEvents()
+            self.assertFalse(page.uuid_section.verify_button.isEnabled())
+            page._handle_eeprom_save_settle_finished()
             self._app.processEvents()
             self.assertTrue(page.uuid_section.verify_button.isEnabled())
 
@@ -1021,11 +1136,18 @@ class ProductionPageWorkflowTests(unittest.TestCase):
 
             page._handle_write_uuid()
             self._app.processEvents()
-            self.assertEqual(runtime_window.backend_client.sent_commands[-1], (3, [EEPROM_SAVE_COMMAND]))
+            self.assertEqual(
+                runtime_window.backend_client.sent_commands[-1],
+                (3, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]),
+            )
             runtime_window.packet_received.emit(
-                {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": EEPROM_SAVE_COMMAND, "params": [0x3A, 0x41, 0x43, 0x4B]}
+                {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": EEPROM_SAVE_COMMAND, "params": [0x0A, 0x00]}
             )
             self._app.processEvents()
+            self.assertFalse(page.uuid_section.verify_button.isEnabled())
+            page._handle_eeprom_save_settle_finished()
+            self._app.processEvents()
+            self.assertTrue(page.uuid_section.verify_button.isEnabled())
             page._handle_verify_uuid()
             self._app.processEvents()
             self.assertEqual(runtime_window.backend_client.sent_commands[-1], (3, [0xE0, 0x3F]))
@@ -1080,11 +1202,18 @@ class ProductionPageWorkflowTests(unittest.TestCase):
 
             page._handle_write_uuid()
             self._app.processEvents()
-            self.assertEqual(runtime_window.backend_client.sent_commands[-1], (3, [EEPROM_SAVE_COMMAND]))
+            self.assertEqual(
+                runtime_window.backend_client.sent_commands[-1],
+                (3, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]),
+            )
             runtime_window.packet_received.emit(
-                {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": EEPROM_SAVE_COMMAND, "params": [0x3A, 0x41, 0x43, 0x4B]}
+                {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": EEPROM_SAVE_COMMAND, "params": [0x0A, 0x00]}
             )
             self._app.processEvents()
+            self.assertFalse(page.uuid_section.verify_button.isEnabled())
+            page._handle_eeprom_save_settle_finished()
+            self._app.processEvents()
+            self.assertTrue(page.uuid_section.verify_button.isEnabled())
             page._handle_verify_uuid()
             self._app.processEvents()
             self.assertEqual(runtime_window.backend_client.sent_commands[-1], (3, [0xE0, 0x3F]))
@@ -1132,11 +1261,18 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertIn(output_sheet["D5"].value, (None, ""))
             page._handle_write_uuid()
             self._app.processEvents()
-            self.assertEqual(runtime_window.backend_client.sent_commands[-1], (3, [EEPROM_SAVE_COMMAND]))
+            self.assertEqual(
+                runtime_window.backend_client.sent_commands[-1],
+                (3, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]),
+            )
             runtime_window.packet_received.emit(
-                {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": EEPROM_SAVE_COMMAND, "params": [0x3A, 0x41, 0x43, 0x4B]}
+                {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": EEPROM_SAVE_COMMAND, "params": [0x0A, 0x00]}
             )
             self._app.processEvents()
+            self.assertFalse(page.uuid_section.verify_button.isEnabled())
+            page._handle_eeprom_save_settle_finished()
+            self._app.processEvents()
+            self.assertTrue(page.uuid_section.verify_button.isEnabled())
             page._handle_verify_uuid()
             self._app.processEvents()
             self.assertEqual(runtime_window.backend_client.sent_commands[-1], (3, [0xE0, 0x3F]))
@@ -1180,14 +1316,17 @@ class ProductionPageWorkflowTests(unittest.TestCase):
 
             page._handle_write_uuid()
             self._app.processEvents()
-            self.assertEqual(runtime_window.backend_client.sent_commands[-1], (3, [EEPROM_SAVE_COMMAND]))
+            self.assertEqual(
+                runtime_window.backend_client.sent_commands[-1],
+                (3, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]),
+            )
             page._parameter_controller._handle_eeprom_save_timeout()
             self._app.processEvents()
 
             self.assertEqual(page.result_summary_section._status_label.text(), "FAIL")
             self.assertIn("EEPROM save", page.result_summary_section._reason_label.text())
             self.assertIn("Workbook Validation: FAILED", page.uuid_section.workbook_validation_text)
-            self.assertTrue(page.uuid_section.verify_button.isEnabled())
+            self.assertFalse(page.uuid_section.verify_button.isEnabled())
             self.assertFalse(page.uuid_section.save_button.isEnabled())
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook save tests.")
@@ -1300,6 +1439,75 @@ class ProductionParameterControllerTests(unittest.TestCase):
         self.assertTrue(events[-1][0])
         self.assertEqual(controller.last_verify_actual_pwm, 80)
         self.assertEqual(controller.last_verify_actual_pwm_text, "80")
+
+    def test_verify_pwm_accepts_expected_values_as_string_and_int(self) -> None:
+        definitions = {definition.name: definition for definition in default_workbook_parameter_definitions()}
+        for expected_input in ("10", 10):
+            with self.subTest(expected_input=expected_input):
+                runtime_window = _FakeRuntimeWindow()
+                bridge = _FakeBridge(runtime_window)
+                controller = ProductionParameterController(bridge, timeout_ms=100)
+                events: list[tuple[bool, str, object]] = []
+                controller.parameter_verification_finished.connect(lambda passed, reason, results: events.append((passed, reason, results)))
+
+                request = controller.build_parameter_request(definitions["PWM"], 6, "H", expected_input)
+                self.assertTrue(controller.verify_parameters([request]))
+                self.assertEqual(runtime_window.backend_client.sent_commands[0], (6, [0x85]))
+                runtime_window.packet_received.emit(
+                    {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x85, "params": [0x00, 0x0A]}
+                )
+                self._app.processEvents()
+
+                self.assertTrue(events)
+                self.assertTrue(events[-1][0])
+                result = events[-1][2][0]
+                self.assertEqual(result.definition.name, "PWM")
+                self.assertEqual(result.actual_text, "10")
+
+    def test_verify_pwm_fails_when_actual_value_differs(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        controller = ProductionParameterController(bridge, timeout_ms=100)
+        definitions = {definition.name: definition for definition in default_workbook_parameter_definitions()}
+        events: list[tuple[bool, str, object]] = []
+        controller.parameter_verification_finished.connect(lambda passed, reason, results: events.append((passed, reason, results)))
+
+        request = controller.build_parameter_request(definitions["PWM"], 6, "H", "10")
+        self.assertTrue(controller.verify_parameters([request]))
+        self.assertEqual(runtime_window.backend_client.sent_commands[0], (6, [0x85]))
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x85, "params": [0x00, 0x50]}
+        )
+        self._app.processEvents()
+
+        self.assertTrue(events)
+        self.assertFalse(events[-1][0])
+        self.assertIn("expected 10, actual 80", events[-1][1])
+
+    def test_verify_loaded_uuid_times_out_when_response_is_missing(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        controller = ProductionParameterController(bridge, timeout_ms=20)
+        events: list[tuple[bool, str]] = []
+        controller.verification_finished.connect(lambda passed, reason: events.append((passed, reason)))
+
+        csv_text = "node_id,node_name,uuid\n6,H,1223306010\n"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "uuid_valid.csv"
+            csv_path.write_text(csv_text, encoding="utf-8")
+            self.assertTrue(controller.load_uuid_csv(str(csv_path)))
+
+        self.assertTrue(controller.verify_loaded_uuid(6, "H"))
+        self.assertEqual(runtime_window.backend_client.sent_commands[0], (6, [0xE0, 0x3F]))
+
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline and not events:
+            self._app.processEvents()
+            time.sleep(0.01)
+
+        self.assertTrue(events)
+        self.assertFalse(events[-1][0])
+        self.assertIn("Timed out", events[-1][1])
 
     def test_parameter_pipeline_verifies_uuid_and_pwm_with_shared_definitions(self) -> None:
         runtime_window = _FakeRuntimeWindow()
