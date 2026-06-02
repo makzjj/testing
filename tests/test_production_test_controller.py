@@ -20,6 +20,7 @@ from gui.workspace.pages.production_parameter_controller import (
     EEPROM_SAVE_COMMAND,
     SET_COMMAND_SUFFIX,
     ParameterDefinition,
+    ParameterVerificationResult,
     ProductionParameterController,
     build_eeprom_save_payload,
     build_pwm_read_payload,
@@ -1326,6 +1327,38 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertEqual(page.result_summary_section._status_label.text(), "FAIL")
             self.assertIn("EEPROM save", page.result_summary_section._reason_label.text())
             self.assertIn("Workbook Validation: FAILED", page.uuid_section.workbook_validation_text)
+
+    def test_production_page_logs_mixed_parameter_results_with_pass_and_fail_levels(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+        definitions = {definition.name: definition for definition in default_workbook_parameter_definitions()}
+        results = [
+            ParameterVerificationResult(
+                definition=definitions["UUID"],
+                expected_text="1223303010",
+                actual_text="",
+                passed=False,
+                reason="S/N read-back verification - expected 1223303010, actual timeout",
+            ),
+            ParameterVerificationResult(
+                definition=definitions["PWM"],
+                expected_text="10",
+                actual_text="10",
+                passed=True,
+                reason="PWM read-back verification",
+            ),
+        ]
+
+        page._handle_parameter_verification_finished(
+            False,
+            "S/N read-back verification - expected 1223303010, actual timeout",
+            results,
+        )
+
+        log_text = page.progress_section.to_plain_text()
+        self.assertIn("[FAIL] UUID read-back verification - expected 1223303010, actual timeout", log_text)
+        self.assertIn("[PASS] PWM read-back verification - expected 10, actual 10", log_text)
             self.assertFalse(page.uuid_section.verify_button.isEnabled())
             self.assertFalse(page.uuid_section.save_button.isEnabled())
 
@@ -1571,6 +1604,114 @@ class ProductionParameterControllerTests(unittest.TestCase):
 
         self.assertTrue(events[-1][0])
         self.assertEqual(events[-1][2][0].definition.name, "DUMMY")
+
+    def test_parameter_pipeline_dummy_definition_mismatch_fails(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        controller = ProductionParameterController(bridge, timeout_ms=100)
+        dummy = ParameterDefinition(
+            name="DUMMY",
+            expected_cell="B9",
+            actual_cell="C9",
+            result_cell="D9",
+            parse_expected=lambda value: int(str(value).strip()),
+            build_write_command=lambda value: [0x91, int(value) & 0xFF],
+            build_read_command=lambda: [0x92],
+            response_command=0x92,
+            decode_response=lambda payload: (True, payload[1], "") if len(payload) > 1 else (False, None, "short"),
+            format_actual=lambda actual, _expected: str(actual),
+            compare=lambda expected, _expected_text, actual, _actual_text: int(expected) == int(actual),
+        )
+        request = controller.build_parameter_request(dummy, 6, "H", "7")
+        events: list[tuple[bool, str, object]] = []
+        controller.parameter_verification_finished.connect(lambda passed, reason, results: events.append((passed, reason, results)))
+
+        self.assertTrue(controller.verify_parameters([request]))
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x92, "params": [0x09]}
+        )
+        self._app.processEvents()
+
+        self.assertTrue(events)
+        self.assertFalse(events[-1][0])
+        self.assertIn("expected 7, actual 9", events[-1][1])
+
+    def test_parameter_pipeline_dummy_string_definition_uses_shared_flow(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        controller = ProductionParameterController(bridge, timeout_ms=100)
+        dummy = ParameterDefinition(
+            name="DUMMY-ID",
+            expected_cell="B10",
+            actual_cell="C10",
+            result_cell="D10",
+            parse_expected=lambda value: str(value).strip().upper(),
+            build_write_command=None,
+            build_read_command=lambda: [0x93],
+            response_command=0x93,
+            decode_response=lambda payload: (True, chr(payload[1]), "") if len(payload) > 1 else (False, None, "short"),
+            format_actual=lambda actual, _expected: str(actual),
+            compare=lambda expected, _expected_text, actual, _actual_text: str(expected) == str(actual),
+        )
+        request = controller.build_parameter_request(dummy, 6, "H", " a ")
+        events: list[tuple[bool, str, object]] = []
+        controller.parameter_verification_finished.connect(lambda passed, reason, results: events.append((passed, reason, results)))
+
+        self.assertTrue(controller.verify_parameters([request]))
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x93, "params": [ord("A")]}
+        )
+        self._app.processEvents()
+
+        self.assertTrue(events)
+        self.assertTrue(events[-1][0])
+        self.assertEqual(events[-1][2][0].actual_text, "A")
+
+    def test_parameter_pipeline_uuid_timeout_still_fails_with_timeout(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        controller = ProductionParameterController(bridge, timeout_ms=20)
+        definitions = {definition.name: definition for definition in default_workbook_parameter_definitions()}
+        request = controller.build_parameter_request(definitions["UUID"], 6, "H", "1223306010")
+        events: list[tuple[bool, str, object]] = []
+        controller.parameter_verification_finished.connect(lambda passed, reason, results: events.append((passed, reason, results)))
+
+        self.assertTrue(controller.verify_parameters([request]))
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline and not events:
+            self._app.processEvents()
+            time.sleep(0.01)
+
+        self.assertTrue(events)
+        self.assertFalse(events[-1][0])
+        self.assertIn("actual timeout", events[-1][1])
+
+    def test_verify_parameters_blocks_during_eeprom_settle_and_allows_after(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        controller = ProductionParameterController(bridge, timeout_ms=100)
+        definitions = {definition.name: definition for definition in default_workbook_parameter_definitions()}
+        request = controller.build_parameter_request(definitions["UUID"], 6, "H", "1223306010")
+        events: list[tuple[bool, str, object]] = []
+        controller.parameter_verification_finished.connect(lambda passed, reason, results: events.append((passed, reason, results)))
+
+        self.assertTrue(controller.save_parameters_to_eeprom(6, "H"))
+        self.assertEqual(runtime_window.backend_client.sent_commands[-1], (6, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]))
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": EEPROM_SAVE_COMMAND, "params": [0x0A, 0x00]}
+        )
+        self._app.processEvents()
+
+        sent_before_verify = len(runtime_window.backend_client.sent_commands)
+        self.assertFalse(controller.verify_parameters([request]))
+        self.assertEqual(len(runtime_window.backend_client.sent_commands), sent_before_verify)
+        self.assertTrue(events)
+        self.assertFalse(events[-1][0])
+        self.assertIn("settle is still active", events[-1][1])
+
+        controller._handle_eeprom_settle_timeout()
+        self.assertTrue(controller.verify_parameters([request]))
+        self.assertEqual(runtime_window.backend_client.sent_commands[-1], (6, [0xE0, 0x3F]))
 
     def test_load_uuid_csv_validation_blocks_invalid_rows(self) -> None:
         runtime_window = _FakeRuntimeWindow()

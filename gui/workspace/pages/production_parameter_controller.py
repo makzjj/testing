@@ -20,6 +20,7 @@ PWM_GET_COMMAND = 0x85
 EEPROM_SAVE_COMMAND = 0xC5
 SET_COMMAND_SUFFIX = 0x21
 UUID_VERIFY_TIMEOUT_MS = 3000
+EEPROM_SAVE_SETTLE_MS = 2000
 UUID_MAX_40BIT_VALUE = 0xFFFFFFFFFF
 UUID_DECIMAL_LENGTH = 10
 PWM_MAX_16BIT_VALUE = 0xFFFF
@@ -342,7 +343,11 @@ class ProductionParameterController(QObject):
         self._eeprom_save_timer = QTimer(self)
         self._eeprom_save_timer.setSingleShot(True)
         self._eeprom_save_timer.timeout.connect(self._handle_eeprom_save_timeout)
+        self._eeprom_settle_timer = QTimer(self)
+        self._eeprom_settle_timer.setSingleShot(True)
+        self._eeprom_settle_timer.timeout.connect(self._handle_eeprom_settle_timeout)
         self._pending_eeprom_save: tuple[int, str] | None = None
+        self._eeprom_settle_active = False
 
     @property
     def csv_path(self) -> Path | None:
@@ -513,6 +518,8 @@ class ProductionParameterController(QObject):
         assert backend_client is not None
 
         self._attach_runtime_window(runtime_window)
+        self._eeprom_settle_timer.stop()
+        self._eeprom_settle_active = False
         self._pending_eeprom_save = (node_id, supported_name or str(node_name))
         self._eeprom_save_timer.start(self._timeout_ms)
         payload = build_eeprom_save_payload()
@@ -530,6 +537,13 @@ class ProductionParameterController(QObject):
     def verify_parameters(self, requests: list[ParameterRequest] | tuple[ParameterRequest, ...]) -> bool:
         if not requests:
             self.parameter_verification_finished.emit(False, "No workbook parameters are available to verify.", [])
+            return False
+        if self._pending_eeprom_save is not None or self._eeprom_settle_active:
+            self.parameter_verification_finished.emit(
+                False,
+                "EEPROM save settle is still active; wait before starting read-back verification.",
+                [],
+            )
             return False
         first = requests[0]
         _supported_name, support_error = self._resolve_supported_node(first.node_id, first.node_name)
@@ -1106,6 +1120,8 @@ class ProductionParameterController(QObject):
 
         self._eeprom_save_timer.stop()
         self._pending_eeprom_save = None
+        self._eeprom_settle_active = True
+        self._eeprom_settle_timer.start(EEPROM_SAVE_SETTLE_MS)
         self.log_message.emit("[Production] EEPROM save ACK received.")
         self.eeprom_save_finished.emit(True, "EEPROM save ACK received.")
 
@@ -1141,9 +1157,15 @@ class ProductionParameterController(QObject):
         self.log_message.emit("[Production] Timed out waiting for EEPROM save ACK.")
         self._finish_eeprom_save_failure("EEPROM save ACK not received; check command payload and quiet mode.")
 
+    def _handle_eeprom_settle_timeout(self) -> None:
+        self._eeprom_settle_timer.stop()
+        self._eeprom_settle_active = False
+
     def _finish_eeprom_save_failure(self, reason: str) -> None:
         self._eeprom_save_timer.stop()
+        self._eeprom_settle_timer.stop()
         self._pending_eeprom_save = None
+        self._eeprom_settle_active = False
         self.log_message.emit(f"[Production] {reason}")
         self.eeprom_save_finished.emit(False, reason)
 

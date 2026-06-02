@@ -497,10 +497,13 @@ class ProductionPage(BaseWorkspacePage):
         else:
             self._set_status_result("FAIL", reason, append_to_log=False)
             for result in results:
-                actual_text = result.actual_text if result.actual_text else "timeout"
+                if result.actual_text:
+                    actual_text = result.actual_text
+                else:
+                    actual_text = "timeout"
                 self.progress_section.append_step(
                     f"{result.definition.name} read-back verification - expected {result.expected_text}, actual {actual_text}",
-                    level="error",
+                    level="pass" if result.passed else "error",
                 )
         self._pending_parameter_requests = []
         self._refresh_workbook_action_states()
