@@ -31,7 +31,7 @@ def _suppress_message_boxes(monkeypatch):
 
 def test_run_with_selected_node_starts_controller(monkeypatch):
     _suppress_message_boxes(monkeypatch)
-    popup = SingleAxisFunctionalPopup(node_options=[(3, "AxisX")])
+    popup = SingleAxisFunctionalPopup(node_options=[(3, "AxisX")], allow_safe_tx=True)
     # select node 3 (index 1, since 0 is placeholder)
     popup.node_combo.setCurrentIndex(1)
     popup._handle_run_clicked()
@@ -65,7 +65,7 @@ def test_run_without_node_shows_warning_and_not_start(monkeypatch):
 
 def test_status_and_command_logging(monkeypatch):
     _suppress_message_boxes(monkeypatch)
-    popup = SingleAxisFunctionalPopup(node_options=[(1, "Axis")])
+    popup = SingleAxisFunctionalPopup(node_options=[(1, "Axis")], allow_safe_tx=True)
     popup.controller.status_changed("TEST_STATUS")
     assert "TEST_STATUS" in popup.status_block.toPlainText()
 
@@ -77,7 +77,7 @@ def test_status_and_command_logging(monkeypatch):
 
 def test_flag_leds_light_on_events(monkeypatch):
     _suppress_message_boxes(monkeypatch)
-    popup = SingleAxisFunctionalPopup(node_options=[(2, "Axis")])
+    popup = SingleAxisFunctionalPopup(node_options=[(2, "Axis")], allow_safe_tx=True)
     popup.node_combo.setCurrentIndex(1)
     popup._handle_run_clicked()
 
@@ -90,7 +90,7 @@ def test_flag_leds_light_on_events(monkeypatch):
 
 def test_position_and_range_difference_updates(monkeypatch):
     _suppress_message_boxes(monkeypatch)
-    popup = SingleAxisFunctionalPopup(node_options=[(4, "Axis")])
+    popup = SingleAxisFunctionalPopup(node_options=[(4, "Axis")], allow_safe_tx=True)
     # Position direct callback
     popup.controller.position_changed(123)
     assert popup.position_field.text() == "123"
@@ -108,7 +108,7 @@ def test_position_and_range_difference_updates(monkeypatch):
 
 def test_pass_triggers_sampling_prompt_and_reenables(monkeypatch):
     _suppress_message_boxes(monkeypatch)
-    popup = SingleAxisFunctionalPopup(node_options=[(5, "Axis")])
+    popup = SingleAxisFunctionalPopup(node_options=[(5, "Axis")], allow_safe_tx=True)
     popup.node_combo.setCurrentIndex(1)
     popup._handle_run_clicked()
     called = {"ask": False}
@@ -130,10 +130,30 @@ def test_failed_marks_failed_and_no_sampling_prompt(monkeypatch):
         raise AssertionError("ask_start_sampling should not be called on failure")
 
     monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
-    popup = SingleAxisFunctionalPopup(node_options=[(6, "Axis")])
+    popup = SingleAxisFunctionalPopup(node_options=[(6, "Axis")], allow_safe_tx=True)
     popup.node_combo.setCurrentIndex(1)
     popup._handle_run_clicked()
     popup.ask_start_sampling = bad_ask  # type: ignore[assignment]
     popup.controller.test_failed("oops")
     assert popup._is_running is False
     assert popup.run_button.isEnabled() and popup.node_combo.isEnabled()
+
+
+def test_run_with_selected_node_but_no_backend_aborts_normally(monkeypatch):
+    # Normal UI behavior (allow_safe_tx=False): do not start without connection
+    calls = {"warn": 0}
+
+    def fake_warn(*a, **k):
+        calls["warn"] += 1
+        return None
+
+    monkeypatch.setattr(QMessageBox, "warning", fake_warn)
+    popup = SingleAxisFunctionalPopup(node_options=[(9, "AxisZ")])
+    popup.node_combo.setCurrentIndex(1)
+    popup._handle_run_clicked()
+
+    assert popup._is_running is False
+    assert popup.run_button.isEnabled() and popup.node_combo.isEnabled()
+    text = popup.status_block.toPlainText()
+    assert "Transport not connected. Functional test not started." in text
+    assert calls["warn"] == 1

@@ -261,10 +261,22 @@ class ProductionPage(BaseWorkspacePage):
 
     def _handle_single_axis_test_requested(self) -> None:
         if self._single_axis_popup is None:
-            self._single_axis_popup = SingleAxisFunctionalPopup(self, node_options=get_ml20_testable_nodes())
+            # Pass the workspace bridge so the popup can discover the already-connected backend
+            self._single_axis_popup = SingleAxisFunctionalPopup(
+                self,
+                node_options=get_ml20_testable_nodes(),
+                bridge=self._bridge,
+            )
         self._single_axis_popup.show()
         self._single_axis_popup.raise_()
         self._single_axis_popup.activateWindow()
+
+    # Minimal passthrough to allow popups to query the runtime window via parent
+    def get_runtime_window(self, *, create_if_missing: bool = False):  # pragma: no cover - thin delegate
+        try:
+            return self._bridge.get_runtime_window(create_if_missing=create_if_missing)
+        except Exception:
+            return None
 
     def _handle_performance_test_requested(self) -> None:
         self.progress_section.append_step("Performance Test UI is present but command flow is not enabled yet")
