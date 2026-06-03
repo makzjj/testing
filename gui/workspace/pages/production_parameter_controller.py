@@ -955,28 +955,44 @@ class ProductionParameterController(QObject):
         if pending_row is None:
             return
         if sender != pending_row.node_id:
-            self._finish_pwm_verify_failure(
-                f"PWM response came from wrong node (expected Node {pending_row.node_id}, got Node {sender})."
+            # Ignore packet from a different node; do not fail active verify
+            raw_cmd = int(packet.get("cmd", -1))
+            raw_params = packet.get("params") or []
+            raw_hex = " ".join(f"{int(v) & 0xFF:02X}" for v in [raw_cmd, *raw_params])
+            self.log_message.emit(
+                f"[Production][DEBUG] Ignored PWM packet from Node {sender:02d} (expected {pending_row.node_id:02d}), cmd {raw_cmd:02X}, raw: {raw_hex}"
             )
             return
 
         cmd = int(packet.get("cmd", -1))
         params = packet.get("params")
         if not isinstance(params, list):
-            self._finish_pwm_verify_failure("PWM response payload is missing params.")
+            # Malformed; ignore and do not fail verify
+            self.log_message.emit(
+                f"[Production][DEBUG] Ignored malformed PWM packet from Node {sender:02d}: missing params"
+            )
             return
         decoded_ok, actual_pwm, error = decode_pwm_response([cmd, *params])
         if not decoded_ok:
-            self._finish_pwm_verify_failure(error)
+            # Wrong command or invalid payload; ignore and do not fail verify
+            self.log_message.emit(
+                f"[Production][DEBUG] Ignored non-PWM packet during PWM verify from Node {sender:02d}: {error or 'decode failed'}"
+            )
             return
         if actual_pwm is None:
-            self._finish_pwm_verify_failure("PWM response decode failed.")
+            # Should not happen if decoded_ok, but guard anyway
+            self.log_message.emit(
+                f"[Production][DEBUG] Ignored undecodable PWM packet from Node {sender:02d}: actual is None"
+            )
             return
 
         self._last_verify_actual_pwm = actual_pwm
         self._last_verify_actual_pwm_text = f"{actual_pwm:d}"
         self._last_verify_pwm_raw_response_hex = " ".join(f"{value & 0xFF:02X}" for value in [cmd, *params])
-        self.log_message.emit(f"[Production] PWM read-back received for Node {pending_row.node_id:02d}: {actual_pwm}")
+        # Include raw RX details for traceability
+        self.log_message.emit(
+            f"[Production] PWM RX <- Node {pending_row.node_id:02d}, cmd {cmd:02X}, raw: {self._last_verify_pwm_raw_response_hex} -> {actual_pwm}"
+        )
 
         expected_pwm_text = pending_row.uuid_text
         if self._last_verify_actual_pwm_text != expected_pwm_text:
@@ -1004,7 +1020,13 @@ class ProductionParameterController(QObject):
         if self._pending_pwm_row is None:
             return
         row = self._pending_pwm_row
-        self._finish_pwm_verify_failure(f"Timed out waiting for PWM read-back from Node {row.node_id} {row.node_name}.")
+        # Clear last-actual fields to avoid any reuse after timeout
+        self._last_verify_actual_pwm = None  # type: ignore[assignment]
+        self._last_verify_actual_pwm_text = None  # type: ignore[assignment]
+        self._last_verify_pwm_raw_response_hex = ""
+        self._finish_pwm_verify_failure(
+            f"Timed out waiting for PWM read-back from Node {row.node_id} {row.node_name}."
+        )
 
     def _finish_verify_failure(self, reason: str) -> None:
         self._verify_timer.stop()
@@ -1081,6 +1103,15 @@ class ProductionParameterController(QObject):
         definition = request.definition
         sender = int(packet.get("sender", -1))
         if sender != request.node_id:
+            # For PWM we ignore stray packets from other nodes; for UUID/others keep failure behavior
+            if definition.name == "PWM":
+                raw_cmd = int(packet.get("cmd", -1))
+                raw_params = packet.get("params") or []
+                raw_hex = " ".join(f"{int(v) & 0xFF:02X}" for v in [raw_cmd, *raw_params])
+                self.log_message.emit(
+                    f"[Production][DEBUG] Ignored {definition.name} packet from Node {sender:02d} (expected {request.node_id:02d}), cmd {raw_cmd:02X}, raw: {raw_hex}"
+                )
+                return
             self._record_parameter_failure(
                 f"{definition.label} response came from wrong node (expected Node {request.node_id}, got Node {sender})."
             )
@@ -1094,9 +1125,20 @@ class ProductionParameterController(QObject):
         assert definition.decode_response is not None
         decoded_ok, actual_value, error = definition.decode_response([cmd, *params])
         if not decoded_ok:
+            # If wrong command during PWM verify, ignore; else treat as failure
+            if definition.name == "PWM":
+                self.log_message.emit(
+                    f"[Production][DEBUG] Ignored non-{definition.name} packet during verify from Node {sender:02d}: {error or 'decode failed'}"
+                )
+                return
             self._record_parameter_failure(error or f"{definition.label} response decode failed.")
             return
         if actual_value is None:
+            if definition.name == "PWM":
+                self.log_message.emit(
+                    f"[Production][DEBUG] Ignored undecodable {definition.name} packet from Node {sender:02d}: actual is None"
+                )
+                return
             self._record_parameter_failure(f"{definition.label} response decode failed.")
             return
 
@@ -1127,6 +1169,10 @@ class ProductionParameterController(QObject):
             self._last_verify_actual_pwm = int(actual_value)
             self._last_verify_actual_pwm_text = actual_text
             self._last_verify_pwm_raw_response_hex = " ".join(f"{value & 0xFF:02X}" for value in [cmd, *params])
+            # Log raw RX context so we can trace what produced the value
+            self.log_message.emit(
+                f"[Production] PWM RX <- Node {request.node_id:02d}, cmd {cmd:02X}, raw: {self._last_verify_pwm_raw_response_hex} -> {int(actual_value)}"
+            )
 
         if passed:
             reason = f"{definition.label} read-back verification"

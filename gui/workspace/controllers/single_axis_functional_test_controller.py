@@ -25,7 +25,14 @@ from data.binary_cmd_builders import (
     build_stopmotor,
     build_nodeconfig_query_payload,
 )
-from data.binary_cmd_parser import decode_command
+from data.binary_cmd_parser import (
+    decode_command,
+    decode_nodeconfig_home_sensor,
+)
+from data.binary_cmd_builders import (
+    build_lflag_query_payload,
+    build_rflag_query_payload,
+)
 
 
 @dataclass
@@ -87,6 +94,9 @@ class SingleAxisFunctionalTestController:
 
         # Internal wait kind for timeouts
         self._wait_for: str | None = None
+        # Sensor flag cache (queried before first RUN)
+        self._lflag: int | None = None
+        self._rflag: int | None = None
 
     # --- Signal-like methods (override/monkeypatch in tests) ---
     def command_requested(self, payload: list[int]) -> None:  # pragma: no cover - overridden in tests
@@ -124,8 +134,10 @@ class SingleAxisFunctionalTestController:
         """Start state machine. Query NODECONFIG, then begin HUNTING based on it."""
         self._node_id = int(node_id)
         self._set_state(self.S_IDLE)
-        # Query NODECONFIG first to derive home sensor and velocities
+        # Query NODECONFIG first to derive home/reference sensor only (bit0)
         self._wait_for = "nodeconfig"
+        # Log explicitly for live popup visibility
+        self.status_changed("Querying NODECONFIG: C4 3F")
         self._emit_command(build_nodeconfig_query_payload())
 
     def stop(self) -> None:
@@ -205,6 +217,21 @@ class SingleAxisFunctionalTestController:
         if kind == "run_started":
             self._handle_run_started(value)
             return
+        if kind == "lflag":
+            if isinstance(value, int):
+                self._lflag = value & 0xFF
+                self.status_changed(f"SensorL flag received: 0x{self._lflag:02X}")
+            # If we are waiting to check flags, evaluate now
+            if self._state == self.S_VERIFY_ZERO and self._wait_for == "check_flags":
+                self._maybe_start_first_run()
+            return
+        if kind == "rflag":
+            if isinstance(value, int):
+                self._rflag = value & 0xFF
+                self.status_changed(f"SensorR flag received: 0x{self._rflag:02X}")
+            if self._state == self.S_VERIFY_ZERO and self._wait_for == "check_flags":
+                self._maybe_start_first_run()
+            return
 
     # --- Internal helpers ---
     def _emit_command(self, payload: list[int]) -> None:
@@ -240,6 +267,11 @@ class SingleAxisFunctionalTestController:
         if not isinstance(value, dict) or "event" not in value:
             return
         event = value["event"]
+        # Normalize Z-form sensor stops to direct L/R events
+        if event == 'Z':
+            by = value.get('by')
+            if by in ('L', 'R'):
+                event = by
         # Sensor flags from simple events
         if event == "L":
             self.left_flag_changed(True)
@@ -313,6 +345,11 @@ class SingleAxisFunctionalTestController:
                 self._wait_for = "getpos_zero"
                 self._emit_command(build_getpos())
                 return
+            # During RUN phases, unexpected reset invalidates measurement
+            if self._state in (self.S_RUN_TO_RIGHT, self.S_RUN_TO_LEFT, self.S_WAIT_RIGHT, self.S_WAIT_LEFT):
+                self._request_stopmotor()
+                self._fail("Encoder reset during RUN invalidates measurement")
+                return
 
         # TPOS middle movement events with explicit position
         if event in ("started", "reached", "no_move"):
@@ -373,15 +410,16 @@ class SingleAxisFunctionalTestController:
 
         if self._state == self.S_VERIFY_ZERO and self._wait_for == "getpos_zero":
             if abs(position) <= self.cfg.zero_tolerance:
-                # Move to opposite sensor using RUN with derived directions
-                if self.cfg.opposite_sensor == "R":
-                    self._set_state(self.S_RUN_TO_RIGHT)
-                    self._emit_command(build_run(getattr(self, "_vel_to_opposite", self.cfg.velocity_left_to_right)))
-                    self._wait_for = "run_right_ack"
-                else:
-                    self._set_state(self.S_RUN_TO_LEFT)
-                    self._emit_command(build_run(getattr(self, "_vel_to_opposite", self.cfg.velocity_right_to_left)))
-                    self._wait_for = "run_left_ack"
+                # Before first RUN, ensure sensor flags are known and safe
+                if self._lflag is None:
+                    self.status_changed("Querying SensorL flag: C9 3F")
+                    self._emit_command(build_lflag_query_payload())
+                if self._rflag is None:
+                    self.status_changed("Querying SensorR flag: CA 3F")
+                    self._emit_command(build_rflag_query_payload())
+                self._wait_for = "check_flags"
+                # Attempt immediate start if flags already cached from previous runs
+                self._maybe_start_first_run()
             else:
                 self._request_stopmotor()
                 self._fail("Zero position outside tolerance")
@@ -458,17 +496,47 @@ class SingleAxisFunctionalTestController:
             self._request_stopmotor()
             return self._fail("Invalid NODECONFIG response")
         nodeconfig = value & 0xFF
-        home_sensor = 'R' if (nodeconfig & 0x01) else 'L'
+        home_sensor = decode_nodeconfig_home_sensor(nodeconfig)
         opposite_sensor = 'L' if home_sensor == 'R' else 'R'
-        hunt_velocity = 190 if (nodeconfig & 0x02) else -190
-        velocity_to_opposite = -hunt_velocity
-        velocity_to_home = hunt_velocity
-        # Apply
+        # Apply only sensor roles; RUN velocities come from explicit config
         self.cfg.reference_sensor = home_sensor
         self.cfg.opposite_sensor = opposite_sensor
-        self._vel_to_opposite = int(velocity_to_opposite)
-        self._vel_to_home = int(velocity_to_home)
+        # Log received NODECONFIG and derived home
+        self.status_changed(f"NODECONFIG received: 0x{nodeconfig:02X}, home={home_sensor}")
         # Proceed to HUNTING
         self._set_state(self.S_HUNTING)
+        self.status_changed("Starting HUNTING")
         self._emit_command(build_hunting_timeout(self.cfg.hunt_timeout_ms))
         self._wait_for = "hunting_ack"
+
+    # --- Flag check and first RUN helper ---
+    def _maybe_start_first_run(self) -> None:
+        if self._wait_for != "check_flags":
+            return
+        # Require both flags
+        if self._lflag is None or self._rflag is None:
+            return
+        # Safety gate: opposite sensor must not reset encoder, and should stop/respond
+        opposite = self.cfg.opposite_sensor
+        flag_val = self._rflag if opposite == 'R' else self._lflag
+        # bit1 = reset, bit3 = stop, bit0 = response
+        has_reset = bool(flag_val & 0x02)
+        has_stop = bool(flag_val & 0x08)
+        has_resp = bool(flag_val & 0x01)
+        if has_reset or not (has_stop and has_resp):
+            self._request_stopmotor()
+            self.status_changed("Sensor flag safety check failed")
+            self._fail("Opposite sensor flags unsafe for range (need response+stop, no reset)")
+            return
+        self.status_changed("Sensor flag safety check passed")
+        # Safe to start first RUN toward opposite, using explicit config velocities only
+        if opposite == 'R':
+            self._set_state(self.S_RUN_TO_RIGHT)
+            self.status_changed("Starting RUN to opposite")
+            self._emit_command(build_run(self.cfg.velocity_left_to_right))
+            self._wait_for = "run_right_ack"
+        else:
+            self._set_state(self.S_RUN_TO_LEFT)
+            self.status_changed("Starting RUN to opposite")
+            self._emit_command(build_run(self.cfg.velocity_right_to_left))
+            self._wait_for = "run_left_ack"

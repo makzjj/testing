@@ -102,7 +102,14 @@ class FunctionalControllerTests(unittest.TestCase):
 
         # 5) Zero getpos within tolerance
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
-        # RUN to left should be requested first (R -> L)
+        # Flags must be queried before first RUN
+        # Expect LFLAG then RFLAG queries; last should be RFLAG
+        self.assertIn([0xC9, 0x3F], self.ctrl.commands)
+        self.assertEqual(self.ctrl.commands[-1], [0xCA, 0x3F])
+        # Provide safe flags (0x09 = response+stop, no reset)
+        self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
+        # Now RUN to left should be requested first (R -> L)
         self.assertEqual(self.ctrl.commands[-1], build_run(-190))
 
         # 6) RUN started ACK
@@ -188,6 +195,9 @@ class FunctionalControllerTests(unittest.TestCase):
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
+        # Expect flag queries before RUN
+        self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
         # Now expecting RUN ack; timeout -> fail
         self.ctrl.on_timeout()
         self.assertTrue(self.ctrl.failed)
@@ -198,6 +208,9 @@ class FunctionalControllerTests(unittest.TestCase):
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
+        # Provide flags prior to RUN
+        self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
         # first leg is R->L, ack packet for negative velocity
         self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
         # Wrong sensor: R occurs instead of L
@@ -210,6 +223,9 @@ class FunctionalControllerTests(unittest.TestCase):
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
+        # Provide flags prior to RUN
+        self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
         self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         # supply negative range_1 to ensure abs is used in UI value
@@ -224,6 +240,9 @@ class FunctionalControllerTests(unittest.TestCase):
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
+        # Provide flags prior to RUN
+        self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
         self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x13, 0x88))
@@ -238,6 +257,9 @@ class FunctionalControllerTests(unittest.TestCase):
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
+        # Provide flags prior to RUN
+        self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
         self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x13, 0x88))
@@ -253,6 +275,9 @@ class FunctionalControllerTests(unittest.TestCase):
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
+        # Provide flags prior to RUN
+        self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
         self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x13, 0x88))  # +5000
@@ -271,6 +296,9 @@ class FunctionalControllerTests(unittest.TestCase):
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
+        # Provide flags prior to RUN
+        self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
         self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x13, 0x88))  # +5000
@@ -293,6 +321,9 @@ class FunctionalControllerTests(unittest.TestCase):
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
+        # Provide flags prior to RUN
+        self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
         self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x13, 0x88))
@@ -312,6 +343,9 @@ class FunctionalControllerTests(unittest.TestCase):
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
+        # Provide flags prior to RUN
+        self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
         self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x13, 0x88))  # +5000
@@ -346,7 +380,9 @@ class FunctionalControllerTests(unittest.TestCase):
         ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         self.assertEqual(ctrl.commands[-1], build_getpos())
         ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
-        # First run L->R (+190)
+        # Flag queries, then first run L->R (+190)
+        ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
         self.assertEqual(ctrl.commands[-1], build_run(190))
         ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0x00, 0xBE))
         ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
@@ -367,6 +403,26 @@ class FunctionalControllerTests(unittest.TestCase):
         # Expect R during hunting, but get L -> fail
         self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
+        self.assertTrue(self.ctrl.failed)
+        self.assertEqual(self.ctrl.commands[-1], build_stopmotor())
+
+    def test_accept_z_sensor_events_and_fail_on_reset_during_run(self):
+        # HUNT accept
+        self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
+        # Reference via Z-form (e.g., stopped by R flag)
+        self.ctrl.handle_runtime_packet(pkt(0x81, 0x5A, 0x52))  # 'Z','R'
+        self.assertIn("WAIT_FOR_ENCODER_INITIALIZATION", self.ctrl.statuses[-1])
+        # Zeroed
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
+        self.assertEqual(self.ctrl.commands[-1], build_getpos())
+        self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
+        # Provide flags and begin RUN
+        self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
+        # RUN ack (toward opposite L)
+        self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
+        # Unexpected encoder reset during RUN -> should fail
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         self.assertTrue(self.ctrl.failed)
         self.assertEqual(self.ctrl.commands[-1], build_stopmotor())
 

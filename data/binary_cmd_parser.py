@@ -335,5 +335,51 @@ def decode_command(cmd, params):
         if len(params) >= 2 and params[0] == 0x3A:
             return ("nodeconfig", int(params[1] & 0xFF))
         return ("nodeconfig", None)
+    elif cmd == 0xC9:
+        # LFLAG: response format C9 3A <flags>
+        if len(params) >= 2 and params[0] == 0x3A:
+            return ("lflag", int(params[1] & 0xFF))
+        return ("lflag", None)
+    elif cmd == 0xCA:
+        # RFLAG: response format CA 3A <flags>
+        if len(params) >= 2 and params[0] == 0x3A:
+            return ("rflag", int(params[1] & 0xFF))
+        return ("rflag", None)
     else:
         return (None, None)
+
+
+# --- Helpers for controller/tests ---
+def decode_nodeconfig_home_sensor(nodeconfig: int) -> str:
+    """Return 'L' or 'R' based on NODECONFIG bit0 (0=L, 1=R)."""
+    try:
+        return 'R' if (int(nodeconfig) & 0x01) else 'L'
+    except Exception:
+        return 'L'
+
+
+def decode_sensor_flags(value: int) -> dict:
+    """Decode sensor flag bits.
+
+    Bits:
+    - bit0 (0x01): send response
+    - bit1 (0x02): zero/reset encoder
+    - bit3 (0x08): stop motor
+    Common combos: 0x09 (resp+stop), 0x0B (resp+stop+reset)
+    """
+    v = int(value) & 0xFF
+    return {
+        "send_response": bool(v & 0x01),
+        "zero_reset": bool(v & 0x02),
+        "stop_motor": bool(v & 0x08),
+        "raw": v,
+    }
+
+
+def sensor_flag_allows_range_measurement(flag_value: int) -> bool:
+    """Range measurement requires stop+response but must NOT reset encoder (bit1).
+
+    Returns True if suitable (stop and respond, no reset), else False.
+    """
+    info = decode_sensor_flags(flag_value)
+    return info["send_response"] and info["stop_motor"] and (not info["zero_reset"])
