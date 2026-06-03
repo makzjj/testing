@@ -23,6 +23,7 @@ from data.binary_cmd_builders import (
     build_run,
     build_tpos,
     build_stopmotor,
+    build_nodeconfig_query_payload,
 )
 from data.binary_cmd_parser import decode_command
 
@@ -35,6 +36,9 @@ class FunctionalTestConfig:
     zero_tolerance: int = 5
     range_tolerance: int = 10
     middle_position_tolerance: int = 10
+    # Configurable sensor sequence (reference/opposite). Defaults to current production: R -> I -> L -> R
+    reference_sensor: str = "R"  # either "L" or "R"
+    opposite_sensor: str = "L"   # the other one
 
 
 class SingleAxisFunctionalTestController:
@@ -63,6 +67,11 @@ class SingleAxisFunctionalTestController:
 
     def __init__(self, config: FunctionalTestConfig | None = None) -> None:
         self.cfg = config or FunctionalTestConfig()
+        # Normalize/validate sensor configuration
+        if (self.cfg.reference_sensor, self.cfg.opposite_sensor) not in (("L", "R"), ("R", "L")):
+            # Fallback to safe default if misconfigured
+            self.cfg.reference_sensor = "R"
+            self.cfg.opposite_sensor = "L"
         self._node_id: int | None = None
         self._state: str = self.S_IDLE
 
@@ -112,15 +121,12 @@ class SingleAxisFunctionalTestController:
 
     # --- Public API ---
     def start(self, node_id: int) -> None:
-        """Start state machine. Transitions IDLE -> HUNTING and sends HUNTING command."""
+        """Start state machine. Query NODECONFIG, then begin HUNTING based on it."""
         self._node_id = int(node_id)
         self._set_state(self.S_IDLE)
-        # Immediately go to hunting (State 2)
-        self._set_state(self.S_HUNTING)
-        payload = build_hunting_timeout(self.cfg.hunt_timeout_ms)
-        self._emit_command(payload)
-        # Expect an immediate 0xC3 hunting acceptance/reject or timeout later
-        self._wait_for = "hunting_ack"
+        # Query NODECONFIG first to derive home sensor and velocities
+        self._wait_for = "nodeconfig"
+        self._emit_command(build_nodeconfig_query_payload())
 
     def stop(self) -> None:
         # Explicit stop request from UI; treat as failure/abort
@@ -130,13 +136,16 @@ class SingleAxisFunctionalTestController:
 
     def on_timeout(self) -> None:
         """Tests can invoke to simulate a timeout for the current wait condition."""
+        if self._wait_for == "nodeconfig":
+            self._request_stopmotor()
+            return self._fail("NODECONFIG query timeout")
         if self._state == self.S_HUNTING and self._wait_for == "hunting_ack":
             # No ACK/NACK -> fail
             self._request_stopmotor()
             return self._fail("HUNTING no ACK/NACK/timeout")
-        if self._state == self.S_WAIT_HUNTING_SENSOR and self._wait_for == "left_sensor":
+        if self._state == self.S_WAIT_HUNTING_SENSOR and self._wait_for in ("left_sensor", "right_sensor"):
             self._request_stopmotor()
-            return self._fail("HUNTING timed out before Left sensor event")
+            return self._fail("HUNTING timed out before reference sensor event")
         if self._state == self.S_WAIT_ZERO and self._wait_for == "zeroed":
             self._request_stopmotor()
             return self._fail("Encoder init timeout after Left sensor")
@@ -180,6 +189,9 @@ class SingleAxisFunctionalTestController:
 
         kind, value = decode_command(cmd, params)
 
+        if kind == "nodeconfig":
+            self._handle_nodeconfig(value)
+            return
         # Route based on expected wait/state
         if kind == "hunting":
             self._handle_hunting_response(value)
@@ -214,9 +226,9 @@ class SingleAxisFunctionalTestController:
         if self._state != self.S_HUNTING or self._wait_for != "hunting_ack":
             return
         if value == "accepted":
-            # Proceed to wait for left sensor 81 4C
+            # Proceed to wait for reference sensor (L or R)
             self._set_state(self.S_WAIT_HUNTING_SENSOR)
-            self._wait_for = "left_sensor"
+            self._wait_for = "left_sensor" if self.cfg.reference_sensor == "L" else "right_sensor"
         elif value == "rejected" or value is None:
             self._request_stopmotor()
             self._fail("HUNTING rejected/NACK")
@@ -231,15 +243,28 @@ class SingleAxisFunctionalTestController:
         # Sensor flags from simple events
         if event == "L":
             self.left_flag_changed(True)
-            if self._state == self.S_WAIT_HUNTING_SENSOR and self._wait_for == "left_sensor":
-                # State 3 -> 4: after left sensor, wait for encoder init 81 49 'I'
-                self._set_state(self.S_WAIT_ZERO)
-                self._wait_for = "zeroed"
-                return
+            if self._state == self.S_WAIT_HUNTING_SENSOR:
+                # Expect reference sensor only
+                if self._wait_for == "left_sensor":
+                    # After reference sensor, wait for encoder init 'I'
+                    self._set_state(self.S_WAIT_ZERO)
+                    self._wait_for = "zeroed"
+                    return
+                else:
+                    # Wrong reference sensor during hunting
+                    self._request_stopmotor()
+                    self._fail("Wrong sensor event during hunting (expected R, got L)")
+                    return
             if self._state == self.S_WAIT_LEFT and self._wait_for == "left_sensor":
-                # Completed return direction
-                self._set_state(self.S_READ_RANGE2)
-                self._wait_for = "getpos_r2"
+                # Determine whether this is first leg completion (opposite=L) or return (home=L)
+                if self.cfg.opposite_sensor == "L":
+                    # First leg to opposite completed -> read range_1
+                    self._set_state(self.S_READ_RANGE1)
+                    self._wait_for = "getpos_r1"
+                else:
+                    # Return to home completed -> read range_2
+                    self._set_state(self.S_READ_RANGE2)
+                    self._wait_for = "getpos_r2"
                 # Request GETPOS
                 self._emit_command(build_getpos())
                 return
@@ -252,9 +277,15 @@ class SingleAxisFunctionalTestController:
         if event == "R":
             self.right_flag_changed(True)
             if self._state == self.S_WAIT_RIGHT and self._wait_for == "right_sensor":
-                # Completed first leg; now read range_1
-                self._set_state(self.S_READ_RANGE1)
-                self._wait_for = "getpos_r1"
+                # Determine whether this is first leg completion (opposite=R) or return (home=R)
+                if self.cfg.opposite_sensor == "R":
+                    # First leg to opposite completed -> read range_1
+                    self._set_state(self.S_READ_RANGE1)
+                    self._wait_for = "getpos_r1"
+                else:
+                    # Return to home completed -> read range_2
+                    self._set_state(self.S_READ_RANGE2)
+                    self._wait_for = "getpos_r2"
                 self._emit_command(build_getpos())
                 return
             # Wrong sensor during move-to-left
@@ -262,6 +293,17 @@ class SingleAxisFunctionalTestController:
                 self._request_stopmotor()
                 self._fail("Wrong sensor event during left move (got R)")
                 return
+            # Wrong reference sensor during hunting
+            if self._state == self.S_WAIT_HUNTING_SENSOR:
+                if self._wait_for == "right_sensor":
+                    # expected right, ok handled above in WAIT_RIGHT; here for hunting we just move to zero wait
+                    self._set_state(self.S_WAIT_ZERO)
+                    self._wait_for = "zeroed"
+                    return
+                else:
+                    self._request_stopmotor()
+                    self._fail("Wrong sensor event during hunting (expected L, got R)")
+                    return
 
         if event == "I":
             # Encoder zeroed
@@ -282,6 +324,18 @@ class SingleAxisFunctionalTestController:
                     self._set_state(self.S_WAIT_MIDDLE)
                     self._wait_for = "tpos_complete"
                     return
+                if event == "reached":
+                    # Immediate completion without a separate 'started' event
+                    if self._middle_target is None:
+                        self._request_stopmotor()
+                        return self._fail("Middle target unknown on reached")
+                    if abs(pos - self._middle_target) <= self.cfg.middle_position_tolerance:
+                        self._request_stopmotor()
+                        self._set_state(self.S_PASSED)
+                        self.test_passed()
+                        return
+                    self._request_stopmotor()
+                    return self._fail("Middle reached but outside tolerance")
                 if event == "no_move":
                     # Already at target; accept only if within tolerance
                     if self._middle_target is None:
@@ -319,11 +373,15 @@ class SingleAxisFunctionalTestController:
 
         if self._state == self.S_VERIFY_ZERO and self._wait_for == "getpos_zero":
             if abs(position) <= self.cfg.zero_tolerance:
-                # Move to opposite sensor using RUN (to right)
-                self._set_state(self.S_RUN_TO_RIGHT)
-                payload = build_run(self.cfg.velocity_left_to_right)
-                self._emit_command(payload)
-                self._wait_for = "run_right_ack"
+                # Move to opposite sensor using RUN with derived directions
+                if self.cfg.opposite_sensor == "R":
+                    self._set_state(self.S_RUN_TO_RIGHT)
+                    self._emit_command(build_run(getattr(self, "_vel_to_opposite", self.cfg.velocity_left_to_right)))
+                    self._wait_for = "run_right_ack"
+                else:
+                    self._set_state(self.S_RUN_TO_LEFT)
+                    self._emit_command(build_run(getattr(self, "_vel_to_opposite", self.cfg.velocity_right_to_left)))
+                    self._wait_for = "run_left_ack"
             else:
                 self._request_stopmotor()
                 self._fail("Zero position outside tolerance")
@@ -335,11 +393,15 @@ class SingleAxisFunctionalTestController:
             self._opposite_pos = position
             self._range_1 = abs(position)
             self.range1_changed(self._range_1)
-            # Now send RUN in opposite direction (left)
-            self._set_state(self.S_RUN_TO_LEFT)
-            payload = build_run(self.cfg.velocity_right_to_left)
-            self._emit_command(payload)
-            self._wait_for = "run_left_ack"
+            # Now send RUN in return direction back to reference/home sensor
+            if self.cfg.reference_sensor == "R":
+                self._set_state(self.S_RUN_TO_RIGHT)
+                self._emit_command(build_run(getattr(self, "_vel_to_home", self.cfg.velocity_left_to_right)))
+                self._wait_for = "run_right_ack"
+            else:
+                self._set_state(self.S_RUN_TO_LEFT)
+                self._emit_command(build_run(getattr(self, "_vel_to_home", self.cfg.velocity_right_to_left)))
+                self._wait_for = "run_left_ack"
             return
 
         if self._state == self.S_READ_RANGE2 and self._wait_for == "getpos_r2":
@@ -387,3 +449,26 @@ class SingleAxisFunctionalTestController:
             self._set_state(self.S_WAIT_LEFT)
             self._wait_for = "left_sensor"
             return
+
+    def _handle_nodeconfig(self, value) -> None:
+        # Handle C4 3A <nodeconfig> (bits: 0=home L/R, 1=hunt speed sign)
+        if self._wait_for != "nodeconfig":
+            return
+        if not isinstance(value, int):
+            self._request_stopmotor()
+            return self._fail("Invalid NODECONFIG response")
+        nodeconfig = value & 0xFF
+        home_sensor = 'R' if (nodeconfig & 0x01) else 'L'
+        opposite_sensor = 'L' if home_sensor == 'R' else 'R'
+        hunt_velocity = 190 if (nodeconfig & 0x02) else -190
+        velocity_to_opposite = -hunt_velocity
+        velocity_to_home = hunt_velocity
+        # Apply
+        self.cfg.reference_sensor = home_sensor
+        self.cfg.opposite_sensor = opposite_sensor
+        self._vel_to_opposite = int(velocity_to_opposite)
+        self._vel_to_home = int(velocity_to_home)
+        # Proceed to HUNTING
+        self._set_state(self.S_HUNTING)
+        self._emit_command(build_hunting_timeout(self.cfg.hunt_timeout_ms))
+        self._wait_for = "hunting_ack"

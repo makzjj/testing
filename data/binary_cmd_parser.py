@@ -330,5 +330,10 @@ def decode_command(cmd, params):
         if len(params) > 0 and params[0] == 0x53: # 'S'
             return ("move_yayb", "OK")
         return ("move_yayb", "Unknown")
+    elif cmd == 0xC4:
+        # NODECONFIG: response format C4 3A <nodeconfig>
+        if len(params) >= 2 and params[0] == 0x3A:
+            return ("nodeconfig", int(params[1] & 0xFF))
+        return ("nodeconfig", None)
     else:
         return (None, None)

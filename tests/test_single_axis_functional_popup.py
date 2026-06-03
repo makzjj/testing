@@ -8,7 +8,7 @@ from gui.workspace.pages.single_axis_functional_popup import SingleAxisFunctiona
 from gui.workspace.controllers.single_axis_functional_test_controller import (
     FunctionalTestConfig,
 )
-from data.binary_cmd_builders import build_hunting_timeout
+from data.binary_cmd_builders import build_hunting_timeout, build_nodeconfig_query_payload
 
 
 def get_app():
@@ -41,12 +41,12 @@ def test_run_with_selected_node_starts_controller(monkeypatch):
     assert not popup.run_button.isEnabled()
     assert not popup.node_combo.isEnabled()
 
-    # Controller should have requested hunting command via safe handler
-    assert popup._tx_log[-1] == build_hunting_timeout(10_000)
+    # Controller should request NODECONFIG query first via safe handler
+    assert popup._tx_log[-1] == build_nodeconfig_query_payload()
 
-    # Status block should contain state updates (e.g., HUNTING)
+    # Status block should contain some status lines (e.g., IDLE/state updates)
     text = popup.status_block.toPlainText()
-    assert "HUNTING" in text
+    assert "IDLE" in text
 
 
 def test_run_without_node_shows_warning_and_not_start(monkeypatch):
