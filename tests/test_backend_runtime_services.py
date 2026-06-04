@@ -14,6 +14,8 @@ from services import (
     ensure_node_status,
     reset_node_status,
 )
+from services.robot_backend_client import RobotBackendClient
+from serial_conn.commands import CommandBuilder
 
 
 class NodeStatusStoreTests(unittest.TestCase):
@@ -91,6 +93,45 @@ class RxLogWriterTests(unittest.TestCase):
             content = writer.log_file_path.read_text(encoding="utf-8")
 
         self.assertIn("RX: 01 AB 7F", content)
+
+
+class RobotBackendClientTests(unittest.TestCase):
+    """Confirms the backend writes the exact CAN-over-UART bytes it builds."""
+
+    def test_send_command_bytes_writes_raw_payload_to_serial(self) -> None:
+        class _FakeSerialConnection:
+            def __init__(self) -> None:
+                self.baudrate = 345600
+                self.serial = object()
+                self.writes: list[bytes] = []
+
+            def connect(self, port: str) -> bool:
+                return True
+
+            def disconnect(self) -> None:
+                return None
+
+            def is_connected(self) -> bool:
+                return True
+
+            def write(self, data, is_virt: bool = False) -> int:
+                self.writes.append(bytes(data))
+                return len(data)
+
+            def read_all(self, is_virt: bool = False) -> bytes:
+                return b""
+
+            def get_available_ports(self):
+                return []
+
+        fake_serial = _FakeSerialConnection()
+        client = RobotBackendClient(serial_connection=fake_serial, command_builder=CommandBuilder())
+
+        payload = client.send_command_bytes(6, [0xC4, 0x3F], sender_node_id=0x01)
+        expected = CommandBuilder.build_can_over_uart_packet(0x01, 0x06, [0xC4, 0x3F])
+
+        self.assertEqual(payload, expected)
+        self.assertEqual(fake_serial.writes[-1], bytes(expected))
 
 
 if __name__ == "__main__":

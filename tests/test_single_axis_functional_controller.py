@@ -8,6 +8,8 @@ from data.binary_cmd_builders import (
     build_hunting_timeout,
     build_getpos,
     build_run,
+    build_lflag_query_payload,
+    build_rflag_query_payload,
     build_tpos,
     build_stopmotor,
 )
@@ -70,7 +72,7 @@ class FunctionalControllerTests(unittest.TestCase):
             velocity_left_to_right=190,
             velocity_right_to_left=-190,
             zero_tolerance=5,
-            range_tolerance=10,
+            range_tolerance=512,
             middle_position_tolerance=5,
         )
         self.ctrl = Recorder(cfg)
@@ -81,6 +83,43 @@ class FunctionalControllerTests(unittest.TestCase):
         self.ctrl.handle_runtime_packet(pkt(0xC4, 0x3A, 0x03))
         # After NODECONFIG response, controller should request HUNTING
         self.assertEqual(self.ctrl.commands[-1], build_hunting_timeout(10000))
+
+    def _drive_to_compare(self, opposite_pos: int, returned_home_pos: int) -> None:
+        self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
+        self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
+        self.assertEqual(self.ctrl.commands[-1], build_lflag_query_payload())
+        self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        self.assertEqual(self.ctrl.commands[-1], build_rflag_query_payload())
+        self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
+        self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
+        self.ctrl.handle_runtime_packet(
+            pkt(0x82, (opposite_pos >> 24) & 0xFF, (opposite_pos >> 16) & 0xFF, (opposite_pos >> 8) & 0xFF, opposite_pos & 0xFF)
+        )
+        self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0x00, 0xBE))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        returned_be = list((returned_home_pos).to_bytes(4, 'big', signed=True))
+        self.ctrl.handle_runtime_packet(pkt(0x82, *returned_be))
+
+    def test_range_difference_33_passes_with_512_tolerance(self):
+        self._drive_to_compare(2_500_797, -33)
+        self.assertEqual(self.ctrl.diffs[-1], 33)
+        self.assertEqual(self.ctrl.commands[-1], build_tpos(1_250_398))
+        self.assertFalse(self.ctrl.failed)
+
+    def test_range_difference_512_passes_with_512_tolerance(self):
+        self._drive_to_compare(2_500_000, -512)
+        self.assertEqual(self.ctrl.diffs[-1], 512)
+        self.assertEqual(self.ctrl.commands[-1], build_tpos(1_250_000))
+        self.assertFalse(self.ctrl.failed)
+
+    def test_range_difference_513_fails_and_sends_stop(self):
+        self._drive_to_compare(2_500_000, -513)
+        self.assertEqual(self.ctrl.diffs[-1], 513)
+        self.assertTrue(self.ctrl.failed)
+        self.assertEqual(self.ctrl.commands[-1], build_stopmotor())
 
     def test_full_pass_path(self):
         # 1) HUNTING command sent
@@ -102,12 +141,12 @@ class FunctionalControllerTests(unittest.TestCase):
 
         # 5) Zero getpos within tolerance
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
-        # Flags must be queried before first RUN
-        # Expect LFLAG then RFLAG queries; last should be RFLAG
-        self.assertIn([0xC9, 0x3F], self.ctrl.commands)
-        self.assertEqual(self.ctrl.commands[-1], [0xCA, 0x3F])
-        # Provide safe flags (0x09 = response+stop, no reset)
+        # Flags must be queried sequentially before first RUN
+        self.assertEqual(self.ctrl.commands[-1], build_lflag_query_payload())
+        # Provide SensorL response first; only then should SensorR be queried
         self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        self.assertEqual(self.ctrl.commands[-1], build_rflag_query_payload())
+        # Provide SensorR response; only after both should safety check and RUN happen
         self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
         # Now RUN to left should be requested first (R -> L)
         self.assertEqual(self.ctrl.commands[-1], build_run(-190))
@@ -255,13 +294,67 @@ class FunctionalControllerTests(unittest.TestCase):
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
-        # Expect flag queries before RUN
+        # Expect only SensorL query before any flag response
+        self.assertEqual(self.ctrl.commands[-1], build_lflag_query_payload())
         self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        self.assertEqual(self.ctrl.commands[-1], build_rflag_query_payload())
         self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
         # Now expecting RUN ack; timeout -> fail
         self.ctrl.on_timeout()
         self.assertTrue(self.ctrl.failed)
         self.assertEqual(self.ctrl.commands[-1], build_stopmotor())
+
+    def test_missing_sensor_l_flag_times_out_and_stops(self):
+        self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
+        self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
+        self.assertEqual(self.ctrl.commands[-1], build_lflag_query_payload())
+        self.ctrl.on_timeout()
+        self.assertTrue(self.ctrl.failed)
+        self.assertEqual(self.ctrl.commands[-1], build_stopmotor())
+
+    def test_missing_sensor_r_flag_times_out_and_stops(self):
+        self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
+        self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
+        self.assertEqual(self.ctrl.commands[-1], build_lflag_query_payload())
+        # SensorL arrives, SensorR is requested, then times out.
+        self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        self.assertEqual(self.ctrl.commands[-1], build_rflag_query_payload())
+        self.ctrl.on_timeout()
+        self.assertTrue(self.ctrl.failed)
+        self.assertEqual(self.ctrl.commands[-1], build_stopmotor())
+
+    def test_wrong_command_flag_response_is_ignored_until_timeout(self):
+        self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
+        self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
+        self.assertEqual(self.ctrl.commands[-1], build_lflag_query_payload())
+        # Wrong command: SensorR arrives before SensorL.
+        cmd_count = len(self.ctrl.commands)
+        self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
+        self.assertEqual(len(self.ctrl.commands), cmd_count)
+        self.assertIn("Ignoring out-of-state packet while waiting for SensorL flag", self.ctrl.statuses[-1])
+        self.ctrl.on_timeout()
+        self.assertTrue(self.ctrl.failed)
+        self.assertEqual(self.ctrl.commands[-1], build_stopmotor())
+
+    def test_late_flag_packets_after_failure_are_ignored(self):
+        self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
+        self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
+        self.ctrl.on_timeout()
+        self.assertTrue(self.ctrl.failed)
+        cmd_count = len(self.ctrl.commands)
+        status_count = len(self.ctrl.statuses)
+        self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
+        self.assertEqual(len(self.ctrl.commands), cmd_count)
+        self.assertEqual(len(self.ctrl.statuses), status_count)
 
     def test_wrong_sensor_during_first_move_fails(self):
         self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))

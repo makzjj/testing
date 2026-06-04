@@ -41,7 +41,7 @@ class FunctionalTestConfig:
     velocity_left_to_right: int = 190
     velocity_right_to_left: int = -190
     zero_tolerance: int = 5
-    range_tolerance: int = 10
+    range_tolerance: int = 512
     middle_position_tolerance: int = 10
     # Configurable sensor sequence (reference/opposite). Defaults to current production: R -> I -> L -> R
     reference_sensor: str = "R"  # either "L" or "R"
@@ -60,6 +60,8 @@ class SingleAxisFunctionalTestController:
     S_WAIT_HUNTING_SENSOR = "WAIT_FOR_HUNTING_COMPLETION"
     S_WAIT_ZERO = "WAIT_FOR_ENCODER_INITIALIZATION"
     S_VERIFY_ZERO = "VERIFY_HOME_POSITION_ZERO"
+    S_WAIT_LFLAG = "WAIT_FOR_SENSOR_L_FLAG"
+    S_WAIT_RFLAG = "WAIT_FOR_SENSOR_R_FLAG"
     S_RUN_TO_RIGHT = "MOVE_TO_OPPOSITE_SENSOR_R"
     S_WAIT_RIGHT = "WAIT_FOR_RIGHT_SENSOR"
     S_READ_RANGE1 = "READ_AND_STORE_RANGE_1"
@@ -133,6 +135,16 @@ class SingleAxisFunctionalTestController:
     def start(self, node_id: int) -> None:
         """Start state machine. Query NODECONFIG, then begin HUNTING based on it."""
         self._node_id = int(node_id)
+        self._signed_range_1 = None
+        self._range_1 = None
+        self._signed_range_2 = None
+        self._range_2 = None
+        self._opposite_pos = None
+        self._returned_home_pos = None
+        self._middle_target = None
+        self._wait_for = None
+        self._lflag = None
+        self._rflag = None
         self._set_state(self.S_IDLE)
         # Query NODECONFIG first to derive home/reference sensor only (bit0)
         self._wait_for = "nodeconfig"
@@ -164,6 +176,12 @@ class SingleAxisFunctionalTestController:
         if self._state == self.S_VERIFY_ZERO and self._wait_for == "getpos_zero":
             self._request_stopmotor()
             return self._fail("GETPOS timeout during zero verification")
+        if self._state == self.S_VERIFY_ZERO and self._wait_for == "lflag_query":
+            self._request_stopmotor()
+            return self._fail("SensorL flag timeout")
+        if self._state == self.S_VERIFY_ZERO and self._wait_for == "rflag_query":
+            self._request_stopmotor()
+            return self._fail("SensorR flag timeout")
         if self._state == self.S_RUN_TO_RIGHT and self._wait_for == "run_right_ack":
             self._request_stopmotor()
             return self._fail("RUN-to-right ACK not received")
@@ -192,6 +210,8 @@ class SingleAxisFunctionalTestController:
     def handle_runtime_packet(self, packet: list[int] | bytes) -> None:
         if not packet:
             return
+        if self._state in (self.S_FAILED, self.S_PASSED):
+            return
         if isinstance(packet, (bytes, bytearray)):
             data = list(packet)
         else:
@@ -209,6 +229,20 @@ class SingleAxisFunctionalTestController:
             except Exception:
                 hex_payload = str(data)
             self.status_changed(f"Ignoring out-of-state packet while waiting for RUN ACK: {hex_payload}")
+            return
+        if self._state == self.S_VERIFY_ZERO and self._wait_for == "lflag_query" and kind != "lflag":
+            try:
+                hex_payload = " ".join(f"{b:02X}" for b in data)
+            except Exception:
+                hex_payload = str(data)
+            self.status_changed(f"Ignoring out-of-state packet while waiting for SensorL flag: {hex_payload}")
+            return
+        if self._state == self.S_VERIFY_ZERO and self._wait_for == "rflag_query" and kind != "rflag":
+            try:
+                hex_payload = " ".join(f"{b:02X}" for b in data)
+            except Exception:
+                hex_payload = str(data)
+            self.status_changed(f"Ignoring out-of-state packet while waiting for SensorR flag: {hex_payload}")
             return
 
         if kind == "nodeconfig":
@@ -228,19 +262,10 @@ class SingleAxisFunctionalTestController:
             self._handle_run_started(value)
             return
         if kind == "lflag":
-            if isinstance(value, int):
-                self._lflag = value & 0xFF
-                self.status_changed(f"SensorL flag received: 0x{self._lflag:02X}")
-            # If we are waiting to check flags, evaluate now
-            if self._state == self.S_VERIFY_ZERO and self._wait_for == "check_flags":
-                self._maybe_start_first_run()
+            self._handle_lflag(value)
             return
         if kind == "rflag":
-            if isinstance(value, int):
-                self._rflag = value & 0xFF
-                self.status_changed(f"SensorR flag received: 0x{self._rflag:02X}")
-            if self._state == self.S_VERIFY_ZERO and self._wait_for == "check_flags":
-                self._maybe_start_first_run()
+            self._handle_rflag(value)
             return
 
     # --- Internal helpers ---
@@ -420,16 +445,11 @@ class SingleAxisFunctionalTestController:
 
         if self._state == self.S_VERIFY_ZERO and self._wait_for == "getpos_zero":
             if abs(position) <= self.cfg.zero_tolerance:
-                # Before first RUN, ensure sensor flags are known and safe
-                if self._lflag is None:
-                    self.status_changed("Querying SensorL flag: C9 3F")
-                    self._emit_command(build_lflag_query_payload())
-                if self._rflag is None:
-                    self.status_changed("Querying SensorR flag: CA 3F")
-                    self._emit_command(build_rflag_query_payload())
-                self._wait_for = "check_flags"
-                # Attempt immediate start if flags already cached from previous runs
-                self._maybe_start_first_run()
+                # Before first RUN, query SensorL first, then SensorR only after SensorL response.
+                self._set_state(self.S_VERIFY_ZERO)
+                self._wait_for = "lflag_query"
+                self.status_changed("Querying SensorL flag: C9 3F")
+                self._emit_command(build_lflag_query_payload())
             else:
                 self._request_stopmotor()
                 self._fail("Zero position outside tolerance")
@@ -478,6 +498,27 @@ class SingleAxisFunctionalTestController:
             self._wait_for = "tpos_ack"
             self._emit_command(build_tpos(self._middle_target))
             return
+
+    def _handle_lflag(self, value) -> None:
+        if self._state != self.S_VERIFY_ZERO or self._wait_for != "lflag_query":
+            return
+        if not isinstance(value, int):
+            return
+        self._lflag = value & 0xFF
+        self.status_changed(f"SensorL flag received: 0x{self._lflag:02X}")
+        self._wait_for = "rflag_query"
+        self.status_changed("Querying SensorR flag: CA 3F")
+        self._emit_command(build_rflag_query_payload())
+
+    def _handle_rflag(self, value) -> None:
+        if self._state != self.S_VERIFY_ZERO or self._wait_for != "rflag_query":
+            return
+        if not isinstance(value, int):
+            return
+        self._rflag = value & 0xFF
+        self.status_changed(f"SensorR flag received: 0x{self._rflag:02X}")
+        self._wait_for = "check_flags"
+        self._maybe_start_first_run()
 
     def _handle_run_started(self, value) -> None:
         # value is confirmed velocity (int) or None

@@ -136,7 +136,10 @@ class SerialConnection:
             return 0
 
         try:
+            hex_payload = " ".join(f"{int(b) & 0xFF:02X}" for b in bytes(data))
+            self._log("INFO", f"TX[{port_type}] {hex_payload}")
             written = target.write(data)
+            self._log("INFO", f"TX[{port_type}] wrote {written}/{len(data)} bytes")
             if written != len(data):
                 self._log("WARNING", f"Partial write on {port_type} port: {written}/{len(data)} bytes")
             return written

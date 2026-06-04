@@ -43,6 +43,8 @@ def test_run_with_selected_node_starts_controller(monkeypatch):
 
     # Controller should request NODECONFIG query first via safe handler
     assert popup._tx_log[-1] == build_nodeconfig_query_payload()
+    assert popup.controller is not None
+    assert popup.controller.cfg.range_tolerance == 512
 
     # Status block should contain some status lines (e.g., IDLE/state updates)
     text = popup.status_block.toPlainText()

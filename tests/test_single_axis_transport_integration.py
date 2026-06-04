@@ -140,6 +140,10 @@ def test_adapter_forwards_nodeconfig_and_controller_proceeds(monkeypatch):
     assert f"RX Node {node_id}: C4 3A 00" in text
     assert "NODECONFIG received: 0x00" in text
     assert "HUNTING" in text
+    lines = text.splitlines()
+    rx_idx = next(i for i, line in enumerate(lines) if f"RX Node {node_id}: C4 3A 00" in line)
+    tx_idx = next(i for i, line in enumerate(lines[rx_idx + 1 :], start=rx_idx + 1) if f"TX Node {node_id}:" in line)
+    assert rx_idx < tx_idx
 
 
 def test_no_out_of_state_ignore_log_while_waiting_for_nodeconfig(monkeypatch):

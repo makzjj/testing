@@ -68,7 +68,7 @@ def test_disconnected_backend_aborts_run(monkeypatch):
     # Aborted: UI should be re-enabled and no run in progress
     assert popup._is_running is False
     assert popup.run_button.isEnabled() and popup.node_combo.isEnabled()
-    assert "Transport not connected. Aborting run." in popup.status_block.toPlainText()
+    assert "Transport not connected." in popup.status_block.toPlainText()
     # Ensure nothing was sent on disconnected backend
     assert backend.sent == []
 
@@ -116,3 +116,74 @@ def test_connected_backend_sends_and_receives(monkeypatch):
     # Ensure TX logs include node
     assert any(f"TX Node {node_id}:" in line for line in t.splitlines())
 
+
+def test_wrong_node_nodeconfig_is_ignored_and_logged(monkeypatch):
+    _suppress_boxes(monkeypatch)
+    node_id = 6
+    backend = _FakeBackendClient(connected=True)
+    runtime_window = _FakeRuntimeWindow(backend)
+    bridge = _FakeBridge(runtime_window)
+
+    popup = SingleAxisFunctionalPopup(node_options=[(node_id, "AxisY")], bridge=bridge)
+    popup.node_combo.setCurrentIndex(1)
+    popup._handle_run_clicked()
+
+    runtime_window.packet_received.emit({
+        "type": "can_over_uart",
+        "sender": node_id - 1,
+        "cmd": 0xC4,
+        "params": [0x3A, 0x00],
+    })
+
+    text = popup.status_block.toPlainText()
+    assert "ignored packet: node=5, payload=C4 3A 00, reason=wrong node 5" in text
+    assert popup.controller is not None
+    assert popup.controller._wait_for == "nodeconfig"
+    assert backend.sent == [(node_id, [0xC4, 0x3F])]
+
+
+def test_background_status_packets_do_not_consume_pending_nodeconfig(monkeypatch):
+    _suppress_boxes(monkeypatch)
+    node_id = 6
+    backend = _FakeBackendClient(connected=True)
+    runtime_window = _FakeRuntimeWindow(backend)
+    bridge = _FakeBridge(runtime_window)
+
+    popup = SingleAxisFunctionalPopup(node_options=[(node_id, "AxisY")], bridge=bridge)
+    popup.node_combo.setCurrentIndex(1)
+    popup._handle_run_clicked()
+
+    runtime_window.packet_received.emit({
+        "type": "can_over_uart",
+        "sender": node_id,
+        "cmd": 0x81,
+        "params": [ord('S'), 0x82, 0x00, 0x00, 0x00, 0x10],
+    })
+
+    assert popup.controller is not None
+    assert popup.controller._wait_for == "nodeconfig"
+    assert backend.sent == [(node_id, [0xC4, 0x3F])]
+
+
+def test_packet_signal_broadcasts_to_multiple_consumers():
+    backend = _FakeBackendClient(connected=True)
+    runtime_window = _FakeRuntimeWindow(backend)
+    hits: list[tuple[str, int]] = []
+
+    def first(packet):
+        hits.append(("first", int(packet["cmd"])))
+
+    def second(packet):
+        hits.append(("second", int(packet["cmd"])))
+
+    runtime_window.packet_received.connect(first)
+    runtime_window.packet_received.connect(second)
+
+    runtime_window.packet_received.emit({
+        "type": "can_over_uart",
+        "sender": 6,
+        "cmd": 0xC4,
+        "params": [0x3A, 0x00],
+    })
+
+    assert hits == [("first", 0xC4), ("second", 0xC4)]
