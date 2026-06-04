@@ -201,6 +201,16 @@ class SingleAxisFunctionalTestController:
 
         kind, value = decode_command(cmd, params)
 
+        # While waiting for RUN ACK, ignore unrelated packets (e.g., GETPOS) and keep waiting
+        if self._wait_for in ("run_right_ack", "run_left_ack") and kind != "run_started":
+            # Log raw packet bytes for traceability
+            try:
+                hex_payload = " ".join(f"{b:02X}" for b in data)
+            except Exception:
+                hex_payload = str(data)
+            self.status_changed(f"Ignoring out-of-state packet while waiting for RUN ACK: {hex_payload}")
+            return
+
         if kind == "nodeconfig":
             self._handle_nodeconfig(value)
             return

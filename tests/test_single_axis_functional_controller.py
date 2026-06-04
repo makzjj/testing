@@ -163,6 +163,66 @@ class FunctionalControllerTests(unittest.TestCase):
         for cmd in self.ctrl.commands:
             assert not cmd or cmd[0] != 0xEA
 
+    def test_live_run_ack_minimal_format_is_accepted(self):
+        # Drive to first RUN awaiting ACK
+        self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))  # hunting accepted
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))  # reference sensor
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))  # encoder init
+        self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))  # zero
+        # Provide safe flags then controller will send first RUN (-190)
+        self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
+        # Live ACK format: 88 53 00 BE (no 0x84)
+        self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x00, 0xBE))
+        # Should transition to waiting for left sensor
+        self.assertIn("WAIT_FOR_LEFT_SENSOR", self.ctrl.statuses[-1])
+
+    def test_ignore_getpos_while_waiting_for_run_ack_then_proceed(self):
+        # Reach state awaiting first RUN ACK
+        self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
+        self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
+        self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
+        # While waiting for RUN ACK, an out-of-state GETPOS arrives — must be ignored
+        last_status_count = len(self.ctrl.statuses)
+        self.ctrl.handle_runtime_packet(pkt(0x82, 0xFF, 0xFF, 0xFF, 0xFE))
+        # No failure; statuses appended with ignore log
+        self.assertGreater(len(self.ctrl.statuses), last_status_count)
+        self.assertIn("Ignoring out-of-state packet while waiting for RUN ACK", self.ctrl.statuses[-1])
+        self.assertFalse(self.ctrl.failed)
+        # Now the valid ACK arrives (live format) and we proceed to wait for left sensor
+        self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x00, 0xBE))
+        self.assertIn("WAIT_FOR_LEFT_SENSOR", self.ctrl.statuses[-1])
+
+    def test_timeout_waiting_for_run_ack_stops_and_fails(self):
+        # Reach state awaiting return RUN ACK (second leg)
+        self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
+        self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
+        self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
+        # First leg ack and opposite sensor
+        self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0xFF, 0x42))  # -190 live format
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
+        self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x13, 0x88))  # +5000
+        # Now controller sent RUN back to right; simulate that no ACK comes and timeout fires
+        self.ctrl.on_timeout()
+        self.assertTrue(self.ctrl.failed)
+        self.assertEqual(self.ctrl.commands[-1], build_stopmotor())
+
+    def test_getpos_is_only_sent_after_encoder_initialized(self):
+        # Accept hunting and receive Z-form reference (by R)
+        self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
+        self.ctrl.handle_runtime_packet(pkt(0x81, 0x5A, 0x52))  # 'Z','R'
+        # Ensure no GETPOS was sent yet
+        self.assertNotEqual(self.ctrl.commands[-1], build_getpos())
+        # Now receive encoder initialized 'I' -> GETPOS must be sent immediately
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
+        self.assertEqual(self.ctrl.commands[-1], build_getpos())
+
     def test_hunting_nack_fails_and_stops(self):
         self.ctrl.handle_runtime_packet(pkt(0xC3, 0x4E))  # NACK
         self.assertEqual(self.ctrl.commands[-1], build_stopmotor())

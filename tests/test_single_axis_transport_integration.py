@@ -114,3 +114,53 @@ def test_connected_backend_sends_and_receives(monkeypatch):
 
     # Ensure TX logs include node
     assert any(f"TX Node {node_id}:" in line for line in t.splitlines())
+
+
+def test_adapter_forwards_nodeconfig_and_controller_proceeds(monkeypatch):
+    _suppress_boxes(monkeypatch)
+    node_id = 6
+    backend = _FakeBackendClient(connected=True)
+    runtime_window = _FakeRuntimeWindow(backend)
+    bridge = _FakeBridge(runtime_window)
+
+    popup = SingleAxisFunctionalPopup(node_options=[(node_id, "AxisY")], bridge=bridge)
+    popup.node_combo.setCurrentIndex(1)
+    popup._handle_run_clicked()
+
+    # Emit NODECONFIG response from our node (CAN-over-UART style)
+    runtime_window.packet_received.emit({
+        "type": "can_over_uart",
+        "sender": node_id,
+        "cmd": 0xC4,
+        "params": [0x3A, 0x00],
+    })
+
+    # The controller should log NODECONFIG received and proceed to HUNTING
+    text = popup.status_block.toPlainText()
+    assert f"RX Node {node_id}: C4 3A 00" in text
+    assert "NODECONFIG received: 0x00" in text
+    assert "HUNTING" in text
+
+
+def test_no_out_of_state_ignore_log_while_waiting_for_nodeconfig(monkeypatch):
+    _suppress_boxes(monkeypatch)
+    node_id = 5
+    backend = _FakeBackendClient(connected=True)
+    runtime_window = _FakeRuntimeWindow(backend)
+    bridge = _FakeBridge(runtime_window)
+
+    popup = SingleAxisFunctionalPopup(node_options=[(node_id, "AxisZ")], bridge=bridge)
+    popup.node_combo.setCurrentIndex(1)
+    popup._handle_run_clicked()
+
+    # While still waiting for NODECONFIG, a GETPOS arrives; ensure no RUN-ACK ignore log appears
+    runtime_window.packet_received.emit({
+        "type": "can_over_uart",
+        "sender": node_id,
+        "cmd": 0x82,
+        "params": [0x00, 0x00, 0x00, 0x00],
+    })
+
+    text = popup.status_block.toPlainText()
+    assert "Querying NODECONFIG" in text
+    assert "Ignoring out-of-state packet while waiting for RUN ACK" not in text

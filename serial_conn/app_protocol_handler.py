@@ -43,11 +43,24 @@ class AppProtocolHandler:
         if not data:
             return
 
+        # Temporary debug: raw RX chunk
+        try:
+            hx = " ".join(f"{b:02X}" for b in data)
+            self._trigger('log', f"Serial RX chunk: {hx}")
+        except Exception:
+            pass
+
         self.rx_buffer += data
         
         try:
             # Reassembly delegated to standard parser
             packets, self.rx_buffer = parse_uart_rx_packets(self.rx_buffer)
+
+            # Temporary debug: parsed packet count and leftover
+            try:
+                self._trigger('log', f"Reassembled packets: {len(packets)}, leftover={len(self.rx_buffer)} bytes")
+            except Exception:
+                pass
 
             for pkt in packets:
                 if pkt.get("status") == "ok":

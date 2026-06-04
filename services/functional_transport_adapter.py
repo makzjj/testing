@@ -98,18 +98,56 @@ class FunctionalTransportAdapter(QObject):
         try:
             if not isinstance(packet, dict):
                 return
-            if packet.get("type") != "can_over_uart":
+            ptype = packet.get("type")
+
+            # Determine source node in a tolerant way: prefer 'sender' (CAN),
+            # fall back to 'node_id' (direct UART), ignore if missing
+            src = packet.get("sender")
+            if src is None:
+                src = packet.get("node_id")
+            if src is None:
+                self._rx_logger("Adapter ignored packet: missing sender/node_id")
                 return
-            sender = packet.get("sender")
-            if int(sender) != self.node_id:
+            try:
+                if int(src) != self.node_id:
+                    return
+            except Exception:
                 return
-            cmd = int(packet.get("cmd", 0))
-            params = list(packet.get("params", []))
+
+            # Extract command/params depending on packet type
+            cmd: int | None = None
+            params: list[int] = []
+
+            if ptype == "can_over_uart":
+                cmd = int(packet.get("cmd", 0))
+                params = list(packet.get("params", []))
+            elif ptype == "direct_uart":
+                # Some firmware may return query responses as raw UART payloads.
+                # Try 'raw_payload' first, then 'payload'.
+                raw = packet.get("raw_payload") or packet.get("payload")
+                if isinstance(raw, (list, tuple)) and len(raw) >= 1:
+                    try:
+                        cmd = int(raw[0])
+                        params = [int(b) & 0xFF for b in raw[1:]]
+                    except Exception:
+                        cmd = None
+                else:
+                    # Nothing decodable; ignore quietly
+                    return
+            else:
+                # Unknown packet type; ignore
+                return
+
+            if cmd is None:
+                return
+
             # Forward normalized payload to controller
-            self._controller_handler([cmd, *params])
+            payload = [cmd, *params]
+            self._controller_handler(payload)
+
             # RX log with friendly labels for key events
             lbl = self._label_for_rx(cmd, params)
-            hex_str = " ".join(f"{b:02X}" for b in [cmd, *params])
+            hex_str = " ".join(f"{b:02X}" for b in payload)
             if lbl:
                 self._rx_logger(f"RX Node {self.node_id}: {hex_str} - {lbl}")
             else:
