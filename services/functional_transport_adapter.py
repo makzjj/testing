@@ -122,6 +122,9 @@ class FunctionalTransportAdapter(QObject):
             params: list[int] = []
 
             if ptype == "can_over_uart":
+                if "cmd" not in packet:
+                    self._log_ignored_packet(packet, reason="missing command byte")
+                    return
                 cmd = int(packet.get("cmd", 0))
                 params = list(packet.get("params", []))
             elif ptype == "direct_uart":

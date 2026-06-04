@@ -225,3 +225,49 @@ def test_adapter_forwards_parsed_nodeconfig_from_split_uart_chunks(monkeypatch):
     assert f"RX Node {node_id}: C4 3A 00" in text
     assert "NODECONFIG received: 0x00" in text
     assert "HUNTING" in text
+
+
+def test_adapter_ignores_non_decoded_packet_fragments(monkeypatch):
+    _suppress_boxes(monkeypatch)
+    node_id = 12
+    backend = _FakeBackendClient(connected=True)
+    runtime_window = _FakeRuntimeWindow(backend)
+    bridge = _FakeBridge(runtime_window)
+
+    popup = SingleAxisFunctionalPopup(node_options=[(node_id, "Axis12")], bridge=bridge)
+    popup.node_combo.setCurrentIndex(1)
+    popup._handle_run_clicked()
+
+    runtime_window.packet_received.emit({
+        "type": "can_over_uart",
+        "sender": node_id,
+        "payload_hex": "25 A5 0C 01 31 03 C4 3A 02 41 1D",
+    })
+
+    text = popup.status_block.toPlainText()
+    assert "raw AMX" not in text
+    assert "C4 3A 02" not in text
+    assert "ignored packet:" in text
+
+
+def test_popup_logs_only_decoded_payload_not_raw_amx_stream(monkeypatch):
+    _suppress_boxes(monkeypatch)
+    node_id = 12
+    backend = _FakeBackendClient(connected=True)
+    runtime_window = _FakeRuntimeWindow(backend)
+    bridge = _FakeBridge(runtime_window)
+
+    popup = SingleAxisFunctionalPopup(node_options=[(node_id, "Axis12")], bridge=bridge)
+    popup.node_combo.setCurrentIndex(1)
+    popup._handle_run_clicked()
+
+    runtime_window.packet_received.emit({
+        "type": "can_over_uart",
+        "sender": node_id,
+        "cmd": 0xC4,
+        "params": [0x3A, 0x02],
+    })
+
+    text = popup.status_block.toPlainText()
+    assert f"RX Node {node_id}: C4 3A 02" in text
+    assert "25 A5" not in text

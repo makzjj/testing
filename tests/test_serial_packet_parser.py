@@ -54,6 +54,45 @@ def test_parser_reassembles_split_amx_across_chunks():
     assert pkt["params"] == [0x3A, 0x00]
 
 
+def test_parser_strips_source_byte_before_buffering_and_keeps_per_node_buffers_separate():
+    node6_full = build_amx_frame(6, 1, bytes([0xC4, 0x3A, 0x00]))
+    node7_full = build_amx_frame(7, 1, bytes([0xC9, 0x3A, 0x09]))
+    node6_chunk1 = bytes([0x06]) + node6_full[:3]
+    node7_chunk1 = bytes([0x07]) + node7_full[:3]
+    node12_complete = bytes.fromhex("0C 25 A5 0C 01 31 03 C4 3A 02 41 1D")
+    node6_chunk2 = bytes([0x06]) + node6_full[3:]
+    node7_chunk2 = bytes([0x07]) + node7_full[3:]
+
+    packets, leftover = parse_uart_rx_packets(bytearray(build_uart_frame(6, node6_chunk1)))
+    assert packets == []
+    assert leftover == b""
+
+    packets, leftover = parse_uart_rx_packets(bytearray(build_uart_frame(7, node7_chunk1)))
+    assert packets == []
+    assert leftover == b""
+
+    packets, leftover = parse_uart_rx_packets(bytearray(build_uart_frame(12, node12_complete)))
+    assert leftover == b""
+    assert len(packets) == 1
+    assert packets[0]["sender"] == 12
+    assert packets[0]["cmd"] == 0xC4
+    assert packets[0]["params"] == [0x3A, 0x02]
+
+    packets, leftover = parse_uart_rx_packets(bytearray(build_uart_frame(6, node6_chunk2)))
+    assert leftover == b""
+    assert len(packets) == 1
+    assert packets[0]["sender"] == 6
+    assert packets[0]["cmd"] == 0xC4
+    assert packets[0]["params"] == [0x3A, 0x00]
+
+    packets, leftover = parse_uart_rx_packets(bytearray(build_uart_frame(7, node7_chunk2)))
+    assert leftover == b""
+    assert len(packets) == 1
+    assert packets[0]["sender"] == 7
+    assert packets[0]["cmd"] == 0xC9
+    assert packets[0]["params"] == [0x3A, 0x09]
+
+
 def test_parser_extracts_multiple_amx_frames_in_one_outer_stream():
     amx1 = build_amx_frame(6, 1, bytes([0xC4, 0x3A, 0x00]))
     amx2 = build_amx_frame(6, 1, bytes([0x82, 0xFF, 0xFF, 0xFF, 0xFD]))
@@ -84,11 +123,35 @@ def test_parser_drops_garbage_before_sync_and_resyncs():
     assert any("dropped" in msg and "AMX sync" in msg for msg in debug_events)
 
 
+def test_parser_resyncs_from_garbage_before_sync_in_single_payload():
+    payload = bytes.fromhex("3A 10 10 02 67 0B 25 A5 0C 01 31 03 C4 3A 02 41 1D")
+    packets, leftover = parse_uart_rx_packets(bytearray(build_uart_frame(12, payload)))
+
+    assert leftover == b""
+    assert len(packets) == 1
+    pkt = packets[0]
+    assert pkt["sender"] == 12
+    assert pkt["cmd"] == 0xC4
+    assert pkt["params"] == [0x3A, 0x02]
+    assert pkt["payload_hex"] == "C4 3A 02"
+    assert any("dropped" in msg and "AMX sync" in msg for msg in drain_packet_parser_debug_events())
+
+
 def test_invalid_amx_checksum_is_rejected_and_debugged():
     bad_frame = bytearray(build_amx_frame(6, 1, bytes([0xC4, 0x3A, 0x00])))
     bad_frame[-1] ^= 0xFF
 
     packets, leftover = parse_uart_rx_packets(bytearray(build_uart_frame(6, bytes(bad_frame))))
+
+    assert packets == []
+    assert leftover == b""
+    debug_events = drain_packet_parser_debug_events()
+    assert any("invalid AMX checksum" in msg for msg in debug_events)
+
+
+def test_parser_rejects_checksum_failure_even_after_garbage_resync():
+    payload = bytes.fromhex("00 11 22 25 A5 0C 01 31 03 C4 3A 02 41 00")
+    packets, leftover = parse_uart_rx_packets(bytearray(build_uart_frame(12, payload)))
 
     assert packets == []
     assert leftover == b""

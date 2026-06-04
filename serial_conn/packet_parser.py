@@ -182,7 +182,7 @@ def parse_uart_rx_packets(rx_buffer: bytearray) -> tuple[list, bytearray]:
         # Parse CAN frames within this UART payload. A payload that looks like a
         # CAN chunk must not fall through to the direct-UART path just because
         # it only contains a partial AMX frame.
-        if _looks_like_can_chunk(payload):
+        if _looks_like_can_chunk(payload) or payload.find(b"\x25\xA5") >= 0:
             can_packets = parse_can_frames_from_uart_payload(payload, node_id)
             packets.extend(can_packets)
         else:
