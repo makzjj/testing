@@ -5,6 +5,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from gui.workspace.pages.single_axis_functional_popup import SingleAxisFunctionalPopup
+from serial_conn.packet_parser import parse_uart_rx_packets, reset_packet_parser_state
 
 
 def get_app():
@@ -18,6 +19,13 @@ def get_app():
 def _qt_app():
     app = get_app()
     yield app
+
+
+@pytest.fixture(autouse=True)
+def _parser_state():
+    reset_packet_parser_state()
+    yield
+    reset_packet_parser_state()
 
 
 def _suppress_boxes(monkeypatch):
@@ -53,6 +61,10 @@ class _FakeBridge:
 
     def get_runtime_window(self, *, create_if_missing: bool = False):
         return self._runtime_window
+
+
+def _build_uart_frame(node_id: int, payload: bytes) -> bytes:
+    return bytes([0xC8, 0x24, node_id, len(payload)]) + payload
 
 
 def test_disconnected_backend_aborts_run(monkeypatch):
@@ -187,3 +199,29 @@ def test_packet_signal_broadcasts_to_multiple_consumers():
     })
 
     assert hits == [("first", 0xC4), ("second", 0xC4)]
+
+
+def test_adapter_forwards_parsed_nodeconfig_from_split_uart_chunks(monkeypatch):
+    _suppress_boxes(monkeypatch)
+    node_id = 6
+    backend = _FakeBackendClient(connected=True)
+    runtime_window = _FakeRuntimeWindow(backend)
+    bridge = _FakeBridge(runtime_window)
+
+    popup = SingleAxisFunctionalPopup(node_options=[(node_id, "AxisY")], bridge=bridge)
+    popup.node_combo.setCurrentIndex(1)
+    popup._handle_run_clicked()
+
+    chunk1 = bytes.fromhex("05 25 A5 06")
+    chunk2 = bytes.fromhex("05 01 31 03 C4 3A 00 39 F1")
+    packets, leftover = parse_uart_rx_packets(bytearray(_build_uart_frame(node_id, chunk1) + _build_uart_frame(node_id, chunk2)))
+
+    assert leftover == b""
+    assert len(packets) == 1
+
+    runtime_window.packet_received.emit(packets[0])
+
+    text = popup.status_block.toPlainText()
+    assert f"RX Node {node_id}: C4 3A 00" in text
+    assert "NODECONFIG received: 0x00" in text
+    assert "HUNTING" in text

@@ -9,6 +9,128 @@ from myconfig.constants import (
     BCMD_NODE_ID_RESPONSE,
     BCMD_COMM_TEST_FRAME,
 )
+from utils.checksum import fletcher_checksum
+
+
+_INNER_AMX_BUFFERS: dict[int, bytearray] = {}
+_PARSER_DEBUG_EVENTS: list[str] = []
+
+
+def reset_packet_parser_state() -> None:
+    """Reset buffered parser state for tests."""
+    _INNER_AMX_BUFFERS.clear()
+    _PARSER_DEBUG_EVENTS.clear()
+
+
+def drain_packet_parser_debug_events() -> list[str]:
+    """Return and clear parser debug messages."""
+    events = list(_PARSER_DEBUG_EVENTS)
+    _PARSER_DEBUG_EVENTS.clear()
+    return events
+
+
+def _record_parser_debug(message: str) -> None:
+    _PARSER_DEBUG_EVENTS.append(message)
+
+
+def _validate_amx_checksum(frame: bytes) -> bool:
+    if len(frame) < 8 or frame[0] != 0x25 or frame[1] != 0xA5:
+        return False
+    expected = fletcher_checksum(frame[2:-2])
+    return expected == (frame[-2], frame[-1])
+
+
+def _drop_garbage_before_sync(buffer: bytearray) -> int:
+    sync_idx = buffer.find(b"\x25\xA5")
+    if sync_idx < 0:
+        if not buffer:
+            return 0
+        keep_len = 1 if buffer[-1] == 0x25 else 0
+        dropped = len(buffer) - keep_len
+        if dropped > 0:
+            del buffer[:dropped]
+            _record_parser_debug(f"dropped {dropped} byte(s) before AMX sync")
+        return dropped
+
+    if sync_idx > 0:
+        del buffer[:sync_idx]
+        _record_parser_debug(f"dropped {sync_idx} byte(s) before AMX sync")
+    return sync_idx
+
+
+def _build_can_packet(frame: bytes, uart_node_id: int) -> dict:
+    sender = frame[2]
+    target = frame[3]
+    port = frame[4]
+    can_data_len = frame[5]
+    can_data = frame[6: 6 + can_data_len]
+    cmd = can_data[0]
+    params = list(can_data[1:]) if len(can_data) > 1 else []
+
+    pkt = {
+        "status": "ok",
+        "type": "can_over_uart",
+        "node_id": uart_node_id,
+        "sender": sender,
+        "target": target,
+        "port": port,
+        "cmd": cmd,
+        "params": params,
+        "payload_hex": " ".join(f"{b:02X}" for b in can_data),
+    }
+
+    try:
+        key, value = decode_command(cmd, params)
+        if key:
+            pkt["decoded_key"] = key
+            pkt["decoded_value"] = value
+
+        if cmd == 0xE0:
+            uuid_result = parse_get_uuid(params)
+            if uuid_result != "Invalid":
+                pkt["uuid_response"] = True
+                pkt["uuid"] = uuid_result
+                pkt["uuid_valid"] = True
+            else:
+                pkt["uuid_response"] = True
+                pkt["uuid_valid"] = False
+    except Exception as exc:
+        pkt["decode_error"] = str(exc)
+
+    return pkt
+
+
+def _extract_complete_amx_frames(buffer: bytearray, uart_node_id: int) -> list[dict]:
+    packets: list[dict] = []
+
+    while buffer:
+        _drop_garbage_before_sync(buffer)
+        if len(buffer) < 8:
+            break
+        if buffer[0] != 0x25 or buffer[1] != 0xA5:
+            break
+
+        payload_len = buffer[5]
+        total_len = payload_len + 8
+        if len(buffer) < total_len:
+            break
+
+        frame = bytes(buffer[:total_len])
+        if not _validate_amx_checksum(frame):
+            _record_parser_debug(
+                f"invalid AMX checksum for node {frame[2]}: {frame[-2]:02X} {frame[-1]:02X}"
+            )
+            del buffer[0]
+            continue
+
+        packets.append(_build_can_packet(frame, uart_node_id))
+        del buffer[:total_len]
+
+    return packets
+
+
+def _looks_like_can_chunk(payload: bytes) -> bool:
+    return bool(payload) and (0 < payload[0] <= 0x1F or (len(payload) >= 2 and payload[0] == 0x25 and payload[1] == 0xA5))
 
 
 def _parse_mcu_version_from_bytes(params_list):
@@ -57,12 +179,13 @@ def parse_uart_rx_packets(rx_buffer: bytearray) -> tuple[list, bytearray]:
         # Extract payload
         payload = bytes(rx_buffer[idx + 4: idx + 4 + payload_len])
 
-        # Parse CAN frames within this UART payload
-        can_packets = parse_can_frames_from_uart_payload(payload, node_id)
-        packets.extend(can_packets)
-
-        # If no CAN frames found, treat as direct UART
-        if not can_packets:
+        # Parse CAN frames within this UART payload. A payload that looks like a
+        # CAN chunk must not fall through to the direct-UART path just because
+        # it only contains a partial AMX frame.
+        if _looks_like_can_chunk(payload):
+            can_packets = parse_can_frames_from_uart_payload(payload, node_id)
+            packets.extend(can_packets)
+        else:
             pkt = {
                 "status": "ok",
                 "type": "direct_uart",
@@ -89,79 +212,34 @@ def parse_uart_rx_packets(rx_buffer: bytearray) -> tuple[list, bytearray]:
 
 def parse_can_frames_from_uart_payload(payload: bytes, uart_node_id: int) -> list:
     """
-    Parse multiple CAN frames from a single UART payload.
-    Handles the case where multiple CAN frames are concatenated.
+    Parse AMX frames from a UART payload.
+
+    Supports two cases:
+    - legacy direct AMX payloads that start with 25 A5
+    - source-prefixed CAN chunks that start with <source_node_id>
     """
-    can_packets = []
-    sub_idx = 0
-    payload_len = len(payload)
+    if len(payload) >= 2 and payload[0] == 0x25 and payload[1] == 0xA5:
+        return _extract_complete_amx_frames(bytearray(payload), uart_node_id)
 
-    while sub_idx + 6 <= payload_len:
-        # Look for CAN header 0x25 0xA5
-        if payload[sub_idx] == 0x25 and payload[sub_idx + 1] == 0xA5:
-            # Parse CAN header
-            sender = payload[sub_idx + 2]
-            target = payload[sub_idx + 3]
-            port = payload[sub_idx + 4]
-            can_data_len = payload[sub_idx + 5]
+    if not payload:
+        return []
 
-            total_can_len = 6 + can_data_len
+    if 0 < payload[0] <= 0x1F:
+        source_node = int(payload[0])
+        inner_buffer = _INNER_AMX_BUFFERS.setdefault(source_node, bytearray())
+        inner_buffer.extend(payload[1:])
+        packets = _extract_complete_amx_frames(inner_buffer, uart_node_id)
+        if not inner_buffer:
+            _INNER_AMX_BUFFERS.pop(source_node, None)
+        return packets
 
-            # Check if we have complete CAN frame
-            if sub_idx + total_can_len > payload_len:
-                # Incomplete CAN frame - wait for more data
-                break
+    sync_idx = payload.find(b"\x25\xA5")
+    if sync_idx >= 0:
+        if sync_idx > 0:
+            _record_parser_debug(f"dropped {sync_idx} byte(s) before AMX sync")
+        return _extract_complete_amx_frames(bytearray(payload[sync_idx:]), uart_node_id)
 
-            # Extract CAN data
-            can_data = payload[sub_idx + 6: sub_idx + total_can_len]
-
-            if len(can_data) >= 1:
-                cmd = can_data[0]
-                params = list(can_data[1:]) if len(can_data) > 1 else []
-
-                # Create CAN packet
-                pkt = {
-                    "status": "ok",
-                    "type": "can_over_uart",
-                    "node_id": uart_node_id,  # UART receiver node
-                    "sender": sender,  # CAN sender node
-                    "target": target,
-                    "port": port,
-                    "cmd": cmd,
-                    "params": params,
-                    "payload_hex": " ".join(f"{b:02X}" for b in can_data),
-                }
-
-                # Use the imported decode_command function
-                try:
-                    key, value = decode_command(cmd, params)
-                    if key:
-                        pkt["decoded_key"] = key
-                        pkt["decoded_value"] = value
-
-                    # Special handling for UUID responses
-                    if cmd == 0xE0:  # UUID command
-                        uuid_result = parse_get_uuid(params)
-                        if uuid_result != "Invalid":
-                            pkt["uuid_response"] = True
-                            pkt["uuid"] = uuid_result
-                            pkt["uuid_valid"] = True
-                        else:
-                            pkt["uuid_response"] = True
-                            pkt["uuid_valid"] = False
-                except Exception as e:
-                    # Log decoding errors but don't crash
-                    pkt["decode_error"] = str(e)
-
-                can_packets.append(pkt)
-
-            # Move to next potential CAN frame
-            sub_idx += total_can_len
-        else:
-            # No CAN header found, move to next byte
-            sub_idx += 1
-
-    return can_packets
+    return []
 
 
 def parse_uart_rx_packets_singale_frame(rx_buffer: bytearray) -> tuple[list[dict], bytearray]:
