@@ -146,6 +146,32 @@ def test_adapter_forwards_nodeconfig_and_controller_proceeds(monkeypatch):
     assert rx_idx < tx_idx
 
 
+def test_live_stop_button_sends_dd_and_reenables_controls(monkeypatch):
+    _suppress_boxes(monkeypatch)
+    node_id = 8
+    backend = _FakeBackendClient(connected=True)
+    runtime_window = _FakeRuntimeWindow(backend)
+    bridge = _FakeBridge(runtime_window)
+
+    popup = SingleAxisFunctionalPopup(node_options=[(node_id, "AxisZ")], bridge=bridge)
+    popup.node_combo.setCurrentIndex(1)
+    popup._handle_run_clicked()
+    assert popup._is_running is True
+    assert popup.stop_button.isEnabled()
+
+    popup.stop_button.click()
+
+    assert popup._is_running is False
+    assert popup.run_button.isEnabled()
+    assert popup.node_combo.isEnabled()
+    assert popup.tolerance_combo.isEnabled()
+    assert not popup.stop_button.isEnabled()
+    assert backend.sent[-1] == (node_id, [0xDD])
+    text = popup.status_block.toPlainText()
+    assert f"TX Node {node_id}: DD" in text
+    assert "Functional test ABORTED by user." in text
+
+
 def test_no_out_of_state_ignore_log_while_waiting_for_nodeconfig(monkeypatch):
     _suppress_boxes(monkeypatch)
     node_id = 5

@@ -28,6 +28,8 @@ class Recorder(SingleAxisFunctionalTestController):
         self.passed = False
         self.failed = False
         self.fail_reason = ""
+        self.aborted = False
+        self.abort_reason = ""
 
     def command_requested(self, payload: list[int]) -> None:
         self.commands.append(payload)
@@ -60,6 +62,10 @@ class Recorder(SingleAxisFunctionalTestController):
         self.failed = True
         self.fail_reason = reason
 
+    def test_aborted(self, reason: str) -> None:
+        self.aborted = True
+        self.abort_reason = reason
+
 
 def pkt(*bytes_):
     return list(bytes_)
@@ -72,8 +78,7 @@ class FunctionalControllerTests(unittest.TestCase):
             velocity_left_to_right=190,
             velocity_right_to_left=-190,
             zero_tolerance=5,
-            range_tolerance=512,
-            middle_position_tolerance=5,
+            movement_tolerance=512,
         )
         self.ctrl = Recorder(cfg)
         self.ctrl.start(3)
@@ -84,24 +89,55 @@ class FunctionalControllerTests(unittest.TestCase):
         # After NODECONFIG response, controller should request HUNTING
         self.assertEqual(self.ctrl.commands[-1], build_hunting_timeout(10000))
 
-    def _drive_to_compare(self, opposite_pos: int, returned_home_pos: int) -> None:
-        self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
-        self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
-        self.assertEqual(self.ctrl.commands[-1], build_lflag_query_payload())
-        self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
-        self.assertEqual(self.ctrl.commands[-1], build_rflag_query_payload())
-        self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
-        self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
-        self.ctrl.handle_runtime_packet(
+    def _drive_to_compare(self, opposite_pos: int, returned_home_pos: int, ctrl: Recorder | None = None) -> None:
+        ctrl = ctrl or self.ctrl
+        ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
+        ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
+        ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
+        self.assertEqual(ctrl.commands[-1], build_lflag_query_payload())
+        ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        self.assertEqual(ctrl.commands[-1], build_rflag_query_payload())
+        ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
+        ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
+        ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
+        ctrl.handle_runtime_packet(
             pkt(0x82, (opposite_pos >> 24) & 0xFF, (opposite_pos >> 16) & 0xFF, (opposite_pos >> 8) & 0xFF, opposite_pos & 0xFF)
         )
-        self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0x00, 0xBE))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0x00, 0xBE))
+        ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
         returned_be = list((returned_home_pos).to_bytes(4, 'big', signed=True))
-        self.ctrl.handle_runtime_packet(pkt(0x82, *returned_be))
+        ctrl.handle_runtime_packet(pkt(0x82, *returned_be))
+
+    def test_abort_by_user_sends_dd_and_ignores_late_packets(self):
+        self.ctrl.abort_by_user()
+        self.assertTrue(self.ctrl.aborted)
+        self.assertFalse(self.ctrl._running)
+        self.assertIsNone(self.ctrl._wait_for)
+        self.assertEqual(self.ctrl.commands[-1], build_stopmotor())
+
+        cmd_count = len(self.ctrl.commands)
+        status_count = len(self.ctrl.statuses)
+        self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
+        self.assertEqual(len(self.ctrl.commands), cmd_count)
+        self.assertEqual(len(self.ctrl.statuses), status_count)
+
+    def test_restart_after_abort_resets_cleanly(self):
+        self.ctrl.abort_by_user()
+        self.assertTrue(self.ctrl.aborted)
+
+        self.ctrl.start(4)
+        self.assertEqual(self.ctrl.commands[-1], [0xC4, 0x3F])
+        self.assertTrue(self.ctrl._running)
+        self.assertEqual(self.ctrl._wait_for, "nodeconfig")
+        self.assertIsNone(self.ctrl._lflag)
+        self.assertIsNone(self.ctrl._rflag)
+        self.assertIsNone(self.ctrl._range_1)
+        self.assertIsNone(self.ctrl._range_2)
+        self.assertIsNone(self.ctrl._middle_target)
+        self.assertFalse(self.ctrl.passed)
+        self.assertFalse(self.ctrl.failed)
 
     def test_range_difference_33_passes_with_512_tolerance(self):
         self._drive_to_compare(2_500_797, -33)
@@ -468,27 +504,91 @@ class FunctionalControllerTests(unittest.TestCase):
         self.assertTrue(self.ctrl.passed)
         self.assertEqual(self.ctrl.commands[-1], build_stopmotor())
 
+    def test_middle_position_tolerance_boundary_uses_shared_value(self):
+        ctrl_pass = Recorder(
+            FunctionalTestConfig(
+                hunt_timeout_ms=10_000,
+                velocity_left_to_right=190,
+                velocity_right_to_left=-190,
+                zero_tolerance=5,
+                movement_tolerance=512,
+            )
+        )
+        ctrl_pass.start(3)
+        ctrl_pass.handle_runtime_packet(pkt(0xC4, 0x3A, 0x03))
+        ctrl_pass.handle_runtime_packet(pkt(0xC3, 0x41))
+        ctrl_pass.handle_runtime_packet(pkt(0x81, ord('R')))
+        ctrl_pass.handle_runtime_packet(pkt(0x81, ord('I')))
+        ctrl_pass.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
+        ctrl_pass.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        ctrl_pass.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
+        ctrl_pass.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
+        ctrl_pass.handle_runtime_packet(pkt(0x81, ord('L')))
+        ctrl_pass.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x13, 0x88))
+        ctrl_pass.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0x00, 0xBE))
+        ctrl_pass.handle_runtime_packet(pkt(0x81, ord('R')))
+        ctrl_pass.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
+        middle = 2500
+        self.assertEqual(ctrl_pass.commands[-1], build_tpos(middle))
+        ctrl_pass.handle_runtime_packet(pkt(0x81, ord('N'), 0x82, *list((middle + 512).to_bytes(4, 'big', signed=True))))
+        self.assertTrue(ctrl_pass.passed)
+
+        ctrl_fail = Recorder(
+            FunctionalTestConfig(
+                hunt_timeout_ms=10_000,
+                velocity_left_to_right=190,
+                velocity_right_to_left=-190,
+                zero_tolerance=5,
+                movement_tolerance=512,
+            )
+        )
+        ctrl_fail.start(3)
+        ctrl_fail.handle_runtime_packet(pkt(0xC4, 0x3A, 0x03))
+        ctrl_fail.handle_runtime_packet(pkt(0xC3, 0x41))
+        ctrl_fail.handle_runtime_packet(pkt(0x81, ord('R')))
+        ctrl_fail.handle_runtime_packet(pkt(0x81, ord('I')))
+        ctrl_fail.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
+        ctrl_fail.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        ctrl_fail.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
+        ctrl_fail.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
+        ctrl_fail.handle_runtime_packet(pkt(0x81, ord('L')))
+        ctrl_fail.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x13, 0x88))
+        ctrl_fail.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0x00, 0xBE))
+        ctrl_fail.handle_runtime_packet(pkt(0x81, ord('R')))
+        ctrl_fail.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
+        self.assertEqual(ctrl_fail.commands[-1], build_tpos(middle))
+        ctrl_fail.handle_runtime_packet(pkt(0x81, ord('N'), 0x82, *list((middle + 513).to_bytes(4, 'big', signed=True))))
+        self.assertTrue(ctrl_fail.failed)
+
     def test_tpos_no_move_outside_tolerance_fails(self):
-        # Same as above but outside tol
-        self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
-        self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
-        # Provide flags prior to RUN
-        self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
-        self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
-        self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
-        self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x13, 0x88))
-        self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0x00, 0xBE))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
-        # returned_home_pos = +3 -> middle 2500
-        self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x03))
-        # Immediate no-move with pos outside tolerance (2470, tol=5)
+        # Same as above but outside tolerance for a tighter shared-movement setting.
+        ctrl = Recorder(
+            FunctionalTestConfig(
+                hunt_timeout_ms=10_000,
+                velocity_left_to_right=190,
+                velocity_right_to_left=-190,
+                zero_tolerance=5,
+                movement_tolerance=5,
+            )
+        )
+        ctrl.start(3)
+        ctrl.handle_runtime_packet(pkt(0xC4, 0x3A, 0x03))
+        ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
+        ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
+        ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
+        ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
+        ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
+        ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
+        ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x13, 0x88))
+        ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0x00, 0xBE))
+        ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x03))
         pos = 2470
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('N'), 0x82, *list(pos.to_bytes(4, 'big', signed=True))))
-        self.assertTrue(self.ctrl.failed)
-        self.assertEqual(self.ctrl.commands[-1], build_stopmotor())
+        ctrl.handle_runtime_packet(pkt(0x81, ord('N'), 0x82, *list(pos.to_bytes(4, 'big', signed=True))))
+        self.assertTrue(ctrl.failed)
+        self.assertEqual(ctrl.commands[-1], build_stopmotor())
 
     def test_big_endian_middle_byte_order(self):
         # Drive up to middle command emission and check bytes

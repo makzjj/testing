@@ -39,16 +39,31 @@ def test_run_with_selected_node_starts_controller(monkeypatch):
     # UI disabled while running
     assert popup._is_running is True
     assert not popup.run_button.isEnabled()
+    assert popup.stop_button.isEnabled()
     assert not popup.node_combo.isEnabled()
+    assert not popup.tolerance_combo.isEnabled()
 
     # Controller should request NODECONFIG query first via safe handler
     assert popup._tx_log[-1] == build_nodeconfig_query_payload()
     assert popup.controller is not None
+    assert popup.controller.cfg.movement_tolerance == 512
     assert popup.controller.cfg.range_tolerance == 512
+    assert popup.controller.cfg.middle_position_tolerance == 512
+    assert "Tolerance selected: 512 counts" in popup.status_block.toPlainText()
 
     # Status block should contain some status lines (e.g., IDLE/state updates)
     text = popup.status_block.toPlainText()
     assert "IDLE" in text
+
+
+def test_footer_button_order_and_stop_state(monkeypatch):
+    _suppress_message_boxes(monkeypatch)
+    popup = SingleAxisFunctionalPopup(node_options=[(3, "AxisX")], allow_safe_tx=True)
+    footer = popup.layout().itemAt(popup.layout().count() - 1).layout()
+    assert footer.itemAt(2).widget() is popup.run_button
+    assert footer.itemAt(3).widget() is popup.stop_button
+    assert footer.itemAt(4).widget() is popup.close_button
+    assert not popup.stop_button.isEnabled()
 
 
 def test_run_without_node_shows_warning_and_not_start(monkeypatch):
@@ -123,7 +138,8 @@ def test_pass_triggers_sampling_prompt_and_reenables(monkeypatch):
     popup.controller.test_passed()
     assert called["ask"] is True
     assert popup._is_running is False
-    assert popup.run_button.isEnabled() and popup.node_combo.isEnabled()
+    assert popup.run_button.isEnabled() and popup.node_combo.isEnabled() and popup.tolerance_combo.isEnabled()
+    assert not popup.stop_button.isEnabled()
 
 
 def test_failed_marks_failed_and_no_sampling_prompt(monkeypatch):
@@ -138,7 +154,62 @@ def test_failed_marks_failed_and_no_sampling_prompt(monkeypatch):
     popup.ask_start_sampling = bad_ask  # type: ignore[assignment]
     popup.controller.test_failed("oops")
     assert popup._is_running is False
-    assert popup.run_button.isEnabled() and popup.node_combo.isEnabled()
+    assert popup.run_button.isEnabled() and popup.node_combo.isEnabled() and popup.tolerance_combo.isEnabled()
+    assert not popup.stop_button.isEnabled()
+
+
+def test_stop_button_aborts_logs_dd_and_allows_rerun(monkeypatch):
+    _suppress_message_boxes(monkeypatch)
+    popup = SingleAxisFunctionalPopup(node_options=[(7, "Axis")], allow_safe_tx=True)
+    popup.node_combo.setCurrentIndex(1)
+    popup._handle_run_clicked()
+
+    popup.stop_button.click()
+
+    text = popup.status_block.toPlainText()
+    assert "Functional test aborted by user" in text
+    assert "Functional test ABORTED by user." in text
+    assert "TX Node 7: DD" in text
+    assert popup._tx_log[-1] == [0xDD]
+    assert popup._is_running is False
+    assert popup.run_button.isEnabled()
+    assert popup.node_combo.isEnabled()
+    assert popup.tolerance_combo.isEnabled()
+    assert not popup.stop_button.isEnabled()
+
+    popup._handle_run_clicked()
+    assert popup._is_running is True
+    assert popup._tx_log[-1] == build_nodeconfig_query_payload()
+
+
+def test_tolerance_dropdown_defaults_and_selection_propagates(monkeypatch):
+    _suppress_message_boxes(monkeypatch)
+    popup = SingleAxisFunctionalPopup(node_options=[(9, "Axis")], allow_safe_tx=True)
+    assert popup.tolerance_combo.currentText() == "512 counts"
+    popup.tolerance_combo.setCurrentIndex(popup.tolerance_combo.findData(2048))
+    popup.node_combo.setCurrentIndex(1)
+    popup._handle_run_clicked()
+    assert popup.controller is not None
+    assert popup.controller.cfg.movement_tolerance == 2048
+    assert not popup.tolerance_combo.isEnabled()
+
+
+def test_close_works_after_stop(monkeypatch):
+    _suppress_message_boxes(monkeypatch)
+    popup = SingleAxisFunctionalPopup(node_options=[(11, "Axis")], allow_safe_tx=True)
+    popup.node_combo.setCurrentIndex(1)
+    popup._handle_run_clicked()
+    popup.stop_button.click()
+
+    warned = {"called": False}
+
+    def fake_info(*a, **k):
+        warned["called"] = True
+        return None
+
+    monkeypatch.setattr(QMessageBox, "information", fake_info)
+    assert popup.close() is True
+    assert warned["called"] is False
 
 
 def test_run_with_selected_node_but_no_backend_aborts_normally(monkeypatch):

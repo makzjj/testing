@@ -54,6 +54,7 @@ class SingleAxisFunctionalPopup(QDialog):
         self.setMinimumSize(400, 300)
 
         self._is_running = False
+        self._active_node_id: int | None = None
         self._bridge = bridge  # WorkspaceRuntimeBridge when provided
         self._adapter = None  # set during live runs
         # safe TX log for tests/inspection (no real hardware tx in this phase)
@@ -135,13 +136,31 @@ class SingleAxisFunctionalPopup(QDialog):
         root_layout.addLayout(status_row)
 
         footer_row = QHBoxLayout()
+        footer_row.setContentsMargins(0, 0, 0, 0)
+        footer_row.setSpacing(8)
+        tolerance_row = QHBoxLayout()
+        tolerance_row.setContentsMargins(0, 0, 0, 0)
+        tolerance_row.setSpacing(6)
+        tolerance_label = QLabel("Tolerance")
+        self.tolerance_combo = QComboBox()
+        for counts in (128, 256, 512, 1024, 2048, 4096):
+            self.tolerance_combo.addItem(f"{counts} counts", counts)
+        self.tolerance_combo.setCurrentIndex(2)
+        tolerance_row.addWidget(tolerance_label)
+        tolerance_row.addWidget(self.tolerance_combo)
+        footer_row.addLayout(tolerance_row)
         footer_row.addStretch(1)
         self.run_button = QPushButton("Run")
         self.run_button.clicked.connect(self._handle_run_clicked)
+        self.stop_button = QPushButton("Stop")
+        self.stop_button.setProperty("tone", "danger")
+        self.stop_button.clicked.connect(self._handle_stop_clicked)
+        self.stop_button.setEnabled(False)
         self.close_button = QPushButton("Close")
         self.close_button.setProperty("tone", "secondary")
         self.close_button.clicked.connect(self.close)
         footer_row.addWidget(self.run_button)
+        footer_row.addWidget(self.stop_button)
         footer_row.addWidget(self.close_button)
         root_layout.addLayout(footer_row)
 
@@ -184,6 +203,9 @@ class SingleAxisFunctionalPopup(QDialog):
         QMessageBox.warning(self, "Functional Test Failed", str(reason))
         self._finish_run_ui()
 
+    def mark_aborted(self) -> None:
+        self._finish_run_ui()
+
     def ask_start_sampling(self) -> bool:
         message_box = QMessageBox(self)
         message_box.setIcon(QMessageBox.Icon.Question)
@@ -209,9 +231,16 @@ class SingleAxisFunctionalPopup(QDialog):
             QMessageBox.warning(self, "Functional", "Please select a node before running the functional test.")
             return
         node_id, _node_name = node_data
-        self._start_controller_run(int(node_id))
+        self._start_controller_run(int(node_id), self._selected_tolerance())
 
-    def _start_controller_run(self, node_id: int) -> None:
+    def _handle_stop_clicked(self) -> None:
+        if not self._is_running:
+            return
+        self._ensure_controller()
+        assert self.controller is not None
+        self.controller.abort_by_user()
+
+    def _start_controller_run(self, node_id: int, tolerance: int) -> None:
         # Determine transport state before marking as running
         runtime_window = None
         backend_client = None
@@ -250,18 +279,25 @@ class SingleAxisFunctionalPopup(QDialog):
             return
 
         # At this point, we are either live-connected, or explicitly allowed safe TX (tests)
+        self._active_node_id = node_id
         self._is_running = True
         self.run_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
         self.node_combo.setEnabled(False)
+        self.tolerance_combo.setEnabled(False)
         self.update_position(0)
         self.update_range("-")
         self.reset_flags()
 
         # Add session separator
         self.append_status("— New functional test session —")
+        self.append_status(f"Tolerance selected: {int(tolerance)} counts")
         # Start controller with real transport if available
         self._ensure_controller()
         assert self.controller is not None
+        self.controller.cfg.movement_tolerance = int(tolerance)
+        self.controller.cfg.range_tolerance = int(tolerance)
+        self.controller.cfg.middle_position_tolerance = int(tolerance)
 
         if live_connected:
             try:
@@ -306,7 +342,9 @@ class SingleAxisFunctionalPopup(QDialog):
     def _finish_run_ui(self) -> None:
         self._is_running = False
         self.run_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
         self.node_combo.setEnabled(True)
+        self.tolerance_combo.setEnabled(True)
         # Detach live adapter if present to stop receiving packets
         if self._adapter is not None and hasattr(self._adapter, "detach_runtime_window"):
             try:
@@ -314,6 +352,7 @@ class SingleAxisFunctionalPopup(QDialog):
             except Exception:
                 pass
         self._adapter = None
+        self._active_node_id = None
 
     def _show_log_placeholder(self) -> None:
         log_text = self.status_block.toPlainText().strip() or "No status messages available."
@@ -324,6 +363,12 @@ class SingleAxisFunctionalPopup(QDialog):
         if not isinstance(node_data, tuple) or len(node_data) != 2:
             return "-"
         return str(node_data[0])
+
+    def _selected_tolerance(self) -> int:
+        tolerance = self.tolerance_combo.currentData()
+        if isinstance(tolerance, int):
+            return tolerance
+        return 512
 
     @classmethod
     def _build_led_widget(cls) -> QLabel:
@@ -355,7 +400,10 @@ class SingleAxisFunctionalPopup(QDialog):
         def _safe_tx(payload: list[int]) -> None:
             self._tx_log.append(list(payload))
             hex_str = " ".join(f"{b:02X}" for b in payload)
-            self.append_status(f"TX requested: {hex_str}")
+            if payload == [0xDD] and self._active_node_id is not None:
+                self.append_status(f"TX Node {self._active_node_id}: {hex_str}")
+            else:
+                self.append_status(f"TX requested: {hex_str}")
 
         # Range/diff helpers: update range label and append status for visibility
         def _on_range1(val: int) -> None:
@@ -377,6 +425,9 @@ class SingleAxisFunctionalPopup(QDialog):
         def _on_fail(reason: str) -> None:
             self.mark_failed(reason)
 
+        def _on_abort(_reason: str) -> None:
+            self.mark_aborted()
+
         # Bind
         assert self.controller is not None
         self.controller.command_requested = _safe_tx
@@ -389,6 +440,7 @@ class SingleAxisFunctionalPopup(QDialog):
         self.controller.right_flag_changed = self.set_right_flag_active
         self.controller.test_passed = _on_pass
         self.controller.test_failed = _on_fail
+        self.controller.test_aborted = _on_abort
 
     def _ensure_controller(self) -> None:
         if self.controller is None:

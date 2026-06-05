@@ -41,11 +41,28 @@ class FunctionalTestConfig:
     velocity_left_to_right: int = 190
     velocity_right_to_left: int = -190
     zero_tolerance: int = 5
+    movement_tolerance: int | None = None
     range_tolerance: int = 512
     middle_position_tolerance: int = 10
     # Configurable sensor sequence (reference/opposite). Defaults to current production: R -> I -> L -> R
     reference_sensor: str = "R"  # either "L" or "R"
     opposite_sensor: str = "L"   # the other one
+
+    def __post_init__(self) -> None:
+        # Keep legacy fields aligned while allowing the popup to provide one shared tolerance.
+        if self.movement_tolerance is None:
+            if self.middle_position_tolerance != 10:
+                chosen = self.middle_position_tolerance
+            elif self.range_tolerance != 512:
+                chosen = self.range_tolerance
+            else:
+                chosen = 512
+        else:
+            chosen = self.movement_tolerance
+        chosen = max(0, int(chosen))
+        self.movement_tolerance = chosen
+        self.range_tolerance = chosen
+        self.middle_position_tolerance = chosen
 
 
 class SingleAxisFunctionalTestController:
@@ -71,6 +88,7 @@ class SingleAxisFunctionalTestController:
     S_COMPARE = "COMPARE_RANGE"
     S_MOVE_MIDDLE = "MOVE_TO_MIDDLE"
     S_WAIT_MIDDLE = "WAIT_FOR_MIDDLE_COMPLETION"
+    S_ABORTED = "ABORTED"
     S_PASSED = "PASSED"
     S_FAILED = "FAILED"
 
@@ -99,6 +117,7 @@ class SingleAxisFunctionalTestController:
         # Sensor flag cache (queried before first RUN)
         self._lflag: int | None = None
         self._rflag: int | None = None
+        self._running: bool = False
 
     # --- Signal-like methods (override/monkeypatch in tests) ---
     def command_requested(self, payload: list[int]) -> None:  # pragma: no cover - overridden in tests
@@ -131,20 +150,15 @@ class SingleAxisFunctionalTestController:
     def test_failed(self, reason: str) -> None:  # pragma: no cover - overridden in tests
         pass
 
+    def test_aborted(self, reason: str) -> None:  # pragma: no cover - overridden in tests
+        pass
+
     # --- Public API ---
     def start(self, node_id: int) -> None:
         """Start state machine. Query NODECONFIG, then begin HUNTING based on it."""
         self._node_id = int(node_id)
-        self._signed_range_1 = None
-        self._range_1 = None
-        self._signed_range_2 = None
-        self._range_2 = None
-        self._opposite_pos = None
-        self._returned_home_pos = None
-        self._middle_target = None
-        self._wait_for = None
-        self._lflag = None
-        self._rflag = None
+        self._reset_run_state()
+        self._running = True
         self._set_state(self.S_IDLE)
         # Query NODECONFIG first to derive home/reference sensor only (bit0)
         self._wait_for = "nodeconfig"
@@ -153,13 +167,30 @@ class SingleAxisFunctionalTestController:
         self._emit_command(build_nodeconfig_query_payload())
 
     def stop(self) -> None:
-        # Explicit stop request from UI; treat as failure/abort
+        self.abort_by_user()
+
+    def abort_by_user(self) -> bool:
+        """Abort the active functional test from the UI."""
+        if not self._running:
+            return False
+        node_id = self._node_id
+        self._running = False
+        self._wait_for = None
+        self._set_state(self.S_ABORTED)
+        self.status_changed("Functional test aborted by user")
+        if node_id is not None:
+            self.status_changed(f"Node {node_id}: Functional test ABORTED by user.")
         self._request_stopmotor()
-        self._set_state(self.S_FAILED)
-        self.test_failed("Stopped by user")
+        self.test_aborted("Functional test aborted by user")
+        return True
+
+    def stop_requested_by_user(self) -> bool:
+        return self.abort_by_user()
 
     def on_timeout(self) -> None:
         """Tests can invoke to simulate a timeout for the current wait condition."""
+        if not self._running:
+            return
         if self._wait_for == "nodeconfig":
             self._request_stopmotor()
             return self._fail("NODECONFIG query timeout")
@@ -210,7 +241,7 @@ class SingleAxisFunctionalTestController:
     def handle_runtime_packet(self, packet: list[int] | bytes) -> None:
         if not packet:
             return
-        if self._state in (self.S_FAILED, self.S_PASSED):
+        if not self._running or self._state in (self.S_FAILED, self.S_PASSED, self.S_ABORTED):
             return
         if isinstance(packet, (bytes, bytearray)):
             data = list(packet)
@@ -280,8 +311,29 @@ class SingleAxisFunctionalTestController:
         self._emit_command(build_stopmotor())
 
     def _fail(self, reason: str) -> None:
+        self._running = False
+        self._wait_for = None
         self._set_state(self.S_FAILED)
         self.test_failed(reason)
+
+    def _reset_run_state(self) -> None:
+        self._signed_range_1 = None
+        self._range_1 = None
+        self._signed_range_2 = None
+        self._range_2 = None
+        self._opposite_pos = None
+        self._returned_home_pos = None
+        self._middle_target = None
+        self._wait_for = None
+        self._lflag = None
+        self._rflag = None
+        self._running = False
+
+    def _complete_pass(self) -> None:
+        self._running = False
+        self._wait_for = None
+        self._set_state(self.S_PASSED)
+        self.test_passed()
 
     # --- Handlers ---
     def _handle_hunting_response(self, value) -> None:
@@ -401,10 +453,9 @@ class SingleAxisFunctionalTestController:
                     if self._middle_target is None:
                         self._request_stopmotor()
                         return self._fail("Middle target unknown on reached")
-                    if abs(pos - self._middle_target) <= self.cfg.middle_position_tolerance:
+                    if abs(pos - self._middle_target) <= self.cfg.movement_tolerance:
                         self._request_stopmotor()
-                        self._set_state(self.S_PASSED)
-                        self.test_passed()
+                        self._complete_pass()
                         return
                     self._request_stopmotor()
                     return self._fail("Middle reached but outside tolerance")
@@ -413,11 +464,10 @@ class SingleAxisFunctionalTestController:
                     if self._middle_target is None:
                         self._request_stopmotor()
                         return self._fail("Middle target unknown on no-move")
-                    if abs(pos - self._middle_target) <= self.cfg.middle_position_tolerance:
+                    if abs(pos - self._middle_target) <= self.cfg.movement_tolerance:
                         # Stop motor and pass
                         self._request_stopmotor()
-                        self._set_state(self.S_PASSED)
-                        self.test_passed()
+                        self._complete_pass()
                         return
                     self._request_stopmotor()
                     return self._fail("Already at middle but outside tolerance")
@@ -426,10 +476,9 @@ class SingleAxisFunctionalTestController:
                     if self._middle_target is None:
                         self._request_stopmotor()
                         return self._fail("Middle target unknown on reached")
-                    if abs(pos - self._middle_target) <= self.cfg.middle_position_tolerance:
+                    if abs(pos - self._middle_target) <= self.cfg.movement_tolerance:
                         self._request_stopmotor()
-                        self._set_state(self.S_PASSED)
-                        self.test_passed()
+                        self._complete_pass()
                         return
                     self._request_stopmotor()
                     return self._fail("Middle reached but outside tolerance")
@@ -489,7 +538,7 @@ class SingleAxisFunctionalTestController:
                 return self._fail("Range values unavailable for compare")
             difference = abs(self._range_1 - self._range_2)
             self.difference_changed(difference)
-            if difference > self.cfg.range_tolerance:
+            if difference > self.cfg.movement_tolerance:
                 self._request_stopmotor()
                 return self._fail("Range difference exceeds tolerance")
             # Compute middle from opposite_pos only (absolute leg from zero)
