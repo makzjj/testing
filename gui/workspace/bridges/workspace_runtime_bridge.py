@@ -9,6 +9,7 @@ import webbrowser
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from myconfig.config_schema_adapter import ConfigSchemaAdapter
 from myconfig.constants import NODE_ID_MAPPING
 from myconfig.config_editor_service import ConfigEditorService
 from myconfig.config_models import ConfigEditorModel, LiveHardwareFieldValue, SavePlan, SaveResult
@@ -21,6 +22,7 @@ from .legacy_runtime_launcher import LegacyRuntimeLauncher
 from .live_hardware_overlay_provider import LiveHardwareOverlayProvider
 from .raw_project_config_reader import RawProjectConfigReader
 from .workspace_snapshot_factory import WorkspaceSnapshotFactory
+from services.robot_backend_client import RobotBackendClient
 
 _ALLOWED_CONFIG_SUFFIXES = {".yaml", ".yml"}
 
@@ -36,6 +38,7 @@ class WorkspaceRuntimeBridge:
         self._config_reader = RawProjectConfigReader(project_definition)
         self._runtime_launcher = LegacyRuntimeLauncher(project_definition)
         self._snapshot_factory = WorkspaceSnapshotFactory()
+        self._schema_adapter = ConfigSchemaAdapter()
         self._config_editor_service = ConfigEditorService()
         self._config_save_service = ConfigSaveService()
         self._live_overlay_provider = LiveHardwareOverlayProvider(self._runtime_launcher)
@@ -257,45 +260,110 @@ class WorkspaceRuntimeBridge:
     def get_runtime_communication_model(self, *, create_if_missing: bool = False) -> dict:
         """Return Runtime communication UI model from the shared runtime window."""
         runtime_window = self.get_runtime_window(create_if_missing=create_if_missing)
-        if runtime_window is None:
-            return {
-                "ports": [],
-                "selected_port": None,
-                "baud_rates": ["115200", "230400", "345600"],
-                "selected_baud": "115200",
-                "connected": False,
-            }
+        raw_config = self._raw_config
+        selected_port = self._schema_adapter.extract_serial_port_name(raw_config)
+        selected_baud = self._schema_adapter.extract_serial_baudrate(raw_config) or "115200"
+        baud_rates = ["115200", "230400", "345600"]
+        connected = False
 
-        if hasattr(runtime_window, "refresh_ports"):
-            runtime_window.refresh_ports()
+        if runtime_window is not None:
+            if hasattr(runtime_window, "refresh_ports"):
+                runtime_window.refresh_ports()
 
-        ports: list[dict[str, str]] = []
-        selected_port = None
-        port_combo = getattr(runtime_window, "port_combo", None)
-        if port_combo is not None:
-            for index in range(port_combo.count()):
-                port_text = str(port_combo.itemText(index))
-                port_value = port_combo.itemData(index)
-                ports.append({"label": port_text, "value": str(port_value or "")})
-            selected_data = port_combo.currentData()
-            selected_port = str(selected_data) if selected_data else None
+            port_combo = getattr(runtime_window, "port_combo", None)
+            if port_combo is not None:
+                current_port = port_combo.currentData()
+                if current_port not in (None, ""):
+                    selected_port = str(current_port)
+                baud_combo = getattr(runtime_window, "baud_combo", None)
+                if baud_combo is not None:
+                    baud_rates = [str(baud_combo.itemText(index)) for index in range(baud_combo.count())] or baud_rates
+                    selected_baud = str(baud_combo.currentText() or selected_baud)
 
-        baud_rates: list[str] = []
-        selected_baud = "115200"
-        baud_combo = getattr(runtime_window, "baud_combo", None)
-        if baud_combo is not None:
-            baud_rates = [str(baud_combo.itemText(index)) for index in range(baud_combo.count())]
-            selected_baud = str(baud_combo.currentText() or selected_baud)
+            backend_client = getattr(runtime_window, "backend_client", None)
+            connected = bool(backend_client and backend_client.is_connected())
 
-        backend_client = getattr(runtime_window, "backend_client", None)
-        connected = bool(backend_client and backend_client.is_connected())
+        available_ports = self._discover_available_ports(runtime_window)
+        ports = self._build_port_items(available_ports, selected_port)
         return {
             "ports": ports,
             "selected_port": selected_port,
-            "baud_rates": baud_rates or ["115200", "230400", "345600"],
+            "baud_rates": baud_rates,
             "selected_baud": selected_baud,
             "connected": connected,
         }
+
+    def get_runtime_robot_power_state(self, *, create_if_missing: bool = False) -> bool | None:
+        """Return the current robot power state when the runtime has tracked it."""
+        runtime_window = self.get_runtime_window(create_if_missing=create_if_missing)
+        if runtime_window is None:
+            return None
+
+        sys_mode = getattr(runtime_window, "sys_mode", None)
+        if not isinstance(sys_mode, dict):
+            return None
+
+        text = str(sys_mode.get("text", "")).strip().lower()
+        node_id = sys_mode.get("node_id")
+        state_value = sys_mode.get("state_value")
+
+        if not text or text == "unknown":
+            return None
+        if text in {"system off", "off"}:
+            return False
+        if node_id == 0x01 and state_value == 0:
+            return False
+        return True
+
+    def send_runtime_robot_power(self, power_on: bool) -> bytearray:
+        """Send the robot power command through the existing runtime backend path."""
+        runtime_window = self.get_runtime_window(create_if_missing=True)
+        if runtime_window is None:
+            raise RuntimeError("Runtime backend is unavailable for Production operations.")
+
+        backend_client = getattr(runtime_window, "backend_client", None)
+        if backend_client is None or not backend_client.is_connected():
+            raise RuntimeError("Serial port not connected.")
+
+        command_name = "ROBOT On" if power_on else "ROBOT Off"
+        fallback = [0x6F, 0x6E, 0x52, 0x42, 0x3D, 0x31 if power_on else 0x30, 0x0D, 0x0A, 0x0D, 0x0A]
+        payload = backend_client.get_command_bytes(command_name, fallback)
+        return backend_client.send_command_bytes(0x01, payload)
+
+    def _discover_available_ports(self, runtime_window: object | None = None) -> list[str]:
+        backend_client = getattr(runtime_window, "backend_client", None) if runtime_window is not None else None
+        if backend_client is not None and hasattr(backend_client, "get_available_ports"):
+            try:
+                return [str(port) for port in backend_client.get_available_ports()]
+            except Exception:
+                return []
+
+        try:
+            return [str(port) for port in RobotBackendClient().get_available_ports()]
+        except Exception:
+            return []
+
+    @staticmethod
+    def _format_port_label(port: str) -> str:
+        if port == "COM11":
+            return f"{port} ✅ (Valid)"
+        return f"{port} ❌ (Invalid)"
+
+    def _build_port_items(self, available_ports: list[str], selected_port: str | None) -> list[dict[str, str]]:
+        items: list[dict[str, str]] = []
+        seen_ports: set[str] = set()
+        for port in available_ports:
+            if not port or port in seen_ports:
+                continue
+            seen_ports.add(port)
+            items.append({"label": self._format_port_label(port), "value": port})
+
+        if selected_port and selected_port not in seen_ports:
+            items.insert(0, {"label": self._format_port_label(selected_port), "value": selected_port})
+
+        if not items:
+            items.append({"label": "No COM ports found ❌ (Invalid)", "value": ""})
+        return items
 
     def connect_runtime_serial(self, *, port: str, baud_rate: int) -> bool:
         """Connect Runtime serial transport using existing Runtime logic."""

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from gui.workspace.bridges import WorkspaceRuntimeBridge
+from myconfig.constants import COMMANDS
 from myconfig.project_models import ProjectDefinition, ProjectFeatures, ProjectUiConfig
 
 
@@ -71,6 +72,74 @@ mcu:
 
             self.assertIn("Project context:", message)
             self.assertIn("Demo", message)
+
+    def test_bridge_discovers_ports_without_creating_runtime_window(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "demo.yaml"
+            config_path.write_text(
+                """
+project:
+  name: demo
+  display_name: Demo
+mcu:
+  serial_port:
+    name: COM5
+    baudrate: 115200
+""".strip(),
+                encoding="utf-8",
+            )
+
+            project = ProjectDefinition(
+                name="demo",
+                display_name="Demo",
+                config_path=config_path,
+                features=ProjectFeatures(firmware_tools=True),
+                ui=ProjectUiConfig(workspace="phase2_shell"),
+            )
+
+            bridge = WorkspaceRuntimeBridge(project)
+            with patch("gui.workspace.bridges.workspace_runtime_bridge.RobotBackendClient.get_available_ports", return_value=["COM11"]):
+                communication_model = bridge.get_runtime_communication_model(create_if_missing=False)
+
+            self.assertFalse(bridge.has_live_runtime)
+            self.assertEqual(communication_model["selected_port"], "COM5")
+            self.assertEqual(communication_model["ports"][0]["value"], "COM5")
+            self.assertEqual(communication_model["ports"][1]["value"], "COM11")
+            self.assertIn("Invalid", communication_model["ports"][0]["label"])
+            self.assertIn("Valid", communication_model["ports"][1]["label"])
+
+    def test_bridge_sends_legacy_robot_power_commands_through_existing_runtime_path(self) -> None:
+        class _FakeBackendClient:
+            def __init__(self) -> None:
+                self.sent_commands: list[tuple[int, list[int]]] = []
+
+            def is_connected(self) -> bool:
+                return True
+
+            def get_command_bytes(self, command_name: str, fallback: list[int] | None = None) -> list[int]:
+                return list(COMMANDS.get(command_name, fallback or []))
+
+            def send_command_bytes(self, node_id: int, command_bytes: list[int]) -> bytearray:
+                self.sent_commands.append((node_id, list(command_bytes)))
+                return bytearray(command_bytes)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "demo.yaml"
+            config_path.write_text("project:\n  name: demo\n", encoding="utf-8")
+
+            project = ProjectDefinition(name="demo", display_name="Demo", config_path=config_path)
+            bridge = WorkspaceRuntimeBridge(project)
+            runtime_window = SimpleNamespace(backend_client=_FakeBackendClient(), sys_mode=None)
+
+            with patch.object(bridge, "get_runtime_window", return_value=runtime_window):
+                on_payload = bridge.send_runtime_robot_power(True)
+                off_payload = bridge.send_runtime_robot_power(False)
+
+            self.assertEqual(runtime_window.backend_client.sent_commands[0], (1, COMMANDS["ROBOT On"]))
+            self.assertEqual(runtime_window.backend_client.sent_commands[1], (1, COMMANDS["ROBOT Off"]))
+            self.assertEqual(list(on_payload), COMMANDS["ROBOT On"])
+            self.assertEqual(list(off_payload), COMMANDS["ROBOT Off"])
+            self.assertEqual(runtime_window.sys_mode["text"], "System Off")
 
     def test_bridge_loads_editor_model_from_accuess_style_yaml(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

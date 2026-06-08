@@ -20,10 +20,11 @@ class LegacyRuntimeLauncher:
         self._project_definition = project_definition
         self._main_window = None  # The actual MainWindow instance
         self._central_widget = None  # The extracted central widget
+        self._window = None  # Backward-compatible alias used by older tests
 
     def has_window(self) -> bool:
         """Return whether a shared runtime widget instance currently exists."""
-        return self._main_window is not None
+        return self._main_window is not None or self._window is not None
 
     def open_window(self) -> "QWidget":
         """Create or return the shared runtime widget without opening a new top-level window."""
@@ -55,13 +56,14 @@ class LegacyRuntimeLauncher:
             if self._central_widget is None:
                 raise RuntimeError("MainWindow failed to create a central widget")
             self._main_window = main_window
+            self._window = main_window
 
         # Return the central widget for embedding in the RuntimePage layout
         return self._central_widget
 
     def current_window(self):
         """Return the current runtime window when it exists."""
-        return self._main_window
+        return self._main_window or self._window
 
     def update_config_path(self, config_path) -> None:
         """Keep the legacy runtime aligned with the latest active config file."""
@@ -86,3 +88,4 @@ class LegacyRuntimeLauncher:
         """Reset the cached window reference when the runtime closes."""
         self._main_window = None
         self._central_widget = None
+        self._window = None

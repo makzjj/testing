@@ -12,7 +12,7 @@ from unittest.mock import patch
 import pytest
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication, QLabel, QPushButton
+from PyQt6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton
 
 from gui.workspace.pages.production_page import ProductionPage
 from gui.workspace.pages.single_axis_functional_popup import SingleAxisFunctionalPopup
@@ -47,6 +47,7 @@ from gui.workspace.pages.production_test_controller import (
     decode_interrupt_response,
 )
 from gui.workspace.pages.production_test_models import Tolerance, evaluate_tolerance
+from myconfig.constants import COMMANDS
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -57,8 +58,8 @@ try:
 except ImportError:  # pragma: no cover - environment dependent.
     _HAS_OPENPYXL = False
 
-
-class _FakeBackendClient:
+class _FakeBack
+endClient:
     def __init__(self, *, connected: bool = True) -> None:
         self._connected = connected
         self.sent_commands: list[tuple[int, list[int]]] = []
@@ -68,7 +69,7 @@ class _FakeBackendClient:
         return self._connected
 
     def get_command_bytes(self, _command_name: str, fallback: list[int] | None = None) -> list[int]:
-        return list(fallback or [])
+        return list(COMMANDS.get(_command_name, fallback or []))
 
     def send_command_bytes(self, node_id: int, command_bytes: list[int]) -> bytearray:
         self.sent_commands.append((node_id, list(command_bytes)))
@@ -88,6 +89,7 @@ class _FakeRuntimeWindow(QObject):
         self.mcu_version = mcu_version
         self._selected_port = "COM11"
         self._selected_baud = "115200"
+        self.sys_mode = {"text": "Ready" if connected else "System Off", "node_id": 0x01, "state_value": 1 if connected else 0}
         self.node_status = {
             2: {"connected": False},
             3: {"connected": False},
@@ -117,8 +119,8 @@ class _FakeBridge:
         runtime_window = self.get_runtime_window(create_if_missing=create_if_missing)
         if runtime_window is None:
             return {
-                "ports": [],
-                "selected_port": None,
+                "ports": [{"label": "COM11 ✅ (Valid)", "value": "COM11"}],
+                "selected_port": "COM11",
                 "baud_rates": ["115200", "230400", "345600"],
                 "selected_baud": "115200",
                 "connected": False,
@@ -145,6 +147,29 @@ class _FakeBridge:
         if runtime_window is None:
             return
         runtime_window.backend_client._connected = False
+
+    def get_runtime_robot_power_state(self, *, create_if_missing: bool = False) -> bool | None:
+        runtime_window = self.get_runtime_window(create_if_missing=create_if_missing)
+        if runtime_window is None:
+            return None
+        sys_mode = getattr(runtime_window, "sys_mode", None)
+        if not isinstance(sys_mode, dict):
+            return None
+        if sys_mode.get("node_id") == 0x01 and sys_mode.get("state_value") == 0:
+            return False
+        if str(sys_mode.get("text", "")).strip().lower() == "system off":
+            return False
+        return True
+
+    def send_runtime_robot_power(self, power_on: bool) -> bytearray:
+        runtime_window = self.get_runtime_window(create_if_missing=True)
+        if runtime_window is None:
+            raise RuntimeError("Runtime backend is unavailable for Production operations.")
+        backend_client = runtime_window.backend_client
+        payload = backend_client.get_command_bytes("ROBOT On" if power_on else "ROBOT Off")
+        backend_client.send_command_bytes(0x01, payload)
+        runtime_window.sys_mode = {"text": "Ready" if power_on else "System Off", "node_id": 0x01, "state_value": 1 if power_on else 0}
+        return bytearray(payload)
 
     def get_runtime_robot_nodes(self, *, create_if_missing: bool = False) -> dict:
         runtime_window = self.get_runtime_window(create_if_missing=create_if_missing)
@@ -174,6 +199,63 @@ class _FakeBridge:
             return False
         runtime_window.scan_requests += 1
         return True
+
+
+class _FakeRobotPowerButton:
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def text(self) -> str:
+        return self._text
+
+
+class _FakeRobotPowerMessageBox:
+    class Icon:
+        Question = object()
+
+    class ButtonRole:
+        AcceptRole = object()
+        DestructiveRole = object()
+        RejectRole = object()
+
+    next_choice_text: str | None = None
+    instances: list["_FakeRobotPowerMessageBox"] = []
+
+    def __init__(self, parent=None) -> None:
+        self.parent = parent
+        self.icon = None
+        self.window_title = ""
+        self.text = ""
+        self.buttons: list[_FakeRobotPowerButton] = []
+        self._clicked_button: _FakeRobotPowerButton | None = None
+        _FakeRobotPowerMessageBox.instances.append(self)
+
+    def setIcon(self, icon) -> None:
+        self.icon = icon
+
+    def setWindowTitle(self, title: str) -> None:
+        self.window_title = title
+
+    def setText(self, text: str) -> None:
+        self.text = text
+
+    def addButton(self, text: str, _role) -> _FakeRobotPowerButton:
+        button = _FakeRobotPowerButton(text)
+        self.buttons.append(button)
+        return button
+
+    def exec(self) -> int:
+        choice = type(self).next_choice_text
+        self._clicked_button = None
+        if choice is not None:
+            for button in self.buttons:
+                if button.text() == choice:
+                    self._clicked_button = button
+                    break
+        return 0
+
+    def clickedButton(self):
+        return self._clicked_button
 
 
 class ProductionTestControllerTests(unittest.TestCase):
@@ -652,6 +734,84 @@ class ProductionPageWorkflowTests(unittest.TestCase):
         self.assertEqual(page.communication_section._connect_button.text(), "Disconnect")
         self.assertIn("MCU Firmware Version", page.communication_section._firmware_label.text())
         self.assertIn("Nodes Firmware Version", page.communication_section._nodes_firmware_label.text())
+
+    def test_production_page_populates_com_ports_on_startup_without_runtime_page(self) -> None:
+        bridge = _FakeBridge(None)
+        page = ProductionPage(bridge)
+        page.show()
+        self._app.processEvents()
+
+        self.assertEqual(bridge.create_requests, 0)
+        self.assertGreaterEqual(page.communication_section._port_combo.count(), 1)
+        self.assertEqual(page.communication_section._port_combo.currentData(), "COM11")
+
+    def test_production_page_robot_power_button_order_and_connection_state(self) -> None:
+        disconnected_page = ProductionPage(_FakeBridge(None))
+        button_row = disconnected_page.node_status_section.body_layout.itemAt(0).layout()
+        self.assertIsNotNone(button_row)
+        assert button_row is not None
+        self.assertIsNotNone(button_row.itemAt(0).spacerItem())
+        button_texts = [button_row.itemAt(index).widget().text() for index in range(button_row.count()) if button_row.itemAt(index).widget() is not None]
+        self.assertEqual(button_texts, ["Robot Power ON/OFF", "Update Nodes", "Clear"])
+        self.assertFalse(disconnected_page.node_status_section._robot_power_button.isEnabled())
+
+        connected_page = ProductionPage(_FakeBridge(_FakeRuntimeWindow(connected=True)))
+        self.assertTrue(connected_page.node_status_section._robot_power_button.isEnabled())
+
+    def test_robot_power_button_cancels_without_sending(self) -> None:
+        runtime_window = _FakeRuntimeWindow(connected=True)
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        _FakeRobotPowerMessageBox.next_choice_text = "Cancel"
+        _FakeRobotPowerMessageBox.instances.clear()
+        with patch("gui.workspace.pages.production_page.QMessageBox", _FakeRobotPowerMessageBox):
+            page._handle_robot_power_requested()
+
+        self.assertEqual(len(_FakeRobotPowerMessageBox.instances), 1)
+        dialog = _FakeRobotPowerMessageBox.instances[0]
+        self.assertEqual(dialog.window_title, "Robot Power")
+        self.assertEqual(dialog.text, "Choose robot power command to send.")
+        self.assertEqual([button.text() for button in dialog.buttons], ["Power ON", "Power OFF", "Cancel"])
+        self.assertEqual(runtime_window.backend_client.sent_commands, [])
+        self.assertIn("Robot power command cancelled.", page.progress_section.to_plain_text())
+
+    def test_robot_power_button_sends_on_then_off_payloads_via_existing_backend_path(self) -> None:
+        runtime_window = _FakeRuntimeWindow(connected=True)
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        _FakeRobotPowerMessageBox.instances.clear()
+        with patch("gui.workspace.pages.production_page.QMessageBox", _FakeRobotPowerMessageBox):
+            _FakeRobotPowerMessageBox.next_choice_text = "Power ON"
+            page._handle_robot_power_requested()
+            _FakeRobotPowerMessageBox.next_choice_text = "Power OFF"
+            page._handle_robot_power_requested()
+
+        self.assertEqual(
+            runtime_window.backend_client.sent_commands,
+            [
+                (1, COMMANDS["ROBOT On"]),
+                (1, COMMANDS["ROBOT Off"]),
+            ],
+        )
+        log_text = page.progress_section.to_plain_text()
+        self.assertIn("Robot power ON command sent.", log_text)
+        self.assertIn("Robot power OFF command sent.", log_text)
+
+    def test_robot_power_button_succeeds_when_power_state_is_unavailable(self) -> None:
+        runtime_window = _FakeRuntimeWindow(connected=True)
+        runtime_window.sys_mode = None
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        _FakeRobotPowerMessageBox.next_choice_text = "Power ON"
+        _FakeRobotPowerMessageBox.instances.clear()
+        with patch("gui.workspace.pages.production_page.QMessageBox", _FakeRobotPowerMessageBox):
+            page._handle_robot_power_requested()
+
+        self.assertEqual(runtime_window.backend_client.sent_commands, [(1, COMMANDS["ROBOT On"])])
+        self.assertNotIn("robot power state is unavailable", page.progress_section.to_plain_text().lower())
 
     def test_production_page_shows_runtime_robot_nodes_status_and_supports_dropdown_sync(self) -> None:
         runtime_window = _FakeRuntimeWindow()

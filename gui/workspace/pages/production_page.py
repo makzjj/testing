@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QTableWidgetItem,
@@ -117,6 +118,7 @@ class ProductionPage(BaseWorkspacePage):
         self.communication_section.connect_requested.connect(self._handle_connect_requested)
         self.communication_section.disconnect_requested.connect(self._handle_disconnect_requested)
         self.node_status_section.update_nodes_requested.connect(self._handle_update_nodes_requested)
+        self.node_status_section.robot_power_requested.connect(self._handle_robot_power_requested)
         self.node_status_section.clear_nodes_requested.connect(self._handle_clear_nodes_requested)
         self._test_controller.log_message.connect(self.console_message.emit)
         self._test_controller.test_started.connect(self._handle_test_started)
@@ -165,6 +167,10 @@ class ProductionPage(BaseWorkspacePage):
         self._refresh_runtime_panels()
         self._refresh_workbook_action_states()
 
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._refresh_runtime_panels()
+
     def refresh(self) -> None:
         """Refresh lightweight status without resetting operator state."""
         self._refresh_runtime_panels()
@@ -173,12 +179,14 @@ class ProductionPage(BaseWorkspacePage):
     def _refresh_runtime_panels(self) -> None:
         self._refresh_connection_status()
         self._refresh_robot_nodes()
+        self._refresh_robot_power_controls()
         self._refresh_workbook_action_states()
 
     def _refresh_connection_status(self) -> None:
         communication_model = self._bridge.get_runtime_communication_model(create_if_missing=False)
         serial_connected = bool(communication_model.get("connected", False))
         self.communication_section.set_model(communication_model)
+        self.node_status_section.set_connected(serial_connected)
         if serial_connected:
             selected_port = communication_model.get("selected_port") or "Unknown"
             self.communication_section.set_status_text(f"● Connected ({selected_port})")
@@ -189,6 +197,9 @@ class ProductionPage(BaseWorkspacePage):
         nodes_model = self._bridge.get_runtime_robot_nodes(create_if_missing=False)
         self.communication_section.set_nodes(nodes_model)
         self.node_status_section.set_nodes(nodes_model)
+
+    def _refresh_robot_power_controls(self) -> None:
+        return
 
     def _handle_update_nodes_requested(self) -> None:
         requested = False
@@ -208,6 +219,39 @@ class ProductionPage(BaseWorkspacePage):
     def _handle_clear_nodes_requested(self) -> None:
         self.node_status_section.clear_node_states()
         self.progress_section.append_step("Cleared displayed node states to unknown")
+
+    def _handle_robot_power_requested(self) -> None:
+        self.progress_section.append_step("Robot power command requested.")
+        message_box = QMessageBox(self)
+        message_box.setIcon(QMessageBox.Icon.Question)
+        message_box.setWindowTitle("Robot Power")
+        message_box.setText("Choose robot power command to send.")
+        power_on_button = message_box.addButton("Power ON", QMessageBox.ButtonRole.AcceptRole)
+        power_off_button = message_box.addButton("Power OFF", QMessageBox.ButtonRole.DestructiveRole)
+        cancel_button = message_box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        message_box.exec()
+        clicked_button = message_box.clickedButton()
+        if clicked_button is cancel_button:
+            self.progress_section.append_step("Robot power command cancelled.")
+            return
+
+        if clicked_button is power_on_button:
+            target_power_on = True
+            action_label = "ON"
+        elif clicked_button is power_off_button:
+            target_power_on = False
+            action_label = "OFF"
+        else:
+            self.progress_section.append_step("Robot power command cancelled.")
+            return
+
+        try:
+            self._bridge.send_runtime_robot_power(target_power_on)
+        except Exception as exc:
+            self.progress_section.append_step(f"Robot power command failed: {exc}", level="error")
+            return
+
+        self.progress_section.append_step(f"Robot power {action_label} command sent.")
 
     def _handle_connect_requested(self, port: str, baud_rate: int) -> None:
         if not port:
@@ -758,7 +802,9 @@ class _CommunicationSection(PanelFrame):
     def __init__(self) -> None:
         super().__init__("Communication", "")
         self._port_combo = QComboBox()
+        self._port_combo.setObjectName("ProductionCommPortCombo")
         self._baud_combo = QComboBox()
+        self._baud_combo.setObjectName("ProductionCommBaudCombo")
         self._connect_button = QPushButton("Connect")
         self._status_label = QLabel("○ Disconnected")
         self._status_label.setObjectName("DetailValue")
@@ -884,7 +930,9 @@ class _ProductionInfoSection(PanelFrame):
     def __init__(self) -> None:
         super().__init__("Information / Workbook / Communication", "")
         self._port_combo = QComboBox()
+        self._port_combo.setObjectName("ProductionCommPortCombo")
         self._baud_combo = QComboBox()
+        self._baud_combo.setObjectName("ProductionCommBaudCombo")
         self._connect_button = QPushButton("Connect")
         self._status_label = QLabel("○ Disconnected")
         self._status_label.setObjectName("DetailValue")
@@ -1210,23 +1258,34 @@ class _TestStagesSection(PanelFrame):
 class _NodeStatusSection(PanelFrame):
     update_nodes_requested = pyqtSignal()
     clear_nodes_requested = pyqtSignal()
+    robot_power_requested = pyqtSignal()
 
     def __init__(self) -> None:
         super().__init__("Robot Arm Node Status", "")
         self._led_by_node_id: dict[int, QLabel] = {}
+        self._connected = False
 
         button_row = QHBoxLayout()
         button_row.setContentsMargins(0, 0, 0, 0)
         button_row.setSpacing(8)
         button_row.addStretch(1)
-        update_button = QPushButton("Update Nodes")
-        update_button.setProperty("tone", "secondary")
-        update_button.clicked.connect(self.update_nodes_requested.emit)
-        button_row.addWidget(update_button)
-        clear_button = QPushButton("Clear")
-        clear_button.setProperty("tone", "secondary")
-        clear_button.clicked.connect(self.clear_nodes_requested.emit)
-        button_row.addWidget(clear_button)
+        self._robot_power_button = QPushButton("Robot Power ON/OFF")
+        self._robot_power_button.setObjectName("RobotPowerButton")
+        self._robot_power_button.setProperty("tone", "secondary")
+        self._robot_power_button.clicked.connect(self._handle_robot_power_clicked)
+        button_row.addWidget(self._robot_power_button)
+
+        self._update_button = QPushButton("Update Nodes")
+        self._update_button.setObjectName("UpdateNodesButton")
+        self._update_button.setProperty("tone", "secondary")
+        self._update_button.clicked.connect(self.update_nodes_requested.emit)
+        button_row.addWidget(self._update_button)
+
+        self._clear_button = QPushButton("Clear")
+        self._clear_button.setObjectName("ClearNodesButton")
+        self._clear_button.setProperty("tone", "secondary")
+        self._clear_button.clicked.connect(self.clear_nodes_requested.emit)
+        button_row.addWidget(self._clear_button)
         self.body_layout.addLayout(button_row)
 
         node_grid = QGridLayout()
@@ -1248,6 +1307,13 @@ class _NodeStatusSection(PanelFrame):
             self._set_led_state(node_id, False)
         self.body_layout.addLayout(node_grid)
 
+    def set_connected(self, connected: bool) -> None:
+        self._connected = bool(connected)
+        self._robot_power_button.setEnabled(self._connected)
+
+    def set_robot_power_state(self, power_on: bool | None) -> None:
+        return
+
     def set_nodes(self, nodes_model: dict) -> None:
         connected_nodes = {int(node_id) for node_id in nodes_model.get("connected_nodes", [])}
         for node_id in self._led_by_node_id:
@@ -1256,6 +1322,9 @@ class _NodeStatusSection(PanelFrame):
     def clear_node_states(self) -> None:
         for node_id in self._led_by_node_id:
             self._set_led_state(node_id, False)
+
+    def _handle_robot_power_clicked(self) -> None:
+        self.robot_power_requested.emit()
 
     def _set_led_state(self, node_id: int, connected: bool) -> None:
         led = self._led_by_node_id.get(node_id)

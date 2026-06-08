@@ -16,6 +16,7 @@ from services import (
 )
 from services.robot_backend_client import RobotBackendClient
 from serial_conn.commands import CommandBuilder
+from myconfig.constants import COMMANDS
 
 
 class NodeStatusStoreTests(unittest.TestCase):
@@ -132,6 +133,35 @@ class RobotBackendClientTests(unittest.TestCase):
 
         self.assertEqual(payload, expected)
         self.assertEqual(fake_serial.writes[-1], bytes(expected))
+
+    def test_get_command_bytes_reuses_legacy_robot_power_payloads(self) -> None:
+        class _FakeSerialConnection:
+            def __init__(self) -> None:
+                self.baudrate = 345600
+                self.serial = object()
+
+            def connect(self, port: str) -> bool:
+                return True
+
+            def disconnect(self) -> None:
+                return None
+
+            def is_connected(self) -> bool:
+                return True
+
+            def write(self, data, is_virt: bool = False) -> int:
+                return len(data)
+
+            def read_all(self, is_virt: bool = False) -> bytes:
+                return b""
+
+            def get_available_ports(self):
+                return []
+
+        client = RobotBackendClient(serial_connection=_FakeSerialConnection(), command_builder=CommandBuilder())
+
+        self.assertEqual(client.get_command_bytes("ROBOT On"), COMMANDS["ROBOT On"])
+        self.assertEqual(client.get_command_bytes("ROBOT Off"), COMMANDS["ROBOT Off"])
 
 
 if __name__ == "__main__":

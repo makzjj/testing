@@ -80,7 +80,8 @@ mcu:
             # Hidden combo boxes may exist inside composite visible selectors; assert only on rendered dropdowns.
             shell_dropdowns = [combo for combo in window.findChildren(QComboBox) if combo.isVisible()]
             self.assertGreaterEqual(len(shell_dropdowns), 1)
-            self.assertTrue(all(combo.objectName() == "AxisSelectorCombo" for combo in shell_dropdowns))
+            allowed_names = {"AxisSelectorCombo", "ProductionCommPortCombo", "ProductionCommBaudCombo"}
+            self.assertTrue(all(combo.objectName() in allowed_names for combo in shell_dropdowns))
             self.assertGreater(len(window.findChildren(VisibleSelector)), 0)
 
     def test_workspace_shell_uses_top_toolbar_and_settings_menu(self) -> None:
