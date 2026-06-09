@@ -28,6 +28,25 @@ class IpqcExpectedSummary:
 class IpqcExcelAdapter:
     """Loads an IPQC workbook template and reads/writes summary-sheet values."""
 
+    _PROGRAMMING_ROW_LOOKUP: dict[str, int] = {
+        "operator": 3,
+        "uuid": 4,
+        "pwm": 5,
+        "proportionate (p)": 6,
+        "pid_p": 6,
+        "integral (i)": 7,
+        "pid_i": 7,
+        "derivative (d)": 8,
+        "pid_d": 8,
+        "pid_slewrate": 9,
+        "rampdown_slope": 10,
+        "rampdown_step": 11,
+        "rampdown_minvel": 12,
+        "rampdown_targetoffset": 13,
+        "rampdown_region": 14,
+        "acceptable_error": 15,
+    }
+
     _SUMMARY_PARAMETER_ALIASES: dict[str, int] = {
         "s/n": 4,
         "sn": 4,
@@ -125,6 +144,39 @@ class IpqcExcelAdapter:
         sheet = self._require_base_sheet()
         return self._read_cell_text(sheet, cell_ref)
 
+    def resolve_programming_row(self, parameter_name: str) -> int:
+        normalized = self._normalize_programming_label(parameter_name)
+        row = self._PROGRAMMING_ROW_LOOKUP.get(normalized)
+        if row is not None:
+            return row
+        raise ValueError(f"Unsupported programming parameter '{parameter_name}' (normalized: '{normalized}').")
+
+    def read_programming_parameter_source(self, parameter_name: str) -> str:
+        sheet = self._require_base_sheet()
+        row = self.resolve_programming_row(parameter_name)
+        return self._read_cell_text(sheet, f"B{row}")
+
+    def discover_programming_parameter_rows(self) -> tuple[dict[str, int], list[str]]:
+        """Find supported programming rows by scanning Column A labels."""
+        sheet = self._require_base_sheet()
+        discovered_rows: dict[str, int] = {}
+        raw_labels: list[str] = []
+        for row in range(3, 16):
+            label = self._read_cell_text(sheet, f"A{row}")
+            if not label:
+                continue
+            raw_labels.append(label)
+            normalized = self._normalize_programming_label(label)
+            if normalized in self._PROGRAMMING_ROW_LOOKUP:
+                discovered_rows[normalized] = row
+        return discovered_rows, raw_labels
+
+    def write_programming_parameter_result(self, parameter_name: str, actual_value: object, check_result: str) -> None:
+        sheet = self._require_base_sheet()
+        row = self.resolve_programming_row(parameter_name)
+        sheet[f"C{row}"] = "" if actual_value is None else str(actual_value)
+        sheet[f"D{row}"] = str(check_result)
+
     def write_uuid_actual_and_check(self, actual_uuid: object, check_result: str) -> None:
         self.write_summary_result("S/N", actual_uuid, check_result)
 
@@ -150,13 +202,17 @@ class IpqcExcelAdapter:
         sheet[result_cell] = str(check_result)
 
     def _resolve_summary_row(self, parameter_name: str) -> int:
-        normalized = parameter_name.strip().lower().replace("_", " ")
+        normalized = self._normalize_programming_label(parameter_name)
         row = self._SUMMARY_PARAMETER_ALIASES.get(normalized)
         if row is None:
             raise ValueError(
                 f"Unsupported summary parameter '{parameter_name}' (normalized: '{normalized}')."
             )
         return row
+
+    @staticmethod
+    def _normalize_programming_label(value: str) -> str:
+        return " ".join(str(value).strip().casefold().split())
 
     def suggest_completed_output_path(self) -> Path:
         template_path = self._require_template_path()

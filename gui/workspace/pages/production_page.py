@@ -130,6 +130,7 @@ class ProductionPage(BaseWorkspacePage):
         self._test_controller.step_finished.connect(self._handle_step_finished)
         self._test_controller.profile_finished.connect(self._handle_profile_finished)
         self._parameter_controller.log_message.connect(self.console_message.emit)
+        self._parameter_controller.parameter_write_finished.connect(self._handle_parameter_write_finished)
         self._parameter_controller.parameter_verification_finished.connect(self._handle_parameter_verification_finished)
         self._parameter_controller.eeprom_save_finished.connect(self._handle_eeprom_save_finished)
         self.progress_section.refresh_requested.connect(self.refresh)
@@ -137,9 +138,14 @@ class ProductionPage(BaseWorkspacePage):
         self._current_programmed_pwm_value = "-"
         self._parameter_definitions = list(WORKBOOK_PARAMETER_DEFINITIONS.values())
         self._pending_parameter_requests: list[ParameterRequest] = []
+        self._pending_persistent_parameter_requests: list[ParameterRequest] = []
+        self._pending_runtime_parameter_requests: list[ParameterRequest] = []
+        self._last_parameter_verification_results_by_name: dict[str, ParameterVerificationResult] = {}
         self._workbook_loaded = False
         self._workbook_write_completed = False
         self._workbook_verification_passed = False
+        self._workbook_parameter_write_pending = False
+        self._workbook_runtime_write_pending = False
         self._workbook_eeprom_save_pending = False
         self._workbook_eeprom_save_failed = False
         self._workbook_eeprom_settle_active = False
@@ -347,13 +353,8 @@ class ProductionPage(BaseWorkspacePage):
         try:
             groups = self._ipqc_excel_adapter.load_template(path)
             active_group = self._ipqc_excel_adapter.active_sheet_group or ""
+            self._reset_workbook_workflow_state()
             self._workbook_loaded = True
-            self._workbook_write_completed = False
-            self._workbook_verification_passed = False
-            self._workbook_eeprom_save_pending = False
-            self._workbook_eeprom_save_failed = False
-            self._workbook_eeprom_settle_active = False
-            self._eeprom_save_settle_timer.stop()
             self.uuid_section.set_workbook_path(path)
             self.uuid_section.set_sheet_groups(groups, active_group)
             self.uuid_section.set_workbook_output_path(WORKBOOK_OUTPUT_PENDING)
@@ -363,6 +364,8 @@ class ProductionPage(BaseWorkspacePage):
             self._workbook_loaded = False
             self._workbook_write_completed = False
             self._workbook_verification_passed = False
+            self._workbook_parameter_write_pending = False
+            self._workbook_runtime_write_pending = False
             self._workbook_eeprom_save_pending = False
             self._workbook_eeprom_save_failed = False
             self._workbook_eeprom_settle_active = False
@@ -378,7 +381,7 @@ class ProductionPage(BaseWorkspacePage):
         self.uuid_section.set_workbook_validation_ready()
         self.console_message.emit(f"[Production] Loaded IPQC workbook: {path}")
         self.progress_section.append_step(f"Loaded IPQC workbook with {len(groups)} sheet group(s)", level="success")
-        self._set_status_result("READY", "IPQC workbook loaded.")
+        self._set_status_result("READY", "Workbook loaded; no write performed yet")
         self._refresh_workbook_action_states()
 
     def _handle_ipqc_sheet_group_changed(self, base_group: str) -> None:
@@ -418,9 +421,11 @@ class ProductionPage(BaseWorkspacePage):
         )
         self._current_programmed_pwm_value = "-"
         self.uuid_section.set_programmed_values("-", self._current_programmed_pwm_value, "-")
-        self.progress_section.append_step(f"Workbook validation: {self.uuid_section.workbook_validation_text}")
-        self.progress_section.append_step(f"Expected S/N / UUID: {expected_serial or '-'}")
-        self.progress_section.append_step(f"Expected PWM: {expected_pwm or '-'}")
+        supported_count, raw_labels = self._count_supported_workbook_parameters()
+        if supported_count == 0:
+            labels_text = ", ".join(raw_labels) if raw_labels else "(none)"
+            self.progress_section.append_step(f"No supported parameter rows found. Labels found: {labels_text}", level="error")
+        self.progress_section.append_step(f"Loaded Programming table with {supported_count} supported parameter(s).")
         self._refresh_workbook_action_states()
 
     def _handle_write_uuid(self) -> None:
@@ -434,30 +439,73 @@ class ProductionPage(BaseWorkspacePage):
         requests = self._build_workbook_parameter_requests(node_id, node_name)
         if requests is None:
             return
-
-        labels = "/".join(request.definition.label for request in requests if request.definition.build_write_command)
-        self._set_status_result("WRITING PARAMETERS", f"Writing {labels} to Node {node_id} {node_name}.")
-        success, message = self._parameter_controller.write_parameters(requests)
-        if success:
-            self._workbook_write_completed = False
-            self._workbook_verification_passed = False
-            self._workbook_eeprom_save_pending = True
-            self._set_status_result("WRITE SENT", message)
-            self.uuid_section.set_last_workbook_action(f"{labels} written to MCU; requesting EEPROM save")
-            save_started = self._parameter_controller.save_parameters_to_eeprom(node_id, node_name)
-            if save_started:
-                self.progress_section.append_step(f"EEPROM save requested for Node {node_id} {node_name}")
+        original_request_count = len(requests)
+        requests, skipped_labels = self._filter_write_requests_by_previous_verification(requests)
+        persistent_requests = [request for request in requests if request.definition.persistent]
+        runtime_requests = [request for request in requests if not request.definition.persistent]
+        labels = ", ".join(self._parameter_write_log_name(request.definition) for request in requests if request.definition.build_write_command)
+        if requests:
+            self.progress_section.append_step(f"WRITE PLAN: {len(requests)} mismatched parameter(s): {labels}")
         else:
-            self._workbook_write_completed = False
-            self._workbook_verification_passed = False
-            self._set_status_result("FAIL", message)
-            self.console_message.emit(f"[Production] {message}")
-        self._pending_parameter_requests = []
+            if original_request_count > 0:
+                self.progress_section.append_step("No parameter writes required; all workbook values already match MCU read-back.")
+        if skipped_labels:
+            self.progress_section.append_step(f"SKIPPED: {len(skipped_labels)} parameter(s) already matched read-back values.")
+        self._pending_persistent_parameter_requests = persistent_requests
+        self._pending_runtime_parameter_requests = runtime_requests
+        self._workbook_write_completed = False
+        self._workbook_verification_passed = False
+        self._workbook_parameter_write_pending = False
+        self._workbook_runtime_write_pending = False
+        self._workbook_eeprom_save_pending = False
+        self._workbook_eeprom_save_failed = False
+        self._workbook_eeprom_settle_active = False
+        self._eeprom_save_settle_timer.stop()
+
+        if not persistent_requests and not runtime_requests:
+            if original_request_count > 0:
+                message = "No parameter writes required; all workbook values already match MCU read-back."
+                self._set_status_result("READY", message)
+                self.console_message.emit(f"[Production] {message}")
+            else:
+                self._set_status_result("FAIL", "No workbook parameters are available to write.")
+                self.console_message.emit("[Production] No workbook parameters are available to write.")
+            return
+
+        if persistent_requests:
+            self._workbook_parameter_write_pending = True
+            self._set_status_result("WRITING PARAMETERS", f"Writing {labels} to Node {node_id} {node_name}.")
+            success, message = self._parameter_controller.write_parameters(persistent_requests)
+            if success:
+                self._set_status_result("WRITE SENT", message)
+                self.uuid_section.set_last_workbook_action(f"{labels} persistent write in progress")
+            else:
+                self._workbook_parameter_write_pending = False
+                self._set_status_result("FAIL", message)
+                self.console_message.emit(f"[Production] {message}")
+                return
+        elif runtime_requests:
+            self._workbook_runtime_write_pending = True
+            self._set_status_result("WRITING PARAMETERS", f"Writing {labels} to Node {node_id} {node_name}.")
+            success, message = self._parameter_controller.write_parameters(runtime_requests)
+            if success:
+                self._set_status_result("WRITE SENT", message)
+                self.uuid_section.set_last_workbook_action(f"{labels} runtime write in progress")
+            else:
+                self._workbook_runtime_write_pending = False
+                self._set_status_result("FAIL", message)
+                self.console_message.emit(f"[Production] {message}")
+                return
         self._refresh_workbook_action_states()
         self._refresh_connection_status()
 
     def _handle_verify_uuid(self) -> None:
-        if self._workbook_eeprom_save_pending or self._workbook_eeprom_settle_active:
+        if (
+            self._workbook_eeprom_save_pending
+            or self._workbook_eeprom_settle_active
+            or self._workbook_parameter_write_pending
+            or self._workbook_runtime_write_pending
+        ):
             return
         try:
             node_id, node_name = self.test_control_section.selected_node()
@@ -476,40 +524,94 @@ class ProductionPage(BaseWorkspacePage):
             self._pending_parameter_requests = []
         self._refresh_connection_status()
 
+    def _reset_workbook_workflow_state(self) -> None:
+        self._parameter_controller.reset_workbook_parameter_workflow()
+        self._pending_parameter_requests = []
+        self._pending_persistent_parameter_requests = []
+        self._pending_runtime_parameter_requests = []
+        self._last_parameter_verification_results_by_name = {}
+        self._workbook_loaded = False
+        self._workbook_write_completed = False
+        self._workbook_verification_passed = False
+        self._workbook_parameter_write_pending = False
+        self._workbook_runtime_write_pending = False
+        self._workbook_eeprom_save_pending = False
+        self._workbook_eeprom_save_failed = False
+        self._workbook_eeprom_settle_active = False
+        self._eeprom_save_settle_timer.stop()
+
     def _build_workbook_parameter_requests(self, node_id: int, node_name: str) -> list[ParameterRequest] | None:
         if not self._ipqc_excel_adapter.has_loaded_workbook():
-            message = "Expected S/N is unavailable from the active IPQC workbook sheet."
+            message = "Load an IPQC workbook first."
             self._set_status_result("FAIL", message)
             self.console_message.emit(f"[Production] {message}")
             return None
 
+        supported_definitions, validation_error = self._get_supported_workbook_parameter_definitions()
+        if validation_error is not None:
+            self._set_status_result("FAIL", validation_error)
+            self.console_message.emit(f"[Production] {validation_error}")
+            return None
+
         requests: list[ParameterRequest] = []
-        for definition in self._parameter_definitions:
-            try:
-                expected_text = self._read_parameter_expected_text(definition)
-                request = self._parameter_controller.build_parameter_request(
-                    definition,
-                    node_id,
-                    node_name,
-                    expected_text,
-                )
-            except ValueError as exc:
-                message = f"Expected {definition.label} in workbook {definition.expected_cell} is invalid: {exc}"
-                if "unavailable" in str(exc):
-                    message = f"Expected {definition.label} is unavailable from the active IPQC workbook sheet."
-                self._set_status_result("FAIL", message)
-                self.console_message.emit(f"[Production] {message}")
-                return None
-            except Exception as exc:
-                message = f"Failed to read expected {definition.label} from workbook {definition.expected_cell}: {exc}"
-                self._set_status_result("FAIL", message)
-                self.console_message.emit(f"[Production] {message}")
-                return None
+        for definition in supported_definitions:
+            expected_text = self._read_parameter_expected_text(definition)
+            request = self._parameter_controller.build_parameter_request(
+                definition,
+                node_id,
+                node_name,
+                expected_text,
+            )
             requests.append(request)
+        if not requests:
+            message = "No supported programming parameters are populated in the active IPQC workbook sheet."
+            self._set_status_result("FAIL", message)
+            self.console_message.emit(f"[Production] {message}")
+            return None
         return requests
 
     def _read_parameter_expected_text(self, definition: ParameterDefinition) -> str:
-        return self._ipqc_excel_adapter.read_cell_text(definition.expected_cell)
+        return self._ipqc_excel_adapter.read_programming_parameter_source(definition.name)
+
+    def _handle_parameter_write_finished(self, passed: bool, reason: str) -> None:
+        self._workbook_parameter_write_pending = False
+        self._workbook_runtime_write_pending = False
+        if not passed:
+            self._workbook_write_completed = False
+            self._workbook_verification_passed = False
+            self._workbook_eeprom_save_pending = False
+            self._workbook_eeprom_save_failed = True
+            self._workbook_eeprom_settle_active = False
+            self._pending_persistent_parameter_requests = []
+            self._pending_runtime_parameter_requests = []
+            self._eeprom_save_settle_timer.stop()
+            self._set_status_result("FAIL", reason, append_to_log=False)
+            self.uuid_section.set_last_workbook_action(f"Workbook parameter write failed: {reason}")
+            self.progress_section.append_step(reason, level="error")
+            self._refresh_workbook_action_states()
+            return
+
+        if self._pending_persistent_parameter_requests and not self._workbook_eeprom_save_pending and not self._workbook_eeprom_save_failed:
+            node_id, node_name = self.test_control_section.selected_node()
+            self._workbook_eeprom_save_pending = True
+            self.uuid_section.set_last_workbook_action("Persistent parameters written; requesting EEPROM save")
+            save_started = self._parameter_controller.save_parameters_to_eeprom(node_id, node_name)
+            if save_started:
+                self.progress_section.append_step(f"EEPROM save requested for Node {node_id} {node_name}")
+                self._pending_persistent_parameter_requests = []
+            else:
+                self._workbook_eeprom_save_pending = False
+                self._pending_persistent_parameter_requests = []
+                self._pending_runtime_parameter_requests = []
+                self._workbook_write_completed = False
+                self._set_status_result("FAIL", "Failed to request EEPROM save.", append_to_log=False)
+                self.console_message.emit("[Production] Failed to request EEPROM save.")
+        elif self._pending_runtime_parameter_requests:
+            self._workbook_runtime_write_pending = False
+            self._workbook_write_completed = True
+            self._pending_runtime_parameter_requests = []
+            self.uuid_section.set_last_workbook_action("Runtime parameters written")
+        self._refresh_workbook_action_states()
 
     def _handle_parameter_verification_finished(
         self,
@@ -518,6 +620,9 @@ class ProductionPage(BaseWorkspacePage):
         results_object: object,
     ) -> None:
         results = [result for result in results_object if isinstance(result, ParameterVerificationResult)]
+        self._last_parameter_verification_results_by_name = {
+            result.definition.name: result for result in results
+        }
         result_by_name = {result.definition.name: result for result in results}
         uuid_result = result_by_name.get("UUID")
         pwm_result = result_by_name.get("PWM")
@@ -557,6 +662,27 @@ class ProductionPage(BaseWorkspacePage):
         self._pending_parameter_requests = []
         self._refresh_workbook_action_states()
 
+    def _filter_write_requests_by_previous_verification(
+        self,
+        requests: list[ParameterRequest],
+    ) -> tuple[list[ParameterRequest], list[str]]:
+        if not self._last_parameter_verification_results_by_name:
+            return list(requests), []
+
+        selected_requests: list[ParameterRequest] = []
+        skipped_labels: list[str] = []
+        for request in requests:
+            previous_result = self._last_parameter_verification_results_by_name.get(request.definition.name)
+            if previous_result is not None and previous_result.passed:
+                skipped_labels.append(self._parameter_write_log_name(request.definition))
+                continue
+            selected_requests.append(request)
+        return selected_requests, skipped_labels
+
+    @staticmethod
+    def _parameter_write_log_name(definition: ParameterDefinition) -> str:
+        return "S/N" if definition.name == "UUID" else definition.name
+
     def _handle_eeprom_save_finished(self, passed: bool, reason: str) -> None:
         if passed:
             self._workbook_write_completed = True
@@ -568,6 +694,21 @@ class ProductionPage(BaseWorkspacePage):
             self.uuid_section.set_last_workbook_action("EEPROM save completed; ready for read-back verification")
             self.progress_section.append_step("EEPROM save ACK received.", level="info")
             self._set_status_result("READY", "EEPROM save completed; ready for read-back verification.", append_to_log=False)
+            if self._pending_runtime_parameter_requests:
+                self._workbook_write_completed = False
+                self._workbook_runtime_write_pending = True
+                runtime_requests = list(self._pending_runtime_parameter_requests)
+                node_id, node_name = self.test_control_section.selected_node()
+                success, message = self._parameter_controller.write_parameters(runtime_requests)
+                if success:
+                    self.uuid_section.set_last_workbook_action("Runtime parameters write in progress")
+                    self.progress_section.append_step(f"Runtime parameters write requested for Node {node_id} {node_name}")
+                else:
+                    self._workbook_runtime_write_pending = False
+                    self._workbook_write_completed = False
+                    self._pending_runtime_parameter_requests = []
+                    self._set_status_result("FAIL", message, append_to_log=False)
+                    self.console_message.emit(f"[Production] {message}")
             self._eeprom_save_settle_timer.start(EEPROM_SAVE_SETTLE_MS)
         else:
             self._workbook_write_completed = False
@@ -686,15 +827,7 @@ class ProductionPage(BaseWorkspacePage):
             return False
         try:
             actual_value_or_empty: str | int = "" if actual_value is None else actual_value
-            if definition.name in {"UUID", "PWM"}:
-                self._ipqc_excel_adapter.write_summary_result(definition.name, actual_value_or_empty, check_result)
-            else:
-                self._ipqc_excel_adapter.write_parameter_result(
-                    definition.actual_cell,
-                    definition.result_cell,
-                    actual_value_or_empty,
-                    check_result,
-                )
+            self._ipqc_excel_adapter.write_programming_parameter_result(definition.name, actual_value_or_empty, check_result)
             if not silent:
                 self.uuid_section.set_last_workbook_action(f"{definition.name} report row updated in workbook memory")
                 self.console_message.emit(
@@ -739,18 +872,145 @@ class ProductionPage(BaseWorkspacePage):
 
     def _refresh_workbook_action_states(self) -> None:
         has_workbook = self._workbook_loaded and self._ipqc_excel_adapter.has_loaded_workbook()
-        has_required_parameters = has_workbook and all(
-            self._has_valid_workbook_parameter(definition) for definition in self._parameter_definitions
+        supported_definitions, validation_error = self._get_supported_workbook_parameter_definitions()
+        has_supported_parameters = has_workbook and bool(supported_definitions) and validation_error is None
+        connection_model = self._bridge.get_runtime_communication_model(create_if_missing=False)
+        serial_connected = bool(connection_model.get("connected", False))
+        try:
+            self.test_control_section.selected_node()
+            node_selected = True
+        except RuntimeError:
+            node_selected = False
+
+        write_reason = self._get_workbook_action_gate_reason(
+            has_workbook=has_workbook,
+            has_supported_parameters=has_supported_parameters,
+            serial_connected=serial_connected,
+            node_selected=node_selected,
+            validation_error=validation_error,
+            operation_pending=
+                self._workbook_parameter_write_pending
+                or self._workbook_runtime_write_pending
+                or self._workbook_eeprom_save_pending
+                or self._workbook_eeprom_settle_active,
+        )
+        verify_reason = self._get_workbook_action_gate_reason(
+            has_workbook=has_workbook,
+            has_supported_parameters=has_supported_parameters,
+            serial_connected=serial_connected,
+            node_selected=node_selected,
+            validation_error=validation_error,
+            operation_pending=
+                self._workbook_parameter_write_pending
+                or self._workbook_runtime_write_pending
+                or self._workbook_eeprom_save_pending
+                or self._workbook_eeprom_save_failed
+                or self._workbook_eeprom_settle_active,
         )
         self.uuid_section.load_workbook_button.setEnabled(True)
-        self.uuid_section.write_button.setEnabled(has_required_parameters)
-        self.uuid_section.verify_button.setEnabled(
-            has_required_parameters
+        write_enabled = (
+            has_supported_parameters
+            and serial_connected
+            and node_selected
+            and not self._workbook_parameter_write_pending
+            and not self._workbook_runtime_write_pending
+            and not self._workbook_eeprom_save_pending
+            and not self._workbook_eeprom_settle_active
+        )
+        verify_enabled = (
+            has_supported_parameters
+            and serial_connected
+            and node_selected
+            and not self._workbook_parameter_write_pending
+            and not self._workbook_runtime_write_pending
             and not self._workbook_eeprom_save_pending
             and not self._workbook_eeprom_save_failed
             and not self._workbook_eeprom_settle_active
         )
+        self.uuid_section.write_button.setEnabled(write_enabled)
+        self.uuid_section.write_button.setToolTip(
+            "Write supported programming parameters to the connected MCU."
+            if write_enabled
+            else write_reason or "Write Parameters to MCU is unavailable."
+        )
+        self.uuid_section.verify_button.setEnabled(verify_enabled)
+        self.uuid_section.verify_button.setToolTip(
+            "Read back the MCU values and verify them against the workbook."
+            if verify_enabled
+            else verify_reason or "Read Back / Verify is unavailable."
+        )
         self.uuid_section.save_button.setEnabled(has_workbook and self._workbook_verification_passed)
+        self.uuid_section.save_button.setToolTip(
+            "Save the completed workbook after verification passes."
+            if has_workbook and self._workbook_verification_passed
+            else "Save / Download Completed Workbook is enabled after verification passes."
+        )
+
+    def _get_supported_workbook_parameter_definitions(self) -> tuple[list[ParameterDefinition], str | None]:
+        if not self._ipqc_excel_adapter.has_loaded_workbook():
+            return [], "Load an IPQC workbook first."
+
+        discovered_rows, raw_labels = self._ipqc_excel_adapter.discover_programming_parameter_rows()
+        supported_definitions: list[ParameterDefinition] = []
+        for definition in self._parameter_definitions:
+            row = discovered_rows.get(self._normalize_programming_label(definition.name))
+            if row is None:
+                row = discovered_rows.get(self._normalize_programming_label(definition.label))
+            if row is None:
+                continue
+            expected_text = self._ipqc_excel_adapter.read_cell_text(f"B{row}")
+            if not expected_text.strip():
+                continue
+            try:
+                self._parameter_controller.build_parameter_request(definition, 0, "", expected_text)
+            except ValueError as exc:
+                return [], f"Expected {definition.label} in workbook {definition.expected_cell} is invalid: {exc}"
+
+            supported_definitions.append(definition)
+
+        if not supported_definitions:
+            labels_text = ", ".join(raw_labels) if raw_labels else "(none)"
+            return [], f"No supported parameter rows found. Labels found: {labels_text}"
+        return supported_definitions, None
+
+    def _count_supported_workbook_parameters(self) -> tuple[int, list[str]]:
+        supported_definitions, validation_error = self._get_supported_workbook_parameter_definitions()
+        if validation_error and validation_error.startswith("No supported parameter rows found. Labels found:"):
+            labels_text = validation_error.partition("Labels found: ")[2]
+            raw_labels = [label.strip() for label in labels_text.split(",")] if labels_text and labels_text != "(none)" else []
+            return len(supported_definitions), raw_labels
+        if not self._ipqc_excel_adapter.has_loaded_workbook():
+            return 0, []
+        _discovered_rows, raw_labels = self._ipqc_excel_adapter.discover_programming_parameter_rows()
+        return len(supported_definitions), raw_labels
+
+    def _get_workbook_action_gate_reason(
+        self,
+        *,
+        has_workbook: bool,
+        has_supported_parameters: bool,
+        serial_connected: bool,
+        node_selected: bool,
+        validation_error: str | None,
+        operation_pending: bool,
+    ) -> str:
+        if not has_workbook:
+            return "Load an IPQC workbook before writing or verifying."
+        if validation_error is not None:
+            return validation_error
+        if not has_supported_parameters:
+            return "No supported programming parameters are populated in the active IPQC workbook sheet."
+        if not serial_connected:
+            return "MCU is disconnected."
+        if not node_selected:
+            return "Select a Production node before writing or verifying."
+        if operation_pending:
+            return "A workbook parameter operation is already in progress."
+        return ""
+
+    @staticmethod
+    def _normalize_programming_label(value: str) -> str:
+        return " ".join(str(value).strip().casefold().split())
 
     def _has_valid_workbook_parameter(self, definition: ParameterDefinition) -> bool:
         if not self._ipqc_excel_adapter.has_loaded_workbook():

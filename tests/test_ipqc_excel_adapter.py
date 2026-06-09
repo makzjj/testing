@@ -27,6 +27,23 @@ class IpqcExcelAdapterTests(unittest.TestCase):
         workbook.create_sheet("4Y")
         workbook.create_sheet("4Y_D")
         workbook.create_sheet("4Y_A")
+        summary["A1"] = "Programming"
+        summary["B2"] = "Source"
+        summary["C2"] = "Programmed"
+        summary["D2"] = "Check"
+        summary["A3"] = "Operator"
+        summary["A4"] = "UUID"
+        summary["A5"] = "PWM"
+        summary["A6"] = "Proportionate (P)"
+        summary["A7"] = "Integral (I)"
+        summary["A8"] = "Derivative (D)"
+        summary["A9"] = "PID_SlewRate"
+        summary["A10"] = "RampDown_Slope"
+        summary["A11"] = "RampDown_Step"
+        summary["A12"] = "RampDown_MinVel"
+        summary["A13"] = "RampDown_TargetOffset"
+        summary["A14"] = "RampDown_Region"
+        summary["A15"] = "Acceptable_Error"
         summary["B3"] = "operator-a"
         summary["B4"] = "1223303010"
         summary["B5"] = "100"
@@ -142,6 +159,52 @@ class IpqcExcelAdapterTests(unittest.TestCase):
             adapter.load_template(template_path)
             with self.assertRaisesRegex(ValueError, "Unsupported summary parameter"):
                 adapter.write_summary_result("temperature", "40", "PASS")
+
+    def test_resolve_programming_row_maps_new_layout_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template_path = self._create_ipqc_template(tmpdir)
+            adapter = IpqcExcelAdapter()
+            adapter.load_template(template_path)
+
+            self.assertEqual(adapter.resolve_programming_row("UUID"), 4)
+            self.assertEqual(adapter.resolve_programming_row("Proportionate (P)"), 6)
+            self.assertEqual(adapter.resolve_programming_row("PID_SlewRate"), 9)
+            self.assertEqual(adapter.resolve_programming_row("RampDown_TargetOffset"), 13)
+
+    def test_discover_programming_parameter_rows_scans_column_a_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template_path = self._create_ipqc_template(tmpdir)
+            adapter = IpqcExcelAdapter()
+            adapter.load_template(template_path)
+
+            discovered_rows, raw_labels = adapter.discover_programming_parameter_rows()
+
+        self.assertEqual(raw_labels, ["Operator", "UUID", "PWM", "Proportionate (P)", "Integral (I)", "Derivative (D)", "PID_SlewRate", "RampDown_Slope", "RampDown_Step", "RampDown_MinVel", "RampDown_TargetOffset", "RampDown_Region", "Acceptable_Error"])
+        self.assertEqual(discovered_rows["uuid"], 4)
+        self.assertEqual(discovered_rows["pwm"], 5)
+        self.assertEqual(discovered_rows["proportionate (p)"], 6)
+        self.assertEqual(discovered_rows["integral (i)"], 7)
+        self.assertEqual(discovered_rows["derivative (d)"], 8)
+        self.assertEqual(discovered_rows["pid_slewrate"], 9)
+        self.assertEqual(discovered_rows["rampdown_slope"], 10)
+        self.assertEqual(discovered_rows["rampdown_step"], 11)
+        self.assertEqual(discovered_rows["rampdown_minvel"], 12)
+        self.assertEqual(discovered_rows["rampdown_targetoffset"], 13)
+        self.assertEqual(discovered_rows["rampdown_region"], 14)
+        self.assertEqual(discovered_rows["acceptable_error"], 15)
+
+    def test_write_programming_parameter_result_writes_row_cells(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template_path = self._create_ipqc_template(tmpdir)
+            adapter = IpqcExcelAdapter()
+            adapter.load_template(template_path)
+            adapter.write_programming_parameter_result("RampDown_Region", "75", "PASS")
+            output_path = Path(tmpdir) / "ipqc_completed.xlsx"
+            adapter.save_completed_workbook(output_path)
+            summary = load_workbook(output_path)["3X"]
+
+        self.assertEqual(summary["C14"].value, "75")
+        self.assertEqual(summary["D14"].value, "PASS")
 
     def test_save_completed_workbook_uses_new_path_and_preserves_template(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

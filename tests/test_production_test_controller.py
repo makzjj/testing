@@ -58,8 +58,7 @@ try:
 except ImportError:  # pragma: no cover - environment dependent.
     _HAS_OPENPYXL = False
 
-class _FakeBack
-endClient:
+class _FakeBackendClient:
     def __init__(self, *, connected: bool = True) -> None:
         self._connected = connected
         self.sent_commands: list[tuple[int, list[int]]] = []
@@ -579,7 +578,8 @@ class ProductionPageWorkflowTests(unittest.TestCase):
 
     def test_parse_pwm_value_validation(self) -> None:
         self.assertEqual(ProductionPage._parse_pwm_value("100"), 100)
-        self.assertEqual(parse_pwm_value("65535"), 65535)
+        self.assertEqual(parse_pwm_value("-100"), -100)
+        self.assertEqual(parse_pwm_value("32767"), 32767)
         with self.assertRaisesRegex(ValueError, "required"):
             ProductionPage._parse_pwm_value(" ")
         with self.assertRaisesRegex(ValueError, "digits only"):
@@ -596,12 +596,85 @@ class ProductionPageWorkflowTests(unittest.TestCase):
         ws.title = "3X"
         wb.create_sheet("3X_D")
         wb.create_sheet("3X_A")
+        ws["A1"] = "Programming"
+        ws["B2"] = "Source"
+        ws["C2"] = "Programmed"
+        ws["D2"] = "Check"
+        ws["A3"] = "Operator"
+        ws["A4"] = "UUID"
+        ws["A5"] = "PWM"
+        ws["A6"] = "Proportionate (P)"
+        ws["A7"] = "Integral (I)"
+        ws["A8"] = "Derivative (D)"
+        ws["A9"] = "PID_SlewRate"
+        ws["A10"] = "RampDown_Slope"
+        ws["A11"] = "RampDown_Step"
+        ws["A12"] = "RampDown_MinVel"
+        ws["A13"] = "RampDown_TargetOffset"
+        ws["A14"] = "RampDown_Region"
+        ws["A15"] = "Acceptable_Error"
         ws["B4"] = "1223303010"
         ws["B5"] = "100"
         if with_optional_fields:
+            ws["B6"] = "0.125"
+            ws["B7"] = "0.025"
+            ws["B8"] = "0.010"
+            ws["B9"] = "1500"
+            ws["B10"] = "-25"
+            ws["B11"] = "4"
+            ws["B12"] = "8"
+            ws["B13"] = "-12"
+            ws["B14"] = "75"
+            ws["B15"] = "30"
             ws["B3"] = "operator-a"
-            ws["B6"] = "N/A"
+            ws["C3"] = "N/A"
+            ws["D3"] = "N/A"
         wb.save(path)
+
+    @staticmethod
+    def _build_parameter_verify_packet(definition, actual_value: int | str) -> dict:
+        if definition.name == "UUID":
+            payload = [0x3A, *build_uuid_write_payload(int(actual_value))[2:]]
+            return {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0xE0, "params": payload}
+        if definition.name == "PWM":
+            payload = [0x00, *list(int(actual_value).to_bytes(2, "big", signed=True))]
+            return {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x85, "params": payload}
+
+        payload = [0x3A]
+        if definition.sub_id is not None:
+            payload.append(definition.sub_id)
+        payload.extend(list(int(actual_value).to_bytes(definition.value_size, "big", signed=definition.signed)))
+        return {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": definition.command_id, "params": payload}
+
+    @staticmethod
+    def _build_parameter_write_ack_packet(definition, actual_value: int | str) -> dict:
+        if definition.name == "PWM":
+            payload = [0x53, *list(int(actual_value).to_bytes(2, "big", signed=True))]
+            return {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x84, "params": payload}
+        return ProductionPageWorkflowTests._build_parameter_verify_packet(definition, actual_value)
+
+    @staticmethod
+    def _select_node(page: ProductionPage, node_text: str = "Node 6 - H") -> None:
+        combo = page.test_control_section._combo
+        for index in range(combo.count()):
+            if combo.itemText(index) == node_text:
+                combo.setCurrentIndex(index)
+                break
+
+    @staticmethod
+    def _populate_updated_programming_values(sheet) -> None:
+        sheet["B4"] = "1243203029"
+        sheet["B5"] = "0"
+        sheet["B6"] = "2000"
+        sheet["B7"] = "1"
+        sheet["B8"] = "35000"
+        sheet["B9"] = "0"
+        sheet["B10"] = "6"
+        sheet["B11"] = "3"
+        sheet["B12"] = "90"
+        sheet["B13"] = "512"
+        sheet["B14"] = "5"
+        sheet["B15"] = "256"
 
     def test_production_page_updates_ui_for_runtime_backed_selected_node_pass(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -670,6 +743,321 @@ class ProductionPageWorkflowTests(unittest.TestCase):
         page._handle_run_test()
         self._app.processEvents()
         self.assertEqual(page.result_summary_section._status_label.text(), "TESTING")
+
+    def test_production_page_writes_persistent_rows_before_pwm_and_triggers_one_eeprom_save(self) -> None:
+        if not _HAS_OPENPYXL:
+            self.skipTest("openpyxl is required for workbook flow tests.")
+
+        runtime_window = _FakeRuntimeWindow(connected=True)
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template_path = Path(tmpdir) / "ipqc.xlsx"
+            self._create_ipqc_workbook(template_path)
+            workbook = load_workbook(template_path)
+            summary = workbook["3X"]
+            for row in range(6, 16):
+                summary[f"B{row}"] = None
+            workbook.save(template_path)
+
+            page._ipqc_excel_adapter.load_template(template_path)
+            page._workbook_loaded = True
+            page.uuid_section.set_workbook_path(str(template_path))
+            page.uuid_section.set_sheet_groups(["3X"], "3X")
+            page._refresh_workbook_action_states()
+
+            combo = page.test_control_section._combo
+            for index in range(combo.count()):
+                if combo.itemText(index) == "Node 6 - H":
+                    combo.setCurrentIndex(index)
+                    break
+
+            page._handle_write_uuid()
+            self._app.processEvents()
+            self.assertEqual(runtime_window.backend_client.sent_commands[0][1][0], 0xE0)
+            self.assertTrue(page._workbook_parameter_write_pending)
+
+            uuid_write_payload = runtime_window.backend_client.sent_commands[0][1]
+            runtime_window.packet_received.emit(
+                {
+                    "status": "ok",
+                    "type": "can_over_uart",
+                    "sender": 6,
+                    "cmd": 0xE0,
+                    "params": [0x3A, *uuid_write_payload[2:]],
+                }
+            )
+            self._app.processEvents()
+
+            self.assertEqual(runtime_window.backend_client.sent_commands[1], (6, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]))
+            self.assertTrue(page._workbook_eeprom_save_pending)
+
+            runtime_window.packet_received.emit(
+                {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": EEPROM_SAVE_COMMAND, "params": [0x0A, 0x00]}
+            )
+            self._app.processEvents()
+
+            self.assertEqual(runtime_window.backend_client.sent_commands[2], (6, [0x84, 0x00, 0x64]))
+            self.assertTrue(page._workbook_runtime_write_pending)
+
+            runtime_window.packet_received.emit(
+                {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x84, "params": [0x53, 0x00, 0x64]}
+            )
+            self._app.processEvents()
+
+            self.assertFalse(page._workbook_runtime_write_pending)
+            self.assertIn("Runtime parameters written", page.uuid_section.last_workbook_action_text)
+
+    def test_production_page_full_parameter_write_save_runtime_and_verify_sequence(self) -> None:
+        if not _HAS_OPENPYXL:
+            self.skipTest("openpyxl is required for workbook flow tests.")
+
+        runtime_window = _FakeRuntimeWindow(connected=True)
+        runtime_window.node_status[6] = {
+            "connected": True,
+            "firmware": "v1.0.0",
+            "uuid": "",
+            "type": "H",
+            "interrupt": "OK",
+        }
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+        definitions = {definition.name: definition for definition in default_workbook_parameter_definitions()}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template_path = Path(tmpdir) / "ipqc.xlsx"
+            self._create_ipqc_workbook(template_path)
+            workbook = load_workbook(template_path)
+            summary = workbook["3X"]
+            summary["B3"] = "operator-a"
+            summary["B4"] = "123456789"
+            summary["B5"] = "80"
+            summary["B6"] = "2000"
+            summary["B7"] = "1"
+            summary["B8"] = "35000"
+            summary["B9"] = "0"
+            summary["B10"] = "40"
+            summary["B11"] = "3"
+            summary["B12"] = "50"
+            summary["B13"] = "512"
+            summary["B14"] = "10"
+            summary["B15"] = "256"
+            workbook.save(template_path)
+
+            with patch(
+                "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
+                return_value=(str(template_path), "Excel Files (*.xlsx)"),
+            ):
+                page._handle_load_ipqc_workbook()
+                self._app.processEvents()
+
+            combo = page.test_control_section._combo
+            for index in range(combo.count()):
+                if combo.itemText(index) == "Node 6 - H":
+                    combo.setCurrentIndex(index)
+                    break
+
+            page._handle_write_uuid()
+            self._app.processEvents()
+
+            expected_write_sequence: list[tuple[int, list[int]]] = [
+                (6, build_uuid_write_payload(123456789)),
+                (6, definitions["PID_P"].build_write_command(2000)),
+                (6, definitions["PID_I"].build_write_command(1)),
+                (6, definitions["PID_D"].build_write_command(35000)),
+                (6, definitions["PID_SlewRate"].build_write_command(0)),
+                (6, definitions["RampDown_Slope"].build_write_command(40)),
+                (6, definitions["RampDown_Step"].build_write_command(3)),
+                (6, definitions["RampDown_MinVel"].build_write_command(50)),
+                (6, definitions["RampDown_TargetOffset"].build_write_command(512)),
+                (6, definitions["RampDown_Region"].build_write_command(10)),
+                (6, definitions["Acceptable_Error"].build_write_command(256)),
+            ]
+
+            self.assertEqual(runtime_window.backend_client.sent_commands[0], expected_write_sequence[0])
+            self.assertEqual(len(runtime_window.backend_client.sent_commands), 1)
+            self.assertTrue(page._workbook_parameter_write_pending)
+
+            write_response_payloads = {
+                "UUID": [0x3A, *build_uuid_write_payload(123456789)[2:]],
+                "PID_P": [0x3A, 0x70, *list((2000).to_bytes(4, "big", signed=True))],
+                "PID_I": [0x3A, 0x69, *list((1).to_bytes(4, "big", signed=True))],
+                "PID_D": [0x3A, 0x64, *list((35000).to_bytes(4, "big", signed=True))],
+                "PID_SlewRate": [0x3A, *list((0).to_bytes(2, "big", signed=False))],
+                "RampDown_Slope": [0x3A, *list((40).to_bytes(2, "big", signed=True))],
+                "RampDown_Step": [0x3A, 0x03],
+                "RampDown_MinVel": [0x3A, 0x32],
+                "RampDown_TargetOffset": [0x3A, *list((512).to_bytes(2, "big", signed=True))],
+                "RampDown_Region": [0x3A, 0x0A],
+                "Acceptable_Error": [0x3A, *list((256).to_bytes(2, "big", signed=False))],
+            }
+
+            for index, definition_name in enumerate(
+                [
+                    "UUID",
+                    "PID_P",
+                    "PID_I",
+                    "PID_D",
+                    "PID_SlewRate",
+                    "RampDown_Slope",
+                    "RampDown_Step",
+                    "RampDown_MinVel",
+                    "RampDown_TargetOffset",
+                    "RampDown_Region",
+                    "Acceptable_Error",
+                ],
+                start=0,
+            ):
+                definition = definitions[definition_name]
+                payload = runtime_window.backend_client.sent_commands[index][1]
+                self.assertEqual(payload[0], definition.command_id)
+                if definition.sub_id is not None:
+                    self.assertEqual(payload[2], definition.sub_id)
+                self.assertEqual(len(runtime_window.backend_client.sent_commands), index + 1)
+                runtime_window.packet_received.emit(
+                    {
+                        "status": "ok",
+                        "type": "can_over_uart",
+                        "sender": 6,
+                        "cmd": definition.command_id,
+                        "params": write_response_payloads[definition_name],
+                    }
+                )
+                self._app.processEvents()
+                if definition_name != "Acceptable_Error":
+                    self.assertEqual(len(runtime_window.backend_client.sent_commands), index + 2)
+
+            self.assertEqual(runtime_window.backend_client.sent_commands[len(expected_write_sequence)], (6, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]))
+            self.assertEqual(runtime_window.backend_client.sent_commands.count((6, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX])), 1)
+            self.assertTrue(page._workbook_eeprom_save_pending)
+
+            runtime_window.packet_received.emit(
+                {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": EEPROM_SAVE_COMMAND, "params": [0x0A, 0x00]}
+            )
+            self._app.processEvents()
+
+            self.assertEqual(runtime_window.backend_client.sent_commands[len(expected_write_sequence) + 1], (6, [0x84, 0x00, 0x50]))
+            self.assertTrue(page._workbook_runtime_write_pending)
+            self.assertTrue(page._workbook_eeprom_settle_active)
+
+            runtime_window.packet_received.emit(
+                {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x84, "params": [0x53, 0x00, 0x50]}
+            )
+            self._app.processEvents()
+
+            self.assertFalse(page._workbook_runtime_write_pending)
+            self.assertFalse(page._workbook_eeprom_save_pending)
+            self.assertTrue(page._workbook_eeprom_settle_active)
+
+            page._handle_eeprom_save_settle_finished()
+            self._app.processEvents()
+            self.assertFalse(page._workbook_eeprom_settle_active)
+            self.assertTrue(page.uuid_section.verify_button.isEnabled())
+
+            page._handle_verify_uuid()
+            self._app.processEvents()
+
+            self.assertEqual(runtime_window.backend_client.sent_commands[-1], (6, [0xE0, 0x3F]))
+            self.assertEqual(runtime_window.backend_client.sent_commands.count((6, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX])), 1)
+            save_command_index = runtime_window.backend_client.sent_commands.index((6, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]))
+            pwm_write_index = runtime_window.backend_client.sent_commands.index((6, build_pwm_write_payload(80)))
+            self.assertGreater(pwm_write_index, save_command_index)
+
+            verify_order = [
+                "UUID",
+                "PWM",
+                "PID_P",
+                "PID_I",
+                "PID_D",
+                "PID_SlewRate",
+                "RampDown_Slope",
+                "RampDown_Step",
+                "RampDown_MinVel",
+                "RampDown_TargetOffset",
+                "RampDown_Region",
+                "Acceptable_Error",
+            ]
+            verify_response_payloads = {
+                "UUID": [0x3A, *build_uuid_write_payload(123456789)[2:]],
+                "PWM": [0x00, 0x50],
+                "PID_P": [0x3A, 0x70, *list((2000).to_bytes(4, "big", signed=True))],
+                "PID_I": [0x3A, 0x69, *list((1).to_bytes(4, "big", signed=True))],
+                "PID_D": [0x3A, 0x64, *list((35000).to_bytes(4, "big", signed=True))],
+                "PID_SlewRate": [0x3A, *list((0).to_bytes(2, "big", signed=False))],
+                "RampDown_Slope": [0x3A, *list((40).to_bytes(2, "big", signed=True))],
+                "RampDown_Step": [0x3A, 0x03],
+                "RampDown_MinVel": [0x3A, 0x32],
+                "RampDown_TargetOffset": [0x3A, *list((512).to_bytes(2, "big", signed=True))],
+                "RampDown_Region": [0x3A, 0x0A],
+                "Acceptable_Error": [0x3A, *list((256).to_bytes(2, "big", signed=False))],
+            }
+
+            expected_verify_commands = [
+                (6, [0xE0, 0x3F]),
+                (6, [0x85]),
+                (6, [0xE7, 0x3F, 0x70]),
+                (6, [0xE7, 0x3F, 0x69]),
+                (6, [0xE7, 0x3F, 0x64]),
+                (6, [0xED, 0x3F]),
+                (6, [0x89, 0x3F]),
+                (6, [0x8B, 0x3F]),
+                (6, [0x8C, 0x3F]),
+                (6, [0xE1, 0x3F]),
+                (6, [0xE2, 0x3F]),
+                (6, [0xEC, 0x3F]),
+            ]
+
+            self.assertTrue(page.uuid_section.verify_button.isEnabled())
+            page._handle_verify_uuid()
+            self._app.processEvents()
+            self.assertEqual(runtime_window.backend_client.sent_commands[-1], expected_verify_commands[0])
+
+            for index, definition_name in enumerate(verify_order):
+                definition = definitions[definition_name]
+                expected_command = expected_verify_commands[index]
+                self.assertEqual(runtime_window.backend_client.sent_commands[-1], expected_command)
+                payload = verify_response_payloads[definition_name]
+                runtime_window.packet_received.emit(
+                    {
+                        "status": "ok",
+                        "type": "can_over_uart",
+                        "sender": 6,
+                        "cmd": definition.command_id if definition_name != "PWM" else 0x85,
+                        "params": payload,
+                }
+                )
+                self._app.processEvents()
+                if index < len(verify_order) - 1:
+                    self.assertEqual(runtime_window.backend_client.sent_commands[-1], expected_verify_commands[index + 1])
+
+            output_sheet = page._ipqc_excel_adapter._workbook["3X"]
+            expected_rows = {
+                4: ("123456789", "PASS"),
+                5: ("80", "PASS"),
+                6: ("2000", "PASS"),
+                7: ("1", "PASS"),
+                8: ("35000", "PASS"),
+                9: ("0", "PASS"),
+                10: ("40", "PASS"),
+                11: ("3", "PASS"),
+                12: ("50", "PASS"),
+                13: ("512", "PASS"),
+                14: ("10", "PASS"),
+                15: ("256", "PASS"),
+            }
+            for row, (actual_text, check_text) in expected_rows.items():
+                with self.subTest(row=row):
+                    self.assertEqual(output_sheet[f"C{row}"].value, actual_text)
+                    self.assertEqual(output_sheet[f"D{row}"].value, check_text)
+
+            self.assertEqual(page.uuid_section.workbook_validation_text, "Workbook Validation: PASSED")
+            self.assertTrue(page.uuid_section.save_button.isEnabled())
+            self.assertEqual(runtime_window.backend_client.sent_commands.count((6, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX])), 1)
+            self.assertFalse(page._workbook_parameter_write_pending)
+            self.assertFalse(page._workbook_runtime_write_pending)
+            self.assertFalse(page._workbook_eeprom_save_pending)
+            self.assertFalse(page._workbook_eeprom_settle_active)
 
     def test_production_page_uses_two_column_top_layout_and_section_order(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -859,12 +1247,535 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertTrue(page.uuid_section.verify_button.isEnabled())
             self.assertTrue(page.uuid_section.write_button.isEnabled())
             self.assertFalse(page.uuid_section.save_button.isEnabled())
+            self.assertEqual(page.uuid_section.last_workbook_action_text, "Workbook loaded; no write performed yet")
             self.assertEqual(runtime_window.backend_client.sent_commands, [])
             log_text = page.progress_section.to_plain_text()
-            self.assertIn("Expected S/N / UUID: 1223303010", log_text)
-            self.assertIn("Expected PWM: 100", log_text)
+            self.assertIn("Loaded Programming table with 12 supported parameter(s).", log_text)
+            self.assertNotIn("Expected S/N / UUID:", log_text)
+            self.assertNotIn("Expected PWM:", log_text)
             self.assertIn("loaded ipqc workbook", page.progress_section.to_html().lower())
             self.assertIn("#2e7d32", page.progress_section.to_html().lower())
+
+    def test_production_page_reload_clears_stale_parameter_workflow_state(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        runtime_window.node_status[3] = {
+            "connected": True,
+            "firmware": "v1.0.0",
+            "uuid": "",
+            "type": "X",
+            "interrupt": "OK",
+        }
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            self._create_ipqc_workbook(workbook_path, with_optional_fields=True)
+
+            with patch(
+                "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
+                return_value=(str(workbook_path), "Excel Files (*.xlsx)"),
+            ):
+                page._handle_load_ipqc_workbook()
+                self._app.processEvents()
+
+            page._handle_write_uuid()
+            self._app.processEvents()
+            self.assertTrue(page._workbook_parameter_write_pending or page._workbook_runtime_write_pending)
+            self.assertEqual(page._parameter_controller._parameter_operation_mode, "write")
+
+            with patch(
+                "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
+                return_value=(str(workbook_path), "Excel Files (*.xlsx)"),
+            ):
+                page._handle_load_ipqc_workbook()
+                self._app.processEvents()
+
+            self.assertFalse(page._workbook_parameter_write_pending)
+            self.assertFalse(page._workbook_runtime_write_pending)
+            self.assertFalse(page._workbook_eeprom_save_pending)
+            self.assertFalse(page._workbook_eeprom_save_failed)
+            self.assertFalse(page._workbook_eeprom_settle_active)
+            self.assertIsNone(page._parameter_controller._pending_parameter_request)
+            self.assertIsNone(page._parameter_controller._parameter_operation_mode)
+            self.assertEqual(page._parameter_controller._parameter_requests, [])
+            self.assertEqual(page._parameter_controller._parameter_results, [])
+            self.assertEqual(page.uuid_section.workbook_validation_text, "Workbook Validation: READY")
+            self.assertEqual(page.uuid_section.last_workbook_action_text, "Workbook loaded; no write performed yet")
+            self.assertTrue(page.uuid_section.write_button.isEnabled())
+            self.assertTrue(page.uuid_section.verify_button.isEnabled())
+            self.assertFalse(page.uuid_section.save_button.isEnabled())
+
+    @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook write wiring tests.")
+    def test_production_page_verify_all_matching_reads_without_writing_or_saving(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        runtime_window.node_status[6] = {
+            "connected": True,
+            "firmware": "v1.0.0",
+            "uuid": "",
+            "type": "H",
+            "interrupt": "OK",
+        }
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+        definitions = {definition.name: definition for definition in default_workbook_parameter_definitions()}
+        workbook_values = {
+            "UUID": 1243203029,
+            "PWM": 0,
+            "PID_P": 2000,
+            "PID_I": 1,
+            "PID_D": 35000,
+            "PID_SlewRate": 0,
+            "RampDown_Slope": 6,
+            "RampDown_Step": 3,
+            "RampDown_MinVel": 90,
+            "RampDown_TargetOffset": 512,
+            "RampDown_Region": 5,
+            "Acceptable_Error": 256,
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            self._create_ipqc_workbook(workbook_path)
+            workbook = load_workbook(workbook_path)
+            self._populate_updated_programming_values(workbook["3X"])
+            workbook.save(workbook_path)
+
+            with patch(
+                "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
+                return_value=(str(workbook_path), "Excel Files (*.xlsx)"),
+            ):
+                page._handle_load_ipqc_workbook()
+                self._app.processEvents()
+
+            self._select_node(page)
+            page._handle_verify_uuid()
+            self._app.processEvents()
+
+            verify_order = [
+                "UUID",
+                "PWM",
+                "PID_P",
+                "PID_I",
+                "PID_D",
+                "PID_SlewRate",
+                "RampDown_Slope",
+                "RampDown_Step",
+                "RampDown_MinVel",
+                "RampDown_TargetOffset",
+                "RampDown_Region",
+                "Acceptable_Error",
+            ]
+            expected_read_sequence = [
+                (6, definitions[name].build_read_command())
+                for name in verify_order
+            ]
+            for index, name in enumerate(verify_order):
+                definition = definitions[name]
+                runtime_window.packet_received.emit(
+                    self._build_parameter_verify_packet(definition, workbook_values[name])
+                )
+                self._app.processEvents()
+                self.assertEqual(runtime_window.backend_client.sent_commands[index], expected_read_sequence[index])
+
+            self.assertEqual(runtime_window.backend_client.sent_commands, expected_read_sequence)
+            self.assertNotIn((6, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]), runtime_window.backend_client.sent_commands)
+            self.assertEqual(page.result_summary_section._status_label.text(), "PASS")
+            self.assertTrue(page.uuid_section.save_button.isEnabled())
+            self.assertIn("Workbook parameter read-back verification", page.progress_section.to_plain_text())
+
+    @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook write wiring tests.")
+    def test_production_page_verify_mismatches_reads_without_writing_or_saving(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        runtime_window.node_status[6] = {
+            "connected": True,
+            "firmware": "v1.0.0",
+            "uuid": "",
+            "type": "H",
+            "interrupt": "OK",
+        }
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+        definitions = {definition.name: definition for definition in default_workbook_parameter_definitions()}
+        workbook_values = {
+            "UUID": 1243203029,
+            "PWM": 0,
+            "PID_P": 2000,
+            "PID_I": 1,
+            "PID_D": 35000,
+            "PID_SlewRate": 0,
+            "RampDown_Slope": 6,
+            "RampDown_Step": 3,
+            "RampDown_MinVel": 90,
+            "RampDown_TargetOffset": 512,
+            "RampDown_Region": 5,
+            "Acceptable_Error": 256,
+        }
+        actual_values = {
+            "UUID": 1243203030,
+            "PWM": 0,
+            "PID_P": 3000,
+            "PID_I": 2,
+            "PID_D": 40000,
+            "PID_SlewRate": 0,
+            "RampDown_Slope": 6,
+            "RampDown_Step": 3,
+            "RampDown_MinVel": 90,
+            "RampDown_TargetOffset": 512,
+            "RampDown_Region": 5,
+            "Acceptable_Error": 256,
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            self._create_ipqc_workbook(workbook_path)
+            workbook = load_workbook(workbook_path)
+            self._populate_updated_programming_values(workbook["3X"])
+            workbook.save(workbook_path)
+
+            with patch(
+                "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
+                return_value=(str(workbook_path), "Excel Files (*.xlsx)"),
+            ):
+                page._handle_load_ipqc_workbook()
+                self._app.processEvents()
+
+            self._select_node(page)
+            page._handle_verify_uuid()
+            self._app.processEvents()
+
+            verify_order = [
+                "UUID",
+                "PWM",
+                "PID_P",
+                "PID_I",
+                "PID_D",
+                "PID_SlewRate",
+                "RampDown_Slope",
+                "RampDown_Step",
+                "RampDown_MinVel",
+                "RampDown_TargetOffset",
+                "RampDown_Region",
+                "Acceptable_Error",
+            ]
+            expected_read_sequence = [
+                (6, definitions[name].build_read_command())
+                for name in verify_order
+            ]
+            for index, name in enumerate(verify_order):
+                definition = definitions[name]
+                runtime_window.packet_received.emit(
+                    self._build_parameter_verify_packet(definition, actual_values[name])
+                )
+                self._app.processEvents()
+                self.assertEqual(runtime_window.backend_client.sent_commands[index], expected_read_sequence[index])
+
+            self.assertEqual(runtime_window.backend_client.sent_commands, expected_read_sequence)
+            self.assertNotIn((6, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]), runtime_window.backend_client.sent_commands)
+            self.assertEqual(page.result_summary_section._status_label.text(), "FAIL")
+            self.assertFalse(page.uuid_section.save_button.isEnabled())
+            self.assertIn("Workbook Validation: FAILED", page.uuid_section.workbook_validation_text)
+
+    @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook write wiring tests.")
+    def test_production_page_write_filters_to_failed_previous_verification_results_and_sends_one_eeprom_save(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        runtime_window.node_status[6] = {
+            "connected": True,
+            "firmware": "v1.0.0",
+            "uuid": "",
+            "type": "H",
+            "interrupt": "OK",
+        }
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+        definitions = {definition.name: definition for definition in default_workbook_parameter_definitions()}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            self._create_ipqc_workbook(workbook_path)
+            workbook = load_workbook(workbook_path)
+            self._populate_updated_programming_values(workbook["3X"])
+            workbook.save(workbook_path)
+
+            with patch(
+                "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
+                return_value=(str(workbook_path), "Excel Files (*.xlsx)"),
+            ):
+                page._handle_load_ipqc_workbook()
+                self._app.processEvents()
+
+            self._select_node(page)
+
+            results: list[ParameterVerificationResult] = []
+            for name, actual_value, passed in [
+                ("UUID", 1243203030, False),
+                ("PWM", 0, True),
+                ("PID_P", 3000, False),
+                ("PID_I", 2, False),
+                ("PID_D", 40000, False),
+                ("PID_SlewRate", 0, True),
+                ("RampDown_Slope", 6, True),
+                ("RampDown_Step", 3, True),
+                ("RampDown_MinVel", 90, True),
+                ("RampDown_TargetOffset", 512, True),
+                ("RampDown_Region", 5, True),
+                ("Acceptable_Error", 256, True),
+            ]:
+                definition = definitions[name]
+                expected_text = workbook["3X"][definition.expected_cell].value
+                actual_text = str(actual_value)
+                reason = (
+                    f"{definition.label} read-back verification"
+                    if passed
+                    else f"{definition.label} read-back verification - expected {expected_text}, actual {actual_text}"
+                )
+                results.append(
+                    ParameterVerificationResult(
+                        definition=definition,
+                        expected_text=str(expected_text),
+                        actual_text=actual_text,
+                        passed=passed,
+                        reason=reason,
+                    )
+                )
+
+            page._handle_parameter_verification_finished(
+                False,
+                "Workbook parameter read-back verification",
+                results,
+            )
+            self._app.processEvents()
+
+            page._handle_write_uuid()
+            self._app.processEvents()
+            self.assertEqual(
+                runtime_window.backend_client.sent_commands[0],
+                (6, build_uuid_write_payload(1243203029)),
+            )
+            self.assertEqual(page.progress_section.to_plain_text().count("WRITE PLAN: 4 mismatched parameter(s): S/N, PID_P, PID_I, PID_D"), 1)
+            self.assertIn(
+                "SKIPPED: 8 parameter(s) already matched read-back values.",
+                page.progress_section.to_plain_text(),
+            )
+
+            write_response_payloads = {
+                "UUID": [0x3A, *build_uuid_write_payload(1243203029)[2:]],
+                "PID_P": [0x3A, 0x70, *list((2000).to_bytes(4, "big", signed=True))],
+                "PID_I": [0x3A, 0x69, *list((1).to_bytes(4, "big", signed=True))],
+                "PID_D": [0x3A, 0x64, *list((35000).to_bytes(4, "big", signed=True))],
+            }
+            write_order = ["UUID", "PID_P", "PID_I", "PID_D"]
+            for index, name in enumerate(write_order):
+                definition = definitions[name]
+                runtime_window.packet_received.emit(
+                    {
+                        "status": "ok",
+                        "type": "can_over_uart",
+                        "sender": 6,
+                        "cmd": definition.command_id,
+                        "params": write_response_payloads[name],
+                    }
+                )
+                self._app.processEvents()
+
+            self.assertEqual(
+                runtime_window.backend_client.sent_commands[1:4],
+                [
+                    (6, definitions["PID_P"].build_write_command(2000)),
+                    (6, definitions["PID_I"].build_write_command(1)),
+                    (6, definitions["PID_D"].build_write_command(35000)),
+                ],
+            )
+            self.assertEqual(
+                runtime_window.backend_client.sent_commands[4],
+                (6, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]),
+            )
+            self.assertEqual(runtime_window.backend_client.sent_commands.count((6, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX])), 1)
+
+            runtime_window.packet_received.emit(
+                {
+                    "status": "ok",
+                    "type": "can_over_uart",
+                    "sender": 6,
+                    "cmd": EEPROM_SAVE_COMMAND,
+                    "params": [0x0A, 0x00],
+                }
+            )
+            self._app.processEvents()
+            page._handle_eeprom_save_settle_finished()
+            self._app.processEvents()
+
+            self.assertFalse(page._workbook_runtime_write_pending)
+            self.assertFalse(page._workbook_parameter_write_pending)
+            self.assertFalse(page._workbook_eeprom_save_pending)
+            self.assertFalse(page._workbook_eeprom_settle_active)
+            self.assertFalse(page.uuid_section.save_button.isEnabled())
+
+    @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook write wiring tests.")
+    def test_production_page_write_skips_matching_pwm_and_does_not_send_eeprom_save(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        runtime_window.node_status[6] = {
+            "connected": True,
+            "firmware": "v1.0.0",
+            "uuid": "",
+            "type": "H",
+            "interrupt": "OK",
+        }
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+        definitions = {definition.name: definition for definition in default_workbook_parameter_definitions()}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            self._create_ipqc_workbook(workbook_path)
+            workbook = load_workbook(workbook_path)
+            self._populate_updated_programming_values(workbook["3X"])
+            workbook.save(workbook_path)
+
+            with patch(
+                "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
+                return_value=(str(workbook_path), "Excel Files (*.xlsx)"),
+            ):
+                page._handle_load_ipqc_workbook()
+                self._app.processEvents()
+
+            self._select_node(page)
+
+            results: list[ParameterVerificationResult] = []
+            for name, actual_value, passed in [
+                ("UUID", 1243203029, True),
+                ("PWM", 10, False),
+                ("PID_P", 2000, True),
+                ("PID_I", 1, True),
+                ("PID_D", 35000, True),
+                ("PID_SlewRate", 0, True),
+                ("RampDown_Slope", 6, True),
+                ("RampDown_Step", 3, True),
+                ("RampDown_MinVel", 90, True),
+                ("RampDown_TargetOffset", 512, True),
+                ("RampDown_Region", 5, True),
+                ("Acceptable_Error", 256, True),
+            ]:
+                definition = definitions[name]
+                expected_text = workbook["3X"][definition.expected_cell].value
+                actual_text = str(actual_value)
+                reason = (
+                    f"{definition.label} read-back verification"
+                    if passed
+                    else f"{definition.label} read-back verification - expected {expected_text}, actual {actual_text}"
+                )
+                results.append(
+                    ParameterVerificationResult(
+                        definition=definition,
+                        expected_text=str(expected_text),
+                        actual_text=actual_text,
+                        passed=passed,
+                        reason=reason,
+                    )
+                )
+
+            page._handle_parameter_verification_finished(
+                False,
+                "Workbook parameter read-back verification",
+                results,
+            )
+            self._app.processEvents()
+
+            page._handle_write_uuid()
+            self._app.processEvents()
+            self.assertEqual(runtime_window.backend_client.sent_commands[0], (6, build_pwm_write_payload(0)))
+            self.assertNotIn((6, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]), runtime_window.backend_client.sent_commands)
+            self.assertEqual(len(runtime_window.backend_client.sent_commands), 1)
+
+            runtime_window.packet_received.emit(
+                {
+                    "status": "ok",
+                    "type": "can_over_uart",
+                    "sender": 6,
+                    "cmd": 0x84,
+                    "params": [0x53, 0x00, 0x00],
+                }
+            )
+            self._app.processEvents()
+            self.assertNotIn((6, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]), runtime_window.backend_client.sent_commands)
+            self.assertFalse(page._workbook_eeprom_save_pending)
+            self.assertFalse(page._workbook_runtime_write_pending)
+
+    @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook write wiring tests.")
+    def test_production_page_write_with_all_previous_results_matching_sends_no_write_and_no_eeprom_save(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        runtime_window.node_status[6] = {
+            "connected": True,
+            "firmware": "v1.0.0",
+            "uuid": "",
+            "type": "H",
+            "interrupt": "OK",
+        }
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+        definitions = {definition.name: definition for definition in default_workbook_parameter_definitions()}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            self._create_ipqc_workbook(workbook_path)
+            workbook = load_workbook(workbook_path)
+            self._populate_updated_programming_values(workbook["3X"])
+            workbook.save(workbook_path)
+
+            with patch(
+                "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
+                return_value=(str(workbook_path), "Excel Files (*.xlsx)"),
+            ):
+                page._handle_load_ipqc_workbook()
+                self._app.processEvents()
+
+            self._select_node(page)
+
+            results: list[ParameterVerificationResult] = []
+            for name in [
+                "UUID",
+                "PWM",
+                "PID_P",
+                "PID_I",
+                "PID_D",
+                "PID_SlewRate",
+                "RampDown_Slope",
+                "RampDown_Step",
+                "RampDown_MinVel",
+                "RampDown_TargetOffset",
+                "RampDown_Region",
+                "Acceptable_Error",
+            ]:
+                definition = definitions[name]
+                expected_text = workbook["3X"][definition.expected_cell].value
+                actual_text = str(expected_text)
+                results.append(
+                    ParameterVerificationResult(
+                        definition=definition,
+                        expected_text=str(expected_text),
+                        actual_text=actual_text,
+                        passed=True,
+                        reason=f"{definition.label} read-back verification",
+                    )
+                )
+
+            page._handle_parameter_verification_finished(
+                True,
+                "Workbook parameter read-back verification",
+                results,
+            )
+            self._app.processEvents()
+
+            page._handle_write_uuid()
+            self._app.processEvents()
+
+            self.assertEqual(runtime_window.backend_client.sent_commands, [])
+            self.assertEqual(page.result_summary_section._status_label.text(), "READY")
+            self.assertIn(
+                "No parameter writes required; all workbook values already match MCU read-back.",
+                page.result_summary_section._reason_label.text(),
+            )
+            self.assertNotIn((6, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]), runtime_window.backend_client.sent_commands)
 
     def test_production_page_logs_workbook_load_failure_in_red(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -909,66 +1820,8 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             expected_uuid = 1223303010
             self.assertTrue(runtime_window.backend_client.sent_commands)
             self.assertIn((3, build_uuid_write_payload(expected_uuid)), runtime_window.backend_client.sent_commands)
-            self.assertIn((3, build_pwm_write_payload(100)), runtime_window.backend_client.sent_commands)
-            self.assertEqual(
-                runtime_window.backend_client.sent_commands[-1],
-                (3, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]),
-            )
-            self.assertFalse(page.uuid_section.verify_button.isEnabled())
-            self.assertFalse(page.uuid_section.save_button.isEnabled())
-            sent_count = len(runtime_window.backend_client.sent_commands)
-            page._handle_verify_uuid()
-            self._app.processEvents()
-            self.assertEqual(len(runtime_window.backend_client.sent_commands), sent_count)
-            runtime_window.packet_received.emit(
-                {
-                    "status": "ok",
-                    "type": "can_over_uart",
-                    "sender": 3,
-                    "cmd": EEPROM_SAVE_COMMAND,
-                    "params": [0x0A, 0x00],
-                }
-            )
-            self._app.processEvents()
-            self.assertEqual(page.uuid_section.workbook_validation_text, "Workbook Validation: READY")
-            self.assertFalse(page.uuid_section.verify_button.isEnabled())
-            self.assertFalse(page.uuid_section.save_button.isEnabled())
-            self.assertIn("[INFO] EEPROM save ACK received.", page.progress_section.to_plain_text())
-
-            page._handle_eeprom_save_settle_finished()
-            self._app.processEvents()
-            self.assertTrue(page.uuid_section.verify_button.isEnabled())
-
-            page._handle_verify_uuid()
-            self._app.processEvents()
-            self.assertEqual(runtime_window.backend_client.sent_commands[-1], (3, [0xE0, 0x3F]))
-
-            runtime_window.packet_received.emit(
-                {
-                    "status": "ok",
-                    "type": "can_over_uart",
-                    "sender": 3,
-                    "cmd": 0xE0,
-                    "params": [0x3A, *build_uuid_write_payload(expected_uuid)[2:]],
-                }
-            )
-            self._app.processEvents()
-            self.assertEqual(runtime_window.backend_client.sent_commands[-1], (3, [0x85]))
-            runtime_window.packet_received.emit(
-                {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0x85, "params": [0x00, 0x64]}
-            )
-            self._app.processEvents()
-
-            output_sheet = page._ipqc_excel_adapter._workbook["3X"]
-            self.assertEqual(output_sheet["C4"].value, str(expected_uuid))
-            self.assertEqual(output_sheet["D4"].value, "PASS")
-            self.assertEqual(output_sheet["C5"].value, "100")
-            self.assertEqual(output_sheet["D5"].value, "PASS")
-            self.assertEqual(page.result_summary_section._status_label.text(), "PASS")
-            self.assertEqual(page.uuid_section.workbook_validation_text, "Workbook Validation: PASSED")
-            self.assertTrue(page.uuid_section.save_button.isEnabled())
-            self.assertEqual(page.progress_section.to_plain_text().count("[PASS] Workbook parameter read-back verification"), 1)
-            self.assertFalse(hasattr(page, "_result_logger"))
+            self.assertEqual(len(runtime_window.backend_client.sent_commands), 1)
+            self.assertTrue(page._workbook_parameter_write_pending)
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook write wiring tests.")
     def test_production_page_write_uuid_timeout_disables_verify_and_reports_quiet_mode_issue(self) -> None:
@@ -996,6 +1849,16 @@ class ProductionPageWorkflowTests(unittest.TestCase):
                 self._app.processEvents()
 
             page._handle_write_uuid()
+            self._app.processEvents()
+            runtime_window.packet_received.emit(
+                {
+                    "status": "ok",
+                    "type": "can_over_uart",
+                    "sender": 3,
+                    "cmd": 0xE0,
+                    "params": [0x3A, *build_uuid_write_payload(1223303010)[2:]],
+                }
+            )
             self._app.processEvents()
 
             deadline = time.monotonic() + 1.0
@@ -1192,7 +2055,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
                 page._handle_load_ipqc_workbook()
                 self._app.processEvents()
 
-            with patch.object(page._ipqc_excel_adapter, "write_summary_result", side_effect=OSError("disk full")):
+            with patch.object(page._ipqc_excel_adapter, "write_programming_parameter_result", side_effect=OSError("disk full")):
                 page._update_uuid_cells_in_workbook_memory("1223303011", True)
                 self._app.processEvents()
 
@@ -1223,21 +2086,6 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             ):
                 page._handle_load_ipqc_workbook()
                 self._app.processEvents()
-
-            page._handle_write_uuid()
-            self._app.processEvents()
-            self.assertEqual(
-                runtime_window.backend_client.sent_commands[-1],
-                (3, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]),
-            )
-            runtime_window.packet_received.emit(
-                {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": EEPROM_SAVE_COMMAND, "params": [0x0A, 0x00]}
-            )
-            self._app.processEvents()
-            self.assertFalse(page.uuid_section.verify_button.isEnabled())
-            page._handle_eeprom_save_settle_finished()
-            self._app.processEvents()
-            self.assertTrue(page.uuid_section.verify_button.isEnabled())
 
             expected_uuid = 1223303010
             page._handle_verify_uuid()
@@ -1296,20 +2144,6 @@ class ProductionPageWorkflowTests(unittest.TestCase):
                 page._handle_load_ipqc_workbook()
                 self._app.processEvents()
 
-            page._handle_write_uuid()
-            self._app.processEvents()
-            self.assertEqual(
-                runtime_window.backend_client.sent_commands[-1],
-                (3, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]),
-            )
-            runtime_window.packet_received.emit(
-                {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": EEPROM_SAVE_COMMAND, "params": [0x0A, 0x00]}
-            )
-            self._app.processEvents()
-            self.assertFalse(page.uuid_section.verify_button.isEnabled())
-            page._handle_eeprom_save_settle_finished()
-            self._app.processEvents()
-            self.assertTrue(page.uuid_section.verify_button.isEnabled())
             page._handle_verify_uuid()
             self._app.processEvents()
             self.assertEqual(runtime_window.backend_client.sent_commands[-1], (3, [0xE0, 0x3F]))
@@ -1362,20 +2196,6 @@ class ProductionPageWorkflowTests(unittest.TestCase):
                 page._handle_load_ipqc_workbook()
                 self._app.processEvents()
 
-            page._handle_write_uuid()
-            self._app.processEvents()
-            self.assertEqual(
-                runtime_window.backend_client.sent_commands[-1],
-                (3, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]),
-            )
-            runtime_window.packet_received.emit(
-                {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": EEPROM_SAVE_COMMAND, "params": [0x0A, 0x00]}
-            )
-            self._app.processEvents()
-            self.assertFalse(page.uuid_section.verify_button.isEnabled())
-            page._handle_eeprom_save_settle_finished()
-            self._app.processEvents()
-            self.assertTrue(page.uuid_section.verify_button.isEnabled())
             page._handle_verify_uuid()
             self._app.processEvents()
             self.assertEqual(runtime_window.backend_client.sent_commands[-1], (3, [0xE0, 0x3F]))
@@ -1421,20 +2241,6 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             output_sheet = page._ipqc_excel_adapter._workbook["3X"]
             self.assertIn(output_sheet["C5"].value, (None, ""))
             self.assertIn(output_sheet["D5"].value, (None, ""))
-            page._handle_write_uuid()
-            self._app.processEvents()
-            self.assertEqual(
-                runtime_window.backend_client.sent_commands[-1],
-                (3, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]),
-            )
-            runtime_window.packet_received.emit(
-                {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": EEPROM_SAVE_COMMAND, "params": [0x0A, 0x00]}
-            )
-            self._app.processEvents()
-            self.assertFalse(page.uuid_section.verify_button.isEnabled())
-            page._handle_eeprom_save_settle_finished()
-            self._app.processEvents()
-            self.assertTrue(page.uuid_section.verify_button.isEnabled())
             page._handle_verify_uuid()
             self._app.processEvents()
             self.assertEqual(runtime_window.backend_client.sent_commands[-1], (3, [0xE0, 0x3F]))
@@ -1478,10 +2284,17 @@ class ProductionPageWorkflowTests(unittest.TestCase):
 
             page._handle_write_uuid()
             self._app.processEvents()
-            self.assertEqual(
-                runtime_window.backend_client.sent_commands[-1],
-                (3, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]),
+            runtime_window.packet_received.emit(
+                {
+                    "status": "ok",
+                    "type": "can_over_uart",
+                    "sender": 3,
+                    "cmd": 0xE0,
+                    "params": [0x3A, *build_uuid_write_payload(1223303010)[2:]],
+                }
             )
+            self._app.processEvents()
+            self.assertEqual(runtime_window.backend_client.sent_commands[-1], (3, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]))
             page._parameter_controller._handle_eeprom_save_timeout()
             self._app.processEvents()
 
@@ -1588,10 +2401,12 @@ class ProductionParameterControllerTests(unittest.TestCase):
         self.assertEqual(parse_uuid_value("1234567890"), 1234567890)
         self.assertEqual(parse_uuid_value("0x499602D2"), 1234567890)
         self.assertEqual(parse_pwm_value("100"), 100)
+        self.assertEqual(parse_pwm_value("-12"), -12)
         self.assertEqual(build_pwm_read_payload(), [0x85])
         self.assertEqual(build_uuid_read_payload(), [0xE0, 0x3F])
         self.assertEqual(build_uuid_write_payload(1234567890), [0xE0, 0x3D, 0x00, 0x49, 0x96, 0x02, 0xD2])
         self.assertEqual(build_pwm_write_payload(100), [0x84, 0x00, 0x64])
+        self.assertEqual(build_pwm_write_payload(-2), [0x84, 0xFF, 0xFE])
         self.assertEqual(format_uuid_like_source(1234567890, "1234567890"), "1234567890")
         self.assertEqual(format_uuid_like_source(1234567890, "0x499602D2"), "0x499602D2")
         self.assertEqual(validate_uuid_format(1223306010, 6), (True, ""))
@@ -1604,6 +2419,121 @@ class ProductionParameterControllerTests(unittest.TestCase):
         pwm_decoded_ok, pwm_decoded_value, _ = decode_pwm_response([0x85, 0x00, 0x50])
         self.assertTrue(pwm_decoded_ok)
         self.assertEqual(pwm_decoded_value, 80)
+        pwm_write_ok, pwm_write_value, _ = decode_pwm_response([0x84, 0x53, 0xFF, 0xFE])
+        self.assertTrue(pwm_write_ok)
+        self.assertEqual(pwm_write_value, -2)
+
+    def test_new_workbook_parameter_definitions_cover_layout_and_payloads(self) -> None:
+        controller = ProductionParameterController(_FakeBridge(_FakeRuntimeWindow()))
+        defs = {definition.name: definition for definition in default_workbook_parameter_definitions()}
+        expected_cells = {
+            "UUID": ("B4", "C4", "D4"),
+            "PWM": ("B5", "C5", "D5"),
+            "PID_P": ("B6", "C6", "D6"),
+            "PID_I": ("B7", "C7", "D7"),
+            "PID_D": ("B8", "C8", "D8"),
+            "PID_SlewRate": ("B9", "C9", "D9"),
+            "RampDown_Slope": ("B10", "C10", "D10"),
+            "RampDown_Step": ("B11", "C11", "D11"),
+            "RampDown_MinVel": ("B12", "C12", "D12"),
+            "RampDown_TargetOffset": ("B13", "C13", "D13"),
+            "RampDown_Region": ("B14", "C14", "D14"),
+            "Acceptable_Error": ("B15", "C15", "D15"),
+        }
+        for name, cells in expected_cells.items():
+            with self.subTest(name=name):
+                definition = defs[name]
+                self.assertEqual((definition.expected_cell, definition.actual_cell, definition.result_cell), cells)
+
+        pid_p_request = controller.build_parameter_request(defs["PID_P"], 6, "H", "1.25")
+        self.assertEqual(pid_p_request.expected_value, 1_250_000)
+        self.assertEqual(
+            defs["PID_P"].build_write_command(pid_p_request.expected_value),
+            [0xE7, 0x3D, 0x70, *list((1_250_000).to_bytes(4, "big", signed=True))],
+        )
+        self.assertEqual(defs["PID_P"].build_read_command(), [0xE7, 0x3F, 0x70])
+        self.assertEqual(
+            defs["PID_P"].decode_response([0xE7, 0x3A, 0x70, *list((1_250_000).to_bytes(4, "big", signed=True))]),
+            (True, 1_250_000, ""),
+        )
+
+        pid_i_request = controller.build_parameter_request(defs["PID_I"], 6, "H", "-0.25")
+        self.assertEqual(pid_i_request.expected_value, -250_000)
+        self.assertEqual(
+            defs["PID_I"].build_write_command(pid_i_request.expected_value),
+            [0xE7, 0x3D, 0x69, *list((-250_000).to_bytes(4, "big", signed=True))],
+        )
+        self.assertEqual(defs["PID_I"].build_read_command(), [0xE7, 0x3F, 0x69])
+
+        pid_d_request = controller.build_parameter_request(defs["PID_D"], 6, "H", "0.75")
+        self.assertEqual(pid_d_request.expected_value, 750_000)
+        self.assertEqual(
+            defs["PID_D"].build_write_command(pid_d_request.expected_value),
+            [0xE7, 0x3D, 0x64, *list((750_000).to_bytes(4, "big", signed=True))],
+        )
+        self.assertEqual(defs["PID_D"].build_read_command(), [0xE7, 0x3F, 0x64])
+
+        slope_request = controller.build_parameter_request(defs["RampDown_Slope"], 6, "H", "-25")
+        target_request = controller.build_parameter_request(defs["RampDown_TargetOffset"], 6, "H", "-12")
+        self.assertEqual(slope_request.expected_value, -25)
+        self.assertEqual(target_request.expected_value, -12)
+        self.assertEqual(defs["RampDown_Slope"].build_write_command(-25), [0x89, 0x3D, 0xFF, 0xE7])
+        self.assertEqual(defs["RampDown_TargetOffset"].build_write_command(-12), [0xE1, 0x3D, 0xFF, 0xF4])
+        self.assertEqual(defs["RampDown_Slope"].decode_response([0x89, 0x3A, 0xFF, 0xE7]), (True, -25, ""))
+        self.assertEqual(defs["RampDown_TargetOffset"].decode_response([0xE1, 0x3A, 0xFF, 0xF4]), (True, -12, ""))
+
+        self.assertEqual(defs["PID_SlewRate"].build_write_command(1500), [0xED, 0x3D, 0x05, 0xDC])
+        self.assertEqual(defs["PID_SlewRate"].build_read_command(), [0xED, 0x3F])
+        self.assertEqual(defs["PID_SlewRate"].decode_response([0xED, 0x3A, 0x05, 0xDC]), (True, 1500, ""))
+
+        self.assertEqual(defs["RampDown_Step"].build_write_command(4), [0x8B, 0x3D, 0x04])
+        self.assertEqual(defs["RampDown_MinVel"].build_write_command(8), [0x8C, 0x3D, 0x08])
+        self.assertEqual(defs["RampDown_Region"].build_write_command(75), [0xE2, 0x3D, 0x4B])
+        self.assertEqual(defs["Acceptable_Error"].build_write_command(30), [0xEC, 0x3D, 0x00, 0x1E])
+        self.assertEqual(defs["RampDown_Region"].decode_response([0xE2, 0x3A, 0x4B]), (True, 75, ""))
+        self.assertEqual(defs["Acceptable_Error"].decode_response([0xEC, 0x3A, 0x00, 0x1E]), (True, 30, ""))
+        self.assertFalse(defs["PWM"].persistent)
+        self.assertTrue(defs["UUID"].persistent)
+
+    def test_new_workbook_parameter_validation_rejects_out_of_range_values(self) -> None:
+        controller = ProductionParameterController(_FakeBridge(_FakeRuntimeWindow()))
+        defs = {definition.name: definition for definition in default_workbook_parameter_definitions()}
+
+        with self.assertRaisesRegex(ValueError, "RampDown_Step"):
+            controller.build_parameter_request(defs["RampDown_Step"], 6, "H", "256")
+        with self.assertRaisesRegex(ValueError, "RampDown_MinVel"):
+            controller.build_parameter_request(defs["RampDown_MinVel"], 6, "H", "-1")
+        with self.assertRaisesRegex(ValueError, "RampDown_Region"):
+            controller.build_parameter_request(defs["RampDown_Region"], 6, "H", "101")
+        with self.assertRaisesRegex(ValueError, "Acceptable_Error"):
+            controller.build_parameter_request(defs["Acceptable_Error"], 6, "H", "70000")
+
+    def test_reset_workbook_parameter_workflow_clears_inflight_state(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        controller = ProductionParameterController(bridge, timeout_ms=100)
+        defs = {definition.name: definition for definition in default_workbook_parameter_definitions()}
+        request = controller.build_parameter_request(defs["PWM"], 3, "X", "100")
+
+        self.assertTrue(controller.write_parameters([request]))
+        self.assertEqual(controller._parameter_operation_mode, "write")
+        self.assertIsNotNone(controller._pending_parameter_request)
+        self.assertEqual(controller._parameter_requests, [request])
+
+        controller.reset_workbook_parameter_workflow()
+
+        self.assertIsNone(controller._parameter_operation_mode)
+        self.assertIsNone(controller._pending_parameter_request)
+        self.assertEqual(controller._parameter_requests, [])
+        self.assertEqual(controller._parameter_results, [])
+        self.assertIsNone(controller._pending_eeprom_save)
+        self.assertFalse(controller._eeprom_settle_active)
+        self.assertIsNone(controller.last_verify_actual_uuid)
+        self.assertEqual(controller.last_verify_actual_uuid_text, "")
+        self.assertEqual(controller.last_verify_raw_response_hex, "")
+        self.assertIsNone(controller.last_verify_actual_pwm)
+        self.assertEqual(controller.last_verify_actual_pwm_text, "")
+        self.assertEqual(controller.last_verify_pwm_raw_response_hex, "")
 
     def test_write_pwm_sends_set_pwm_payload_to_selected_node(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -1739,10 +2669,18 @@ class ProductionParameterControllerTests(unittest.TestCase):
             expected_cell="B9",
             actual_cell="C9",
             result_cell="D9",
+            command_id=0x92,
+            write_operator=0x3D,
+            read_operator=0x3F,
+            write_response_operator=0x3A,
+            read_response_operator=0x3A,
+            value_size=1,
+            signed=False,
+            persistent=True,
+            sub_id=None,
             parse_expected=lambda value: int(str(value).strip()),
-            build_write_command=lambda value: [0x91, int(value) & 0xFF],
+            build_write_command=lambda value: [0x92, int(value) & 0xFF],
             build_read_command=lambda: [0x92],
-            response_command=0x92,
             decode_response=lambda payload: (True, payload[1], "") if len(payload) > 1 else (False, None, "short"),
             format_actual=lambda actual, _expected: str(actual),
             compare=lambda expected, _expected_text, actual, _actual_text: int(expected) == int(actual),
@@ -1753,7 +2691,11 @@ class ProductionParameterControllerTests(unittest.TestCase):
 
         ok, message = controller.write_parameters([request])
         self.assertTrue(ok, message)
-        self.assertEqual(runtime_window.backend_client.sent_commands[-1], (6, [0x91, 0x07]))
+        self.assertEqual(runtime_window.backend_client.sent_commands[-1], (6, [0x92, 0x07]))
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x92, "params": [0x07]}
+        )
+        self._app.processEvents()
         self.assertTrue(controller.verify_parameters([request]))
         self.assertEqual(runtime_window.backend_client.sent_commands[-1], (6, [0x92]))
         runtime_window.packet_received.emit(
@@ -1773,10 +2715,18 @@ class ProductionParameterControllerTests(unittest.TestCase):
             expected_cell="B9",
             actual_cell="C9",
             result_cell="D9",
+            command_id=0x92,
+            write_operator=0x3D,
+            read_operator=0x3F,
+            write_response_operator=0x3A,
+            read_response_operator=0x3A,
+            value_size=1,
+            signed=False,
+            persistent=True,
+            sub_id=None,
             parse_expected=lambda value: int(str(value).strip()),
-            build_write_command=lambda value: [0x91, int(value) & 0xFF],
+            build_write_command=lambda value: [0x92, int(value) & 0xFF],
             build_read_command=lambda: [0x92],
-            response_command=0x92,
             decode_response=lambda payload: (True, payload[1], "") if len(payload) > 1 else (False, None, "short"),
             format_actual=lambda actual, _expected: str(actual),
             compare=lambda expected, _expected_text, actual, _actual_text: int(expected) == int(actual),
@@ -1804,10 +2754,18 @@ class ProductionParameterControllerTests(unittest.TestCase):
             expected_cell="B10",
             actual_cell="C10",
             result_cell="D10",
+            command_id=0x93,
+            write_operator=None,
+            read_operator=0x3F,
+            write_response_operator=None,
+            read_response_operator=0x3A,
+            value_size=1,
+            signed=False,
+            persistent=True,
+            sub_id=None,
             parse_expected=lambda value: str(value).strip().upper(),
             build_write_command=None,
             build_read_command=lambda: [0x93],
-            response_command=0x93,
             decode_response=lambda payload: (True, chr(payload[1]), "") if len(payload) > 1 else (False, None, "short"),
             format_actual=lambda actual, _expected: str(actual),
             compare=lambda expected, _expected_text, actual, _actual_text: str(expected) == str(actual),
@@ -2075,10 +3033,10 @@ class ProductionParameterControllerTests(unittest.TestCase):
 
         self.assertEqual(runtime_window.backend_client.sent_commands, [])
         self.assertEqual(page.result_summary_section._status_label.text(), "FAIL")
-        self.assertIn("Expected S/N is unavailable", page.result_summary_section._reason_label.text())
+        self.assertIn("Load an IPQC workbook first", page.result_summary_section._reason_label.text())
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook guard tests.")
-    def test_production_page_blocks_uuid_actions_when_workbook_expected_sn_missing(self) -> None:
+    def test_production_page_blocks_uuid_actions_when_no_supported_parameters_are_loaded(self) -> None:
         runtime_window = _FakeRuntimeWindow()
         bridge = _FakeBridge(runtime_window)
         page = ProductionPage(bridge)
@@ -2087,7 +3045,8 @@ class ProductionParameterControllerTests(unittest.TestCase):
             workbook_path = Path(tmpdir) / "ipqc.xlsx"
             self._create_ipqc_workbook(workbook_path, with_optional_fields=False)
             wb = load_workbook(workbook_path)
-            wb["3X"]["B4"] = None
+            for row in range(4, 16):
+                wb["3X"][f"A{row}"] = f"Unsupported {row}"
             wb.save(workbook_path)
             with patch(
                 "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
@@ -2103,7 +3062,8 @@ class ProductionParameterControllerTests(unittest.TestCase):
             self._app.processEvents()
             self.assertEqual(runtime_window.backend_client.sent_commands, [])
             self.assertEqual(page.result_summary_section._status_label.text(), "FAIL")
-            self.assertIn("Expected S/N is unavailable", page.result_summary_section._reason_label.text())
+            self.assertIn("No supported parameter rows found", page.progress_section.to_plain_text())
+            self.assertIn("Labels found:", page.progress_section.to_plain_text())
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook guard tests.")
     def test_production_page_blocks_uuid_actions_when_workbook_expected_sn_invalid(self) -> None:
