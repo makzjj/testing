@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 try:
+    from openpyxl.utils import get_column_letter
     from openpyxl import load_workbook
     from openpyxl.worksheet.worksheet import Worksheet
     from openpyxl.workbook.workbook import Workbook
 except ImportError:  # pragma: no cover - guarded at runtime.
     Workbook = Any  # type: ignore[assignment]
     Worksheet = Any  # type: ignore[assignment]
+    get_column_letter = None  # type: ignore[assignment]
     load_workbook = None  # type: ignore[assignment]
 
 
@@ -23,6 +26,26 @@ class IpqcExpectedSummary:
     serial_number: str = ""
     pwm: str = ""
     other_parameters: str = ""
+
+
+@dataclass(frozen=True)
+class SamplingWorkbookLayout:
+    sheet_name: str
+    section_headers: dict[str, int]
+    row_lookup: dict[tuple[str, int, str], int]
+    raw_labels: list[str]
+
+    def resolve_row(self, section_name: str, pwm_value: int, direction: str) -> int:
+        section_key = " ".join(str(section_name).strip().casefold().split())
+        direction_key = str(direction).strip()
+        if direction_key not in {"+", "-"}:
+            raise ValueError(f"Unsupported sampling direction '{direction}'.")
+        row = self.row_lookup.get((section_key, int(pwm_value), direction_key))
+        if row is None:
+            raise ValueError(
+                f"Unsupported sampling row for section '{section_name}', PWM {pwm_value}, direction '{direction}'."
+            )
+        return row
 
 
 class IpqcExcelAdapter:
@@ -170,6 +193,85 @@ class IpqcExcelAdapter:
             if normalized in self._PROGRAMMING_ROW_LOOKUP:
                 discovered_rows[normalized] = row
         return discovered_rows, raw_labels
+
+    def resolve_sampling_sheet_name(self, base_group: str | None = None) -> str:
+        group = self._active_group if base_group is None else base_group
+        if not group:
+            raise RuntimeError("No IPQC sheet group is selected.")
+        return f"{group}_D"
+
+    def sample_index_to_column(self, sample_index: int) -> str:
+        if get_column_letter is None:
+            raise RuntimeError("openpyxl is required for sampling workbook support but is not installed.")
+        index = int(sample_index)
+        if index < 1 or index > 32:
+            raise ValueError(f"Sampling index must be between 1 and 32, got {sample_index}.")
+        return get_column_letter(index + 1)
+
+    def discover_sampling_layout(self, base_group: str | None = None) -> SamplingWorkbookLayout:
+        workbook = self._require_workbook()
+        sheet_name = self.resolve_sampling_sheet_name(base_group)
+        if sheet_name not in workbook.sheetnames:
+            raise ValueError(f"Sampling sheet '{sheet_name}' is missing from workbook.")
+        sheet = workbook[sheet_name]
+        section_headers: dict[str, int] = {}
+        row_lookup: dict[tuple[str, int, str], int] = {}
+        raw_labels: list[str] = []
+        current_section: str | None = None
+        section_pattern = re.compile(r"^(range|speed|time)$", re.IGNORECASE)
+        pwm_pattern = re.compile(r"^pwm\s*(\d+)$", re.IGNORECASE)
+        sample_pattern = re.compile(r"^([+-])\s*(\d+)$")
+
+        for row in range(1, sheet.max_row + 1):
+            label = self._read_cell_text(sheet, f"A{row}")
+            if not label:
+                continue
+            raw_labels.append(label)
+            normalized = self._normalize_programming_label(label)
+            if section_pattern.match(normalized):
+                current_section = normalized
+                section_headers[current_section] = row
+                continue
+            if current_section is None:
+                continue
+            if pwm_pattern.match(normalized):
+                continue
+            sample_match = sample_pattern.match(label.strip())
+            if not sample_match:
+                continue
+            direction = sample_match.group(1)
+            pwm_value = int(sample_match.group(2))
+            row_lookup[(current_section, pwm_value, direction)] = row
+
+        if not row_lookup:
+            raise ValueError(
+                f"No supported sampling rows were found in sheet '{sheet_name}'. Labels found: {raw_labels}"
+            )
+        return SamplingWorkbookLayout(
+            sheet_name=sheet_name,
+            section_headers=section_headers,
+            row_lookup=row_lookup,
+            raw_labels=raw_labels,
+        )
+
+    def write_sampling_result(
+        self,
+        section_name: str,
+        pwm_value: int,
+        direction: str,
+        sample_index: int,
+        actual_value: object,
+        *,
+        base_group: str | None = None,
+    ) -> str:
+        workbook = self._require_workbook()
+        layout = self.discover_sampling_layout(base_group)
+        sheet = workbook[layout.sheet_name]
+        row = layout.resolve_row(section_name, pwm_value, direction)
+        column = self.sample_index_to_column(sample_index)
+        cell_ref = f"{column}{row}"
+        sheet[cell_ref] = actual_value
+        return cell_ref
 
     def write_programming_parameter_result(self, parameter_name: str, actual_value: object, check_result: str) -> None:
         sheet = self._require_base_sheet()

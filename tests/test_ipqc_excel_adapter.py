@@ -22,10 +22,10 @@ class IpqcExcelAdapterTests(unittest.TestCase):
         workbook = Workbook()
         summary = workbook.active
         summary.title = "3X"
-        workbook.create_sheet("3X_D")
+        sampling_3x = workbook.create_sheet("3X_D")
         workbook.create_sheet("3X_A")
         workbook.create_sheet("4Y")
-        workbook.create_sheet("4Y_D")
+        sampling_4y = workbook.create_sheet("4Y_D")
         workbook.create_sheet("4Y_A")
         summary["A1"] = "Programming"
         summary["B2"] = "Source"
@@ -48,9 +48,23 @@ class IpqcExcelAdapterTests(unittest.TestCase):
         summary["B4"] = "1223303010"
         summary["B5"] = "100"
         summary["B6"] = "N/A"
+        self._populate_sampling_sheet(sampling_3x)
+        self._populate_sampling_sheet(sampling_4y)
         path = Path(base_dir) / filename
         workbook.save(path)
         return path
+
+    def _populate_sampling_sheet(self, sheet) -> None:
+        pwm_values = [100, 90, 80, 70, 60]
+        section_starts = {"Range": 1, "Speed": 18, "Time": 35}
+        for section_name, start_row in section_starts.items():
+            sheet[f"A{start_row}"] = section_name
+            row = start_row + 1
+            for pwm in pwm_values:
+                sheet[f"A{row}"] = f"PWM {pwm}"
+                sheet[f"A{row + 1}"] = f"+{pwm}"
+                sheet[f"A{row + 2}"] = f"-{pwm}"
+                row += 3
 
     def test_load_template_detects_base_sheet_groups_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -192,6 +206,49 @@ class IpqcExcelAdapterTests(unittest.TestCase):
         self.assertEqual(discovered_rows["rampdown_targetoffset"], 13)
         self.assertEqual(discovered_rows["rampdown_region"], 14)
         self.assertEqual(discovered_rows["acceptable_error"], 15)
+
+    def test_discover_sampling_layout_maps_d_sheet_rows_and_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template_path = self._create_ipqc_template(tmpdir)
+            adapter = IpqcExcelAdapter()
+            adapter.load_template(template_path)
+
+            self.assertEqual(adapter.resolve_sampling_sheet_name(), "3X_D")
+            self.assertEqual(adapter.sample_index_to_column(1), "B")
+            self.assertEqual(adapter.sample_index_to_column(32), "AG")
+
+            layout = adapter.discover_sampling_layout()
+
+        self.assertEqual(layout.sheet_name, "3X_D")
+        self.assertEqual(layout.section_headers["range"], 1)
+        self.assertEqual(layout.section_headers["speed"], 18)
+        self.assertEqual(layout.section_headers["time"], 35)
+        self.assertEqual(layout.resolve_row("Range", 100, "+"), 3)
+        self.assertEqual(layout.resolve_row("Range", 100, "-"), 4)
+        self.assertEqual(layout.resolve_row("Speed", 90, "+"), 23)
+        self.assertEqual(layout.resolve_row("Time", 60, "-"), 50)
+        self.assertIn("Range", layout.raw_labels)
+        self.assertIn("+100", layout.raw_labels)
+        self.assertIn("-60", layout.raw_labels)
+
+    def test_write_sampling_result_writes_to_sampling_sheet_cells(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template_path = self._create_ipqc_template(tmpdir)
+            adapter = IpqcExcelAdapter()
+            adapter.load_template(template_path)
+            cell_range = adapter.write_sampling_result("Range", 100, "+", 1, 512)
+            cell_speed = adapter.write_sampling_result("Speed", 100, "+", 32, 123.5)
+            cell_time = adapter.write_sampling_result("Time", 60, "-", 4, 0.456)
+            output_path = Path(tmpdir) / "ipqc_completed.xlsx"
+            adapter.save_completed_workbook(output_path)
+            sampling = load_workbook(output_path)["3X_D"]
+
+        self.assertEqual(cell_range, "B3")
+        self.assertEqual(cell_speed, "AG20")
+        self.assertEqual(cell_time, "E50")
+        self.assertEqual(sampling["B3"].value, 512)
+        self.assertEqual(sampling["AG20"].value, 123.5)
+        self.assertEqual(sampling["E50"].value, 0.456)
 
     def test_write_programming_parameter_result_writes_row_cells(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import QTimer, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -35,6 +35,10 @@ if TYPE_CHECKING:  # pragma: no cover - only for type checking to avoid circular
 
 class SingleAxisFunctionalPopup(QDialog):
     """Compact Functional popup for Single Axis Functional Test."""
+
+    functional_passed = pyqtSignal(int, str)
+    functional_failed = pyqtSignal(int, str, str)
+    functional_aborted = pyqtSignal(int, str, str)
 
     _INACTIVE_FLAG_COLOR = "#7A4D1F"
     _ACTIVE_FLAG_COLOR = "#FF8C00"
@@ -190,6 +194,8 @@ class SingleAxisFunctionalPopup(QDialog):
     def mark_passed(self) -> None:
         node_text = self._selected_node_text()
         self.append_status(f"Node {node_text}: Functional test PASSED.")
+        node_id, node_name = self._selected_node_data()
+        self.functional_passed.emit(node_id, node_name)
         # Re-enable controls after finish
         self._finish_run_ui()
         # Handoff to sampling prompt (placeholder only)
@@ -200,10 +206,14 @@ class SingleAxisFunctionalPopup(QDialog):
 
         node_text = self._selected_node_text()
         self.append_status(f"Node {node_text}: Functional test FAILED. Reason: {reason}")
+        node_id, node_name = self._selected_node_data()
+        self.functional_failed.emit(node_id, node_name, str(reason))
         QMessageBox.warning(self, "Functional Test Failed", str(reason))
         self._finish_run_ui()
 
     def mark_aborted(self) -> None:
+        node_id, node_name = self._selected_node_data()
+        self.functional_aborted.emit(node_id, node_name, "Functional test aborted.")
         self._finish_run_ui()
 
     def ask_start_sampling(self) -> bool:
@@ -363,6 +373,13 @@ class SingleAxisFunctionalPopup(QDialog):
         if not isinstance(node_data, tuple) or len(node_data) != 2:
             return "-"
         return str(node_data[0])
+
+    def _selected_node_data(self) -> tuple[int, str]:
+        node_data = self.node_combo.currentData()
+        if not isinstance(node_data, tuple) or len(node_data) != 2:
+            return 0, ""
+        node_id, node_name = node_data
+        return int(node_id), str(node_name)
 
     def _selected_tolerance(self) -> int:
         tolerance = self.tolerance_combo.currentData()

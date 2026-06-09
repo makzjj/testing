@@ -16,7 +16,9 @@ from PyQt6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton
 
 from gui.workspace.pages.production_page import ProductionPage
 from gui.workspace.pages.single_axis_functional_popup import SingleAxisFunctionalPopup
+from gui.workspace.controllers.sampling_test_controller import SamplingTestController, SamplingTestConfig
 from gui.workspace.widgets import ResponsiveRow
+from services.ipqc_excel_adapter import IpqcExcelAdapter
 from gui.workspace.pages.production_parameter_controller import (
     EEPROM_SAVE_COMMAND,
     SET_COMMAND_SUFFIX,
@@ -26,6 +28,7 @@ from gui.workspace.pages.production_parameter_controller import (
     build_eeprom_save_payload,
     build_pwm_read_payload,
     build_pwm_write_payload,
+    build_run,
     build_uuid_read_payload,
     build_uuid_write_payload,
     decode_eeprom_save_response,
@@ -594,7 +597,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
         wb = Workbook()
         ws = wb.active
         ws.title = "3X"
-        wb.create_sheet("3X_D")
+        sampling_3x = wb.create_sheet("3X_D")
         wb.create_sheet("3X_A")
         ws["A1"] = "Programming"
         ws["B2"] = "Source"
@@ -629,7 +632,21 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             ws["B3"] = "operator-a"
             ws["C3"] = "N/A"
             ws["D3"] = "N/A"
+        ProductionPageWorkflowTests._populate_sampling_sheet(sampling_3x)
         wb.save(path)
+
+    @staticmethod
+    def _populate_sampling_sheet(sheet) -> None:
+        pwm_values = [100, 90, 80, 70, 60]
+        section_starts = {"Range": 1, "Speed": 18, "Time": 35}
+        for section_name, start_row in section_starts.items():
+            sheet[f"A{start_row}"] = section_name
+            row = start_row + 1
+            for pwm in pwm_values:
+                sheet[f"A{row}"] = f"PWM {pwm}"
+                sheet[f"A{row + 1}"] = f"+{pwm}"
+                sheet[f"A{row + 2}"] = f"-{pwm}"
+                row += 3
 
     @staticmethod
     def _build_parameter_verify_packet(definition, actual_value: int | str) -> dict:
@@ -2508,6 +2525,148 @@ class ProductionParameterControllerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Acceptable_Error"):
             controller.build_parameter_request(defs["Acceptable_Error"], 6, "H", "70000")
 
+
+@unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for Sampling page integration tests.")
+class SamplingPageIntegrationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._app = QApplication.instance() or QApplication([])
+
+    @staticmethod
+    def _create_ipqc_workbook(path: Path, *, with_optional_fields: bool = True) -> None:
+        ProductionPageWorkflowTests._create_ipqc_workbook(path, with_optional_fields=with_optional_fields)
+
+    def _load_workbook(self, page: ProductionPage, workbook_path: Path) -> None:
+        with patch(
+            "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
+            return_value=(str(workbook_path), "Excel Files (*.xlsx)"),
+        ):
+            page._handle_load_ipqc_workbook()
+        self._app.processEvents()
+
+    def _enable_single_axis_pass(self, page: ProductionPage) -> None:
+        with patch(
+            "gui.workspace.pages.single_axis_functional_popup.SingleAxisFunctionalPopup.ask_start_sampling",
+            return_value=False,
+        ):
+            page._handle_single_axis_test_requested()
+            assert page._single_axis_popup is not None
+            page._single_axis_popup.node_combo.setCurrentIndex(1)
+            page._single_axis_popup.mark_passed()
+        self._app.processEvents()
+
+    def test_sampling_cannot_start_before_single_axis_pass(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+        self._assert_sampling_button_disabled(page)
+
+        page._handle_start_sampling_requested()
+        self._app.processEvents()
+
+        self.assertEqual(runtime_window.backend_client.sent_commands, [])
+        self.assertIn("Sampling is disabled until the Single Axis Functional Test passes.", page.progress_section.to_plain_text())
+
+    def test_sampling_starts_after_single_axis_pass_and_uses_selected_node_and_base_group(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            ProductionPageWorkflowTests._create_ipqc_workbook(workbook_path)
+            self._load_workbook(page, workbook_path)
+            self._enable_single_axis_pass(page)
+            self.assertTrue(page.test_control_section._sampling_button.isEnabled())
+            ProductionPageWorkflowTests._select_node(page, "Node 8 - RZ")
+
+            with patch.object(SamplingTestController, "start", autospec=True, return_value=True) as start_mock:
+                page._handle_start_sampling_requested()
+                self._app.processEvents()
+
+            self.assertTrue(start_mock.called)
+            call_args = start_mock.call_args
+            self.assertIsNotNone(call_args)
+            assert call_args is not None
+            self.assertEqual(call_args.args[1], 8)
+            self.assertEqual(call_args.args[2], "RZ")
+            self.assertEqual(call_args.kwargs["single_axis_passed"], True)
+            self.assertEqual(call_args.kwargs["base_group"], "3X")
+            self.assertEqual(page._ipqc_excel_adapter.active_sheet_group, "3X")
+            self.assertIn("Sampling started for Node 8 RZ", page.progress_section.to_plain_text())
+            self.assertIn("Derived sampling sheet: 3X_D", page.progress_section.to_plain_text())
+
+    def test_missing_sampling_sheet_fails_before_any_run_command_is_sent(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            ProductionPageWorkflowTests._create_ipqc_workbook(workbook_path)
+            wb = load_workbook(workbook_path)
+            del wb["3X_D"]
+            wb.save(workbook_path)
+            self._load_workbook(page, workbook_path)
+            self._enable_single_axis_pass(page)
+            ProductionPageWorkflowTests._select_node(page, "Node 6 - H")
+
+            page._handle_start_sampling_requested()
+            self._app.processEvents()
+
+        self.assertEqual(runtime_window.backend_client.sent_commands, [])
+        self.assertIn("Sampling workbook layout is invalid", page.progress_section.to_plain_text())
+
+    def test_sampling_progress_routes_to_existing_logs(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            ProductionPageWorkflowTests._create_ipqc_workbook(workbook_path)
+            self._load_workbook(page, workbook_path)
+            self._enable_single_axis_pass(page)
+            ProductionPageWorkflowTests._select_node(page, "Node 6 - H")
+
+            page._handle_start_sampling_requested()
+            self._app.processEvents()
+
+        progress_text = page.progress_section.to_plain_text()
+        self.assertIn("Sampling started for Node 6 H", progress_text)
+        self.assertIn("Derived sampling sheet: 3X_D", progress_text)
+        self.assertIn("Sampling state:", progress_text)
+
+    def test_stop_while_sampling_running_sends_dd(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            ProductionPageWorkflowTests._create_ipqc_workbook(workbook_path)
+            self._load_workbook(page, workbook_path)
+            self._enable_single_axis_pass(page)
+            ProductionPageWorkflowTests._select_node(page, "Node 6 - H")
+
+            page._handle_start_sampling_requested()
+            self._app.processEvents()
+            page._handle_stop_test()
+            self._app.processEvents()
+
+        sent_commands = [command for _node_id, command in runtime_window.backend_client.sent_commands]
+        self.assertIn([0xDD], sent_commands)
+
+    def test_sampling_button_disabled_until_single_axis_passes(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+        self.assertFalse(page.test_control_section._sampling_button.isEnabled())
+        self.assertIn("Single Axis", page.test_control_section._sampling_button.toolTip())
+
+    def _assert_sampling_button_disabled(self, page: ProductionPage) -> None:
+        self.assertFalse(page.test_control_section._sampling_button.isEnabled())
+
     def test_reset_workbook_parameter_workflow_clears_inflight_state(self) -> None:
         runtime_window = _FakeRuntimeWindow()
         bridge = _FakeBridge(runtime_window)
@@ -3092,6 +3251,215 @@ class ProductionParameterControllerTests(unittest.TestCase):
             self.assertEqual(runtime_window.backend_client.sent_commands, [])
             self.assertEqual(page.result_summary_section._status_label.text(), "FAIL")
             self.assertIn("Expected S/N in workbook B4 is invalid", page.result_summary_section._reason_label.text())
+
+
+class _SamplingManualClock:
+    def __init__(self, values: list[float]) -> None:
+        self._values = list(values)
+        self._index = 0
+
+    def __call__(self) -> float:
+        if self._index >= len(self._values):
+            raise AssertionError("Sampling manual clock was exhausted.")
+        value = self._values[self._index]
+        self._index += 1
+        return value
+
+
+class _RecordingSamplingController(SamplingTestController):
+    def __init__(self, adapter: IpqcExcelAdapter, config: SamplingTestConfig, clock) -> None:
+        super().__init__(adapter, config, clock=clock)
+        self.commands: list[list[int]] = []
+        self.logs: list[str] = []
+        self.states: list[str] = []
+        self.statuses: list[str] = []
+        self.pwms: list[int] = []
+        self.directions: list[str] = []
+        self.sample_indices: list[int] = []
+        self.completed_counts: list[tuple[int, int]] = []
+        self.measurements: list[object] = []
+        self.cells: list[str] = []
+        self.failures: list[str] = []
+        self.aborts: list[str] = []
+        self.completed_called = False
+
+    def command_requested(self, payload: list[int]) -> None:
+        self.commands.append(list(payload))
+
+    def log_message(self, text: str) -> None:
+        self.logs.append(text)
+
+    def state_changed(self, text: str) -> None:
+        self.states.append(text)
+
+    def status_changed(self, text: str) -> None:
+        self.statuses.append(text)
+
+    def current_pwm_changed(self, pwm: int) -> None:
+        self.pwms.append(int(pwm))
+
+    def current_direction_changed(self, direction: str) -> None:
+        self.directions.append(direction)
+
+    def current_sample_changed(self, sample_index: int) -> None:
+        self.sample_indices.append(int(sample_index))
+
+    def samples_completed_changed(self, completed: int, total: int) -> None:
+        self.completed_counts.append((int(completed), int(total)))
+
+    def measurement_completed(self, result) -> None:
+        self.measurements.append(result)
+
+    def latest_workbook_cell_written(self, cell_ref: str) -> None:
+        self.cells.append(cell_ref)
+
+    def sampling_completed(self) -> None:
+        self.completed_called = True
+
+    def sampling_failed(self, reason: str) -> None:
+        self.failures.append(reason)
+
+    def sampling_aborted(self, reason: str) -> None:
+        self.aborts.append(reason)
+
+
+@unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for Sampling controller tests.")
+class SamplingControllerTests(unittest.TestCase):
+    def _build_adapter(self, tmpdir: str) -> IpqcExcelAdapter:
+        workbook_path = Path(tmpdir) / "sampling_ipqc.xlsx"
+        ProductionPageWorkflowTests._create_ipqc_workbook(workbook_path)
+        adapter = IpqcExcelAdapter()
+        adapter.load_template(workbook_path)
+        return adapter
+
+    def _drive_home_sequence(self, controller: _RecordingSamplingController, *, start_pos: int) -> None:
+        self.assertEqual(controller.commands[0], [0x88, 0xFF, 0x42])
+        controller.handle_runtime_packet([0x88, 0x53, 0xFF, 0x42])
+        controller.handle_runtime_packet([0x81, 0x4C])
+        controller.handle_runtime_packet([0x82, *list(int(start_pos).to_bytes(4, "big", signed=True))])
+
+    def test_sampling_run_payloads_cover_signed_velocities(self) -> None:
+        self.assertEqual(build_run(100), [0x88, 0x00, 0x64])
+        self.assertEqual(build_run(-100), [0x88, 0xFF, 0x9C])
+        self.assertEqual(build_run(90), [0x88, 0x00, 0x5A])
+        self.assertEqual(build_run(-90), [0x88, 0xFF, 0xA6])
+        self.assertEqual(build_run(-190), [0x88, 0xFF, 0x42])
+
+    def test_sampling_controller_runs_two_samples_and_writes_workbook_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            adapter = self._build_adapter(tmpdir)
+            clock = _SamplingManualClock([0.0, 0.05, 1.0, 1.5, 2.0, 2.4, 3.0, 3.6, 4.0, 4.25])
+            controller = _RecordingSamplingController(
+                adapter,
+                SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=2),
+                clock,
+            )
+
+            self.assertTrue(controller.start(8, "RZ"))
+            self._drive_home_sequence(controller, start_pos=10)
+
+            self.assertEqual(controller.commands[2], [0x88, 0x00, 0x64])
+            controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
+            controller.handle_runtime_packet([0x81, 0x52])
+            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 70])
+            self.assertEqual(controller.commands[4], [0x88, 0xFF, 0x9C])
+            controller.handle_runtime_packet([0x88, 0x53, 0xFF, 0x9C])
+            controller.handle_runtime_packet([0x81, 0x4C])
+            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 20])
+
+            self.assertEqual(controller.commands[6], [0x88, 0x00, 0x64])
+            controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
+            controller.handle_runtime_packet([0x81, 0x52])
+            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 90])
+            self.assertEqual(controller.commands[8], [0x88, 0xFF, 0x9C])
+            controller.handle_runtime_packet([0x88, 0x53, 0xFF, 0x9C])
+            controller.handle_runtime_packet([0x81, 0x4C])
+            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 30])
+
+            self.assertFalse(controller.is_active())
+            self.assertTrue(controller.completed_called)
+            self.assertEqual(controller.failures, [])
+            self.assertEqual(controller.aborts, [])
+            self.assertEqual(controller.completed_counts[-1], (4, 4))
+            self.assertEqual(len(controller.measurements), 4)
+            self.assertEqual(controller.measurements[0].range_value, 60)
+            self.assertAlmostEqual(controller.measurements[0].elapsed_seconds, 0.5)
+            self.assertAlmostEqual(controller.measurements[0].speed, 120.0)
+            self.assertEqual(controller.measurements[1].range_value, 50)
+            self.assertAlmostEqual(controller.measurements[1].elapsed_seconds, 0.4)
+            self.assertAlmostEqual(controller.measurements[1].speed, 125.0)
+            self.assertEqual(controller.measurements[2].range_value, 80)
+            self.assertAlmostEqual(controller.measurements[3].range_value, 60)
+
+            output_path = Path(tmpdir) / "sampling_completed.xlsx"
+            adapter.save_completed_workbook(output_path)
+            sampling_sheet = load_workbook(output_path)["3X_D"]
+
+        self.assertEqual(sampling_sheet["B3"].value, 60)
+        self.assertEqual(sampling_sheet["B4"].value, 50)
+        self.assertAlmostEqual(sampling_sheet["B20"].value, 120.0)
+        self.assertAlmostEqual(sampling_sheet["B37"].value, 0.5)
+        self.assertEqual(sampling_sheet["C3"].value, 80)
+        self.assertEqual(sampling_sheet["C4"].value, 60)
+        self.assertAlmostEqual(sampling_sheet["C20"].value, 133.33333333333334)
+        self.assertAlmostEqual(sampling_sheet["C37"].value, 0.6)
+
+    def test_sampling_timeout_sends_dd_and_stops_loop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            adapter = self._build_adapter(tmpdir)
+            clock = _SamplingManualClock([0.0, 0.05, 1.0])
+            controller = _RecordingSamplingController(
+                adapter,
+                SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=1),
+                clock,
+            )
+
+            self.assertTrue(controller.start(8, "RZ"))
+            self._drive_home_sequence(controller, start_pos=10)
+            self.assertEqual(controller.commands[2], [0x88, 0x00, 0x64])
+            controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
+            controller.on_timeout()
+
+            self.assertFalse(controller.is_active())
+            self.assertEqual(controller.commands[-1], [0xDD])
+            self.assertTrue(controller.failures)
+            self.assertIn("Timed out", controller.failures[-1])
+
+    def test_sampling_timeout_then_abort_does_not_duplicate_dd(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            adapter = self._build_adapter(tmpdir)
+            clock = _SamplingManualClock([0.0])
+            controller = _RecordingSamplingController(
+                adapter,
+                SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=1),
+                clock,
+            )
+
+            self.assertTrue(controller.start(8, "RZ"))
+            controller.on_timeout()
+            dd_count_after_timeout = controller.commands.count([0xDD])
+            self.assertEqual(dd_count_after_timeout, 1)
+
+            self.assertFalse(controller.abort_by_user())
+            self.assertEqual(controller.commands.count([0xDD]), 1)
+
+    def test_sampling_rejects_unexpected_packet_while_waiting_for_ack(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            adapter = self._build_adapter(tmpdir)
+            clock = _SamplingManualClock([0.0])
+            controller = _RecordingSamplingController(
+                adapter,
+                SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=1),
+                clock,
+            )
+
+            self.assertTrue(controller.start(8, "RZ"))
+            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 1])
+
+            self.assertFalse(controller.is_active())
+            self.assertEqual(controller.commands[-1], [0xDD])
+            self.assertTrue(controller.failures)
+            self.assertIn("Unexpected packet", controller.failures[-1])
 
 
 if __name__ == "__main__":
