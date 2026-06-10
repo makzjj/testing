@@ -6,6 +6,7 @@ import os
 import tempfile
 import time
 import unittest
+import types
 from pathlib import Path
 from unittest.mock import patch
 
@@ -2565,11 +2566,19 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         page = ProductionPage(bridge)
         self._assert_sampling_button_disabled(page)
 
-        page._handle_start_sampling_requested()
+        with patch.object(SamplingTestController, "start", autospec=True) as start_mock:
+            page._handle_start_sampling_requested()
+            self._app.processEvents()
+
+        self.assertFalse(start_mock.called)
+        self.assertIsNotNone(page._sampling_popup)
+        assert page._sampling_popup is not None
+        self.assertTrue(page._sampling_popup.isVisible())
+        self.assertFalse(page._sampling_popup.start_button.isEnabled())
         self._app.processEvents()
 
         self.assertEqual(runtime_window.backend_client.sent_commands, [])
-        self.assertIn("Sampling is disabled until the Single Axis Functional Test passes.", page.progress_section.to_plain_text())
+        self.assertIn("Sampling is available after Single Axis passes.", page.progress_section.to_plain_text())
 
     def test_sampling_does_not_start_when_serial_is_disconnected(self) -> None:
         runtime_window = _FakeRuntimeWindow(connected=False)
@@ -2589,7 +2598,11 @@ class SamplingPageIntegrationTests(unittest.TestCase):
 
         self.assertFalse(start_mock.called)
         self.assertEqual(runtime_window.backend_client.sent_commands, [])
-        self.assertIn("Serial port not connected. Sampling cannot start.", page.progress_section.to_plain_text())
+        self.assertIsNotNone(page._sampling_popup)
+        assert page._sampling_popup is not None
+        self.assertTrue(page._sampling_popup.isVisible())
+        self.assertFalse(page._sampling_popup.start_button.isEnabled())
+        self.assertIn("Connect the serial link before starting Sampling.", page.progress_section.to_plain_text())
 
     def test_sampling_starts_after_single_axis_pass_and_uses_selected_node_and_base_group(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -2608,23 +2621,17 @@ class SamplingPageIntegrationTests(unittest.TestCase):
                 page._handle_start_sampling_requested()
                 self._app.processEvents()
 
-            self.assertTrue(start_mock.called)
+            self.assertFalse(start_mock.called)
             call_args = start_mock.call_args
-            self.assertIsNotNone(call_args)
-            assert call_args is not None
-            self.assertEqual(call_args.args[1], 8)
-            self.assertEqual(call_args.args[2], "RZ")
-            self.assertEqual(call_args.kwargs["single_axis_passed"], True)
-            self.assertEqual(call_args.kwargs["base_group"], "3X")
-            self.assertEqual(page._ipqc_excel_adapter.active_sheet_group, "3X")
-            self.assertIn("Sampling started for Node 8 RZ", page.progress_section.to_plain_text())
-            self.assertIn("Derived sampling sheet: 3X_D", page.progress_section.to_plain_text())
+            self.assertIsNone(call_args)
             self.assertIsNotNone(page._sampling_popup)
             assert page._sampling_popup is not None
             self.assertIsInstance(page._sampling_popup, SamplingTestPopup)
             self.assertEqual(page._sampling_popup.selected_node_value.text(), "Node 8 - RZ")
             self.assertEqual(page._sampling_popup.sampling_sheet_value.text(), "3X_D")
             self.assertTrue(page._sampling_popup.isVisible())
+            self.assertTrue(page._sampling_popup.start_button.isEnabled())
+            self.assertIn("Sampling ready for Node 8 RZ using 3X_D", page._sampling_popup.log_output.toPlainText())
 
     def test_missing_sampling_sheet_fails_before_any_run_command_is_sent(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -2645,7 +2652,7 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             self._app.processEvents()
 
         self.assertEqual(runtime_window.backend_client.sent_commands, [])
-        self.assertIn("Sampling workbook layout is invalid", page.progress_section.to_plain_text())
+        self.assertIn("Sampling workbook is not ready:", page.progress_section.to_plain_text())
 
     def test_sampling_popup_close_and_reopen_keeps_packet_updates_alive(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -2661,6 +2668,18 @@ class SamplingPageIntegrationTests(unittest.TestCase):
 
             with patch.object(SamplingTestController, "start", autospec=True, return_value=True):
                 page._handle_start_sampling_requested()
+                self._app.processEvents()
+                assert page._sampling_popup is not None
+                page._sampling_popup.start_button.click()
+                self._app.processEvents()
+                assert page._sampling_popup is not None
+                page._sampling_popup.start_button.click()
+                self._app.processEvents()
+                assert page._sampling_popup is not None
+                page._sampling_popup.start_button.click()
+                self._app.processEvents()
+                assert page._sampling_popup is not None
+                page._sampling_popup.start_button.click()
                 self._app.processEvents()
 
         assert page._sampling_popup is not None
@@ -2696,14 +2715,32 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             page._handle_start_sampling_requested()
             self._app.processEvents()
 
-        progress_text = page.progress_section.to_plain_text()
-        self.assertIn("Sampling started for Node 6 H", progress_text)
-        self.assertIn("Derived sampling sheet: 3X_D", progress_text)
-        self.assertIn("Sampling state:", progress_text)
+        self.assertIsNotNone(page._sampling_popup)
         self.assertIsNotNone(page._sampling_popup)
         assert page._sampling_popup is not None
-        self.assertIn("Sampling started for Node 6 H", page._sampling_popup.log_output.toPlainText())
-        self.assertEqual(page._sampling_popup.final_status_value.text(), "RUNNING")
+        self.assertIn("Sampling ready for Node 6 H using 3X_D", page._sampling_popup.log_output.toPlainText())
+
+        fake_result = types.SimpleNamespace(
+            sample_index=1,
+            direction="+",
+            range_value=2500481,
+            elapsed_seconds=10.0176,
+            speed=249608.01,
+            workbook_cells={"Range": "B4", "Speed": "B21", "Time": "B38"},
+        )
+        page._handle_sampling_packet_message("[TX] Node 6: 88 FF 42")
+        page._handle_sampling_packet_message("[RX] Node 6: 88 53 FF 42")
+        page._handle_sampling_measurement_completed(fake_result)
+        self._app.processEvents()
+
+        operator_text = page._sampling_popup.log_output.toPlainText()
+        packet_text = page._sampling_popup.packet_log_output.toPlainText()
+        self.assertIn(
+            "Sample 1/32 + complete | range=2500481 | time=10.0176s | speed=249608.01",
+            operator_text,
+        )
+        self.assertIn("[TX] Node 6: 88 FF 42", packet_text)
+        self.assertIn("[RX] Node 6: 88 53 FF 42", packet_text)
 
     def test_stop_while_sampling_running_sends_dd(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -2717,10 +2754,18 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             self._enable_single_axis_pass(page)
             ProductionPageWorkflowTests._select_node(page, "Node 6 - H")
 
-            page._handle_start_sampling_requested()
-            self._app.processEvents()
-            page._handle_stop_test()
-            self._app.processEvents()
+            with patch.object(SamplingTestController, "start", autospec=True, return_value=True), patch.object(
+                page._sampling_controller,
+                "is_active",
+                return_value=True,
+            ), patch.object(page._sampling_controller, "_running", True):
+                page._handle_start_sampling_requested()
+                self._app.processEvents()
+                assert page._sampling_popup is not None
+                page._sampling_popup.start_button.click()
+                self._app.processEvents()
+                page._sampling_popup.stop_button.click()
+                self._app.processEvents()
 
         sent_commands = [command for _node_id, command in runtime_window.backend_client.sent_commands]
         self.assertIn([0xDD], sent_commands)
@@ -2762,11 +2807,12 @@ class SamplingPageIntegrationTests(unittest.TestCase):
                 self._enable_single_axis_pass(page, start_sampling_prompt=True)
                 self._app.processEvents()
 
-            self.assertTrue(start_mock.called)
+            self.assertFalse(start_mock.called)
             self.assertIsNotNone(page._sampling_popup)
             assert page._sampling_popup is not None
             self.assertTrue(page._sampling_popup.isVisible())
-            self.assertIn("Sampling started", page.progress_section.to_plain_text())
+            self.assertTrue(page._sampling_popup.start_button.isEnabled())
+            self.assertIn("Sampling ready for Node 6 H using 3X_D", page._sampling_popup.log_output.toPlainText())
 
     def test_single_axis_prompt_no_keeps_sampling_enabled(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -2797,17 +2843,156 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             self._enable_single_axis_pass(page)
             ProductionPageWorkflowTests._select_node(page, "Node 8 - RZ")
 
-            with patch.object(SamplingTestController, "start", autospec=True, return_value=True):
-                page._handle_start_sampling_requested()
-                self._app.processEvents()
+            page._handle_start_sampling_requested()
+            self._app.processEvents()
 
         self.assertIsNotNone(page._sampling_popup)
         assert page._sampling_popup is not None
         self.assertTrue(page._sampling_popup.isVisible())
         self.assertEqual(page._sampling_popup.selected_node_value.text(), "Node 8 - RZ")
         self.assertEqual(page._sampling_popup.sampling_sheet_value.text(), "3X_D")
-        self.assertEqual(page._sampling_popup.final_status_value.text(), "RUNNING")
-        self.assertEqual(page._sampling_popup.stop_button.isEnabled(), False)
+        self.assertEqual(page._sampling_popup.final_status_value.text(), "IDLE")
+        self.assertFalse(page._sampling_popup.stop_button.isEnabled())
+        self.assertTrue(page._sampling_popup.start_button.isEnabled())
+
+    def test_sampling_popup_uses_compact_three_row_layout(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            ProductionPageWorkflowTests._create_ipqc_workbook(workbook_path)
+            self._load_workbook(page, workbook_path)
+            self._enable_single_axis_pass(page)
+            ProductionPageWorkflowTests._select_node(page, "Node 6 - H")
+
+            page._handle_start_sampling_requested()
+            self._app.processEvents()
+
+        assert page._sampling_popup is not None
+        popup = page._sampling_popup
+        titles = {
+            label.text()
+            for label in popup.findChildren(QLabel)
+            if label.objectName() == "SectionTitle"
+        }
+        self.assertIn("Sampling Summary", titles)
+        self.assertIn("Sampling Progress", titles)
+        self.assertIn("Last Sample", titles)
+        self.assertIn("Operator Log", titles)
+        self.assertIn("Packet Log", titles)
+        self.assertNotIn("Failure Details", titles)
+        self.assertNotIn("Controls", titles)
+        self.assertNotIn("Latest Workbook Cells", {label.text() for label in popup.findChildren(QLabel)})
+        self.assertFalse(popup.range_mode_combo.isEnabled())
+        self.assertTrue(popup.clear_logs_button.isVisible())
+        button_texts = {button.text() for button in popup.findChildren(QPushButton)}
+        self.assertIn("Clear Logs", button_texts)
+        self.assertNotIn("Save Logs", button_texts)
+        self.assertTrue(popup.start_button.isVisible())
+        self.assertTrue(popup.stop_button.isVisible())
+        self.assertTrue(popup.close_button.isVisible())
+
+    def test_sampling_clear_logs_clears_only_visible_log_text(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            ProductionPageWorkflowTests._create_ipqc_workbook(workbook_path)
+            self._load_workbook(page, workbook_path)
+            self._enable_single_axis_pass(page)
+            ProductionPageWorkflowTests._select_node(page, "Node 6 - H")
+
+            page._handle_start_sampling_requested()
+            self._app.processEvents()
+
+        assert page._sampling_popup is not None
+        popup = page._sampling_popup
+        popup.append_operator_log("Operator line")
+        popup.append_packet_log("[TX] Node 6: 88 00 64")
+        popup.set_state_text("RUNNING")
+        popup.set_status_text("Sampling started")
+        popup.set_reason_text("-")
+        popup.set_current_pwm(100)
+        popup.set_current_direction("+")
+        popup.set_current_sample(3, 32)
+        popup.set_completed_counts(8, 320)
+        popup.set_latest_measurement_details(123, 4.5678, 27.5)
+
+        popup.clear_logs_button.click()
+        self._app.processEvents()
+
+        self.assertEqual(popup.log_output.toPlainText().strip(), "")
+        self.assertEqual(popup.packet_log_output.toPlainText().strip(), "")
+        self.assertEqual(popup.state_value.text(), "RUNNING")
+        self.assertEqual(popup.status_value.text(), "Sampling started")
+        self.assertEqual(popup.reason_value.text(), "-")
+        self.assertEqual(popup.current_pwm_value.text(), "100")
+        self.assertEqual(popup.current_direction_value.text(), "Positive")
+        self.assertEqual(popup.current_sample_value.text(), "Sample 3 / 32")
+        self.assertEqual(popup.completed_count_value.text(), "8 / 320")
+        self.assertEqual(popup.latest_range_value.text(), "123 counts")
+        self.assertEqual(popup.latest_time_value.text(), "4.5678 s")
+        self.assertEqual(popup.latest_speed_value.text(), "27.50 counts/s")
+
+    def test_sampling_failure_and_abort_reason_appears_in_summary_area(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            ProductionPageWorkflowTests._create_ipqc_workbook(workbook_path)
+            self._load_workbook(page, workbook_path)
+            self._enable_single_axis_pass(page)
+            ProductionPageWorkflowTests._select_node(page, "Node 6 - H")
+
+            page._handle_start_sampling_requested()
+            self._app.processEvents()
+
+        assert page._sampling_popup is not None
+        popup = page._sampling_popup
+
+        page._handle_sampling_failed("Sensor timeout")
+        self._app.processEvents()
+        self.assertEqual(popup.reason_value.text(), "Sensor timeout")
+        self.assertEqual(popup.final_status_value.text(), "FAILED")
+        self.assertIn("#dc2626", popup.reason_value.styleSheet())
+
+        page._handle_sampling_aborted("Operator stop")
+        self._app.processEvents()
+        self.assertEqual(popup.reason_value.text(), "Operator stop")
+        self.assertEqual(popup.final_status_value.text(), "ABORTED")
+        self.assertIn("#d97706", popup.reason_value.styleSheet())
+
+    def test_popup_start_button_sends_first_sampling_run_command(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            ProductionPageWorkflowTests._create_ipqc_workbook(workbook_path)
+            self._load_workbook(page, workbook_path)
+            self._enable_single_axis_pass(page)
+            ProductionPageWorkflowTests._select_node(page, "Node 6 - H")
+
+            page._handle_start_sampling_requested()
+            self._app.processEvents()
+            assert page._sampling_popup is not None
+            popup = page._sampling_popup
+            self.assertTrue(popup.start_button.isEnabled())
+            popup.start_button.click()
+            self._app.processEvents()
+
+        sent_commands = [command for _node_id, command in runtime_window.backend_client.sent_commands]
+        self.assertEqual(sent_commands[0], build_run(-190))
+        self.assertFalse(popup.start_button.isEnabled())
+        self.assertTrue(popup.stop_button.isEnabled())
+        self.assertEqual(popup.final_status_value.text(), "RUNNING")
 
     def test_sampling_popup_fields_update_from_controller_hooks(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -2821,9 +3006,8 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             self._enable_single_axis_pass(page)
             ProductionPageWorkflowTests._select_node(page, "Node 6 - H")
 
-            with patch.object(SamplingTestController, "start", autospec=True, return_value=True):
-                page._handle_start_sampling_requested()
-                self._app.processEvents()
+            page._handle_start_sampling_requested()
+            self._app.processEvents()
 
         assert page._sampling_popup is not None
         popup = page._sampling_popup
@@ -2835,7 +3019,15 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         page._handle_sampling_completed_count_changed(84, 320)
         page._handle_sampling_latest_measurement_changed(180, 0.25, 720.0)
         page._handle_sampling_latest_cell_written("AG42")
-        page._handle_sampling_measurement_completed(object())
+        fake_result = types.SimpleNamespace(
+            sample_index=7,
+            direction="+",
+            range_value=180,
+            elapsed_seconds=0.25,
+            speed=720.0,
+            workbook_cells={"Range": "B4", "Speed": "B21", "Time": "B38"},
+        )
+        page._handle_sampling_measurement_completed(fake_result)
         self._app.processEvents()
 
         self.assertEqual(popup.state_value.text(), "SAMPLE_WAIT_SENSOR")
@@ -2844,11 +3036,13 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         self.assertEqual(popup.current_direction_value.text(), "Positive")
         self.assertEqual(popup.current_sample_value.text(), "Sample 7 / 32")
         self.assertEqual(popup.completed_count_value.text(), "84 / 320")
-        self.assertEqual(popup.latest_range_value.text(), "180")
-        self.assertEqual(popup.latest_time_value.text(), "0.250000")
-        self.assertEqual(popup.latest_speed_value.text(), "720.000000")
-        self.assertEqual(popup.latest_cell_value.text(), "AG42")
-        self.assertIn("Sample completed", popup.log_output.toPlainText())
+        self.assertEqual(popup.latest_range_value.text(), "180 counts")
+        self.assertEqual(popup.latest_time_value.text(), "0.2500 s")
+        self.assertEqual(popup.latest_speed_value.text(), "720.00 counts/s")
+        self.assertIn(
+            "Sample 7/32 + complete | range=180 | time=0.2500s | speed=720.00",
+            popup.log_output.toPlainText(),
+        )
 
     def test_sampling_terminal_states_reenable_start_and_disable_stop(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -2868,7 +3062,14 @@ class SamplingPageIntegrationTests(unittest.TestCase):
 
         assert page._sampling_popup is not None
         popup = page._sampling_popup
+        self.assertTrue(popup.start_button.isEnabled())
+        self.assertFalse(popup.stop_button.isEnabled())
+
+        popup.start_button.click()
+        self._app.processEvents()
+
         self.assertFalse(popup.start_button.isEnabled())
+        self.assertTrue(popup.stop_button.isEnabled())
 
         page._handle_sampling_completed()
         self._app.processEvents()
@@ -2878,6 +3079,9 @@ class SamplingPageIntegrationTests(unittest.TestCase):
 
         with patch.object(SamplingTestController, "start", autospec=True, return_value=True):
             page._handle_start_sampling_requested()
+            self._app.processEvents()
+            assert page._sampling_popup is not None
+            page._sampling_popup.start_button.click()
             self._app.processEvents()
 
         assert page._sampling_popup is not None
@@ -2890,6 +3094,9 @@ class SamplingPageIntegrationTests(unittest.TestCase):
 
         with patch.object(SamplingTestController, "start", autospec=True, return_value=True):
             page._handle_start_sampling_requested()
+            self._app.processEvents()
+            assert page._sampling_popup is not None
+            page._sampling_popup.start_button.click()
             self._app.processEvents()
 
         assert page._sampling_popup is not None
@@ -2921,13 +3128,14 @@ class SamplingPageIntegrationTests(unittest.TestCase):
                 self._app.processEvents()
                 assert page._sampling_popup is not None
                 popup = page._sampling_popup
+                popup.start_button.click()
+                self._app.processEvents()
                 page._handle_sampling_latest_cell_written("B2")
                 popup.stop_requested.emit()
                 self._app.processEvents()
 
             self.assertEqual(abort_mock.call_count, 1)
-            self.assertEqual(popup.latest_cell_value.text(), "B2")
-            self.assertTrue(page._sampling_popup is not None)
+        self.assertTrue(page._sampling_popup is not None)
 
     def test_sampling_popup_close_does_not_stop_sampling_and_reopen_keeps_state(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -2950,6 +3158,8 @@ class SamplingPageIntegrationTests(unittest.TestCase):
                 self._app.processEvents()
                 assert page._sampling_popup is not None
                 popup = page._sampling_popup
+                popup.start_button.click()
+                self._app.processEvents()
                 page._handle_sampling_current_pwm_changed(100)
                 page._handle_sampling_current_direction_changed("+")
                 popup.close()
@@ -2982,6 +3192,9 @@ class SamplingPageIntegrationTests(unittest.TestCase):
                 page._handle_start_sampling_requested()
                 self._app.processEvents()
                 self.assertTrue(page._sampling_popup is not None and page._sampling_popup.isVisible())
+                assert page._sampling_popup is not None
+                page._sampling_popup.start_button.click()
+                self._app.processEvents()
                 page._handle_start_sampling_requested()
                 self._app.processEvents()
 

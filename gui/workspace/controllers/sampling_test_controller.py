@@ -138,6 +138,9 @@ class SamplingTestController:
     def log_message(self, text: str) -> None:  # pragma: no cover - overridden in tests
         pass
 
+    def packet_message(self, text: str) -> None:  # pragma: no cover - overridden in tests
+        pass
+
     def state_changed(self, text: str) -> None:  # pragma: no cover - overridden in tests
         pass
 
@@ -217,18 +220,14 @@ class SamplingTestController:
         self._running = True
         self._state = self.S_HOME_WAIT_ACK
         self.state_changed(self._state)
-        self.status_changed("Starting Sampling Test")
-        self.log_message(
-            f"[Sampling] Starting Sampling Test for Node {self._node_id}"
-            + (f" {self._node_name}" if self._node_name else "")
-        )
+        self.status_changed("Sampling started")
+        self.log_message("Sampling started")
         self._current_direction = "HOME"
         self.current_direction_changed(self._current_direction)
         self._expected_response_description = self._format_run_ack_description(self._config.home_velocity)
         self._pending_ack_velocity = int(self._config.home_velocity)
         self._wait_for = "run_started"
         self.command_requested(build_run(self._config.home_velocity))
-        self.log_message(f"[Sampling] TX RUN home: {self._format_run_payload(self._config.home_velocity)}")
         return True
 
     def stop(self) -> bool:
@@ -244,7 +243,7 @@ class SamplingTestController:
         self._state = self.S_ABORTED
         self.state_changed(self._state)
         self.status_changed(reason)
-        self.log_message(f"[Sampling] {reason}")
+        self.log_message("Sampling aborted")
         self.sampling_aborted(reason)
         return True
 
@@ -265,6 +264,9 @@ class SamplingTestController:
         sender = packet_data["sender"]
         if self._node_id is not None and sender is not None and int(sender) != int(self._node_id):
             return
+
+        packet_node = sender if sender is not None else self._node_id
+        self.packet_message(f"[RX] Node {packet_node if packet_node is not None else '?'}: {packet_data['raw_hex']}")
 
         cmd = packet_data["cmd"]
         params = packet_data["params"]
@@ -346,7 +348,6 @@ class SamplingTestController:
         self._set_state(self.S_SAMPLE_WAIT_ACK)
         self._wait_for = "run_started"
         self.command_requested(build_run(self._current_pwm))
-        self.log_message(f"[Sampling] TX RUN +{self._current_pwm}")
 
     def _start_negative_leg(self) -> None:
         self._current_direction = "-"
@@ -356,14 +357,13 @@ class SamplingTestController:
         self._set_state(self.S_SAMPLE_WAIT_ACK)
         self._wait_for = "run_started"
         self.command_requested(build_run(-self._current_pwm))
-        self.log_message(f"[Sampling] TX RUN -{self._current_pwm}")
 
     def _complete(self) -> None:
         self._running = False
         self._wait_for = None
         self._set_state(self.S_COMPLETED)
         self.status_changed("Sampling completed")
-        self.log_message("[Sampling] Sampling completed")
+        self.log_message("Sampling completed")
         self.sampling_completed()
 
     def _fail_with_stop(self, reason: str) -> None:
@@ -374,7 +374,7 @@ class SamplingTestController:
         self._wait_for = None
         self._set_state(self.S_FAILED)
         self.status_changed(reason)
-        self.log_message(f"[Sampling] FAILED: {reason}")
+        self.log_message(f"Sampling failed: {reason}")
         self.sampling_failed(reason)
 
     def _handle_run_started(self, value: object) -> None:
@@ -406,7 +406,6 @@ class SamplingTestController:
             self._wait_for = "tpos_status"
             self._expected_response_description = "L sensor event for home move"
             self.status_changed("Waiting for home sensor event")
-            self.log_message(f"[Sampling] RUN ACK received for home move at {self._pending_ack_time:.6f}")
             return
 
         self._set_state(self.S_SAMPLE_WAIT_SENSOR)
@@ -415,10 +414,6 @@ class SamplingTestController:
         self._expected_response_description = f"{expected_sensor} sensor event for PWM {self._current_pwm} sample {self._current_sample_index}"
         self.status_changed(
             f"Waiting for {expected_sensor} sensor event: PWM {self._current_pwm}, sample {self._current_sample_index}, direction {self._current_direction}"
-        )
-        self.log_message(
-            f"[Sampling] RUN ACK received for PWM {self._current_pwm}, direction {self._current_direction}, sample {self._current_sample_index}"
-            f" at {self._pending_ack_time:.6f}"
         )
 
     def _handle_tpos_status(self, value: dict | None) -> None:
@@ -478,9 +473,6 @@ class SamplingTestController:
         self._set_state(self.S_HOME_WAIT_GETPOS if self._current_direction == "HOME" else self.S_SAMPLE_WAIT_GETPOS)
         self._expected_response_description = "GETPOS response"
         self.command_requested(build_getpos())
-        self.log_message(
-            f"[Sampling] Sensor event {event} received for PWM {self._current_pwm}, direction {self._current_direction}, sample {self._current_sample_index}"
-        )
 
     def _handle_getpos(self, value: object) -> None:
         if self._wait_for != "getpos":
@@ -503,7 +495,7 @@ class SamplingTestController:
             self._start_l_pos = position
             self._wait_for = None
             self.status_changed(f"Home position captured: {position}")
-            self.log_message(f"[Sampling] Home position captured at {position}")
+            self.log_message(f"Home endpoint captured: {position}")
             self._start_next_sample_pair()
             return
 
@@ -595,10 +587,6 @@ class SamplingTestController:
         self.latest_measurement_changed(range_value, elapsed_seconds, speed)
         self.measurement_completed(result)
         self.latest_workbook_cell_written(time_cell)
-        self.log_message(
-            f"[Sampling] PWM={self._current_pwm}, direction={self._current_direction}, sample={self._current_sample_index}, "
-            f"range={range_value}, time={elapsed_seconds:.6f}, speed={speed:.6f}, cells={range_cell},{speed_cell},{time_cell}"
-        )
 
         self._completed_measurements += 1
         self.samples_completed_changed(self._completed_measurements, self._total_measurements)
