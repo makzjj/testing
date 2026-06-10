@@ -39,6 +39,7 @@ class SingleAxisFunctionalPopup(QDialog):
     functional_passed = pyqtSignal(int, str)
     functional_failed = pyqtSignal(int, str, str)
     functional_aborted = pyqtSignal(int, str, str)
+    sampling_start_requested = pyqtSignal()
 
     _INACTIVE_FLAG_COLOR = "#7A4D1F"
     _ACTIVE_FLAG_COLOR = "#FF8C00"
@@ -198,8 +199,9 @@ class SingleAxisFunctionalPopup(QDialog):
         self.functional_passed.emit(node_id, node_name)
         # Re-enable controls after finish
         self._finish_run_ui()
-        # Handoff to sampling prompt (placeholder only)
-        self.ask_start_sampling()
+        # Keep the pass gate independent from the sampling prompt decision.
+        if self.ask_start_sampling():
+            self.sampling_start_requested.emit()
 
     def mark_failed(self, reason: str) -> None:
         from PyQt6.QtWidgets import QMessageBox  # local import to keep top clean

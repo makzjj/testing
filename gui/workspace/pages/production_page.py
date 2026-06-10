@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..bridges import WorkspaceRuntimeBridge
+from ..dialogs.sampling_test_popup import SamplingTestPopup
 from ..widgets import DetailListWidget, LabeledControl, PanelFrame, SimpleTableWidget
 from ..controllers.sampling_test_controller import SamplingTestConfig, SamplingTestController
 from .single_axis_functional_popup import SingleAxisFunctionalPopup
@@ -108,6 +109,7 @@ class ProductionPage(BaseWorkspacePage):
         self._ipqc_excel_adapter = IpqcExcelAdapter()
         self._last_status_entry = ""
         self._single_axis_popup: SingleAxisFunctionalPopup | None = None
+        self._sampling_popup: SamplingTestPopup | None = None
         self._single_axis_passed = False
         self._sampling_controller = SamplingTestController(self._ipqc_excel_adapter, SamplingTestConfig())
         self._sampling_runtime_window = None
@@ -118,8 +120,8 @@ class ProductionPage(BaseWorkspacePage):
 
         self.stage_section.configuration_requested.connect(self._handle_run_test)
         self.stage_section.single_axis_requested.connect(self._handle_single_axis_test_requested)
+        self.stage_section.sampling_requested.connect(self._handle_start_sampling_requested)
         self.stage_section.performance_requested.connect(self._handle_performance_test_requested)
-        self.test_control_section.sampling_requested.connect(self._handle_start_sampling_requested)
         self.uuid_section.load_workbook_requested.connect(self._handle_load_ipqc_workbook)
         self.uuid_section.write_requested.connect(self._handle_write_uuid)
         self.uuid_section.verify_requested.connect(self._handle_verify_uuid)
@@ -349,6 +351,7 @@ class ProductionPage(BaseWorkspacePage):
             self._single_axis_popup.functional_passed.connect(self._handle_single_axis_passed)
             self._single_axis_popup.functional_failed.connect(self._handle_single_axis_failed)
             self._single_axis_popup.functional_aborted.connect(self._handle_single_axis_aborted)
+            self._single_axis_popup.sampling_start_requested.connect(self._handle_start_sampling_requested)
         self._single_axis_popup.show()
         self._single_axis_popup.raise_()
         self._single_axis_popup.activateWindow()
@@ -357,18 +360,21 @@ class ProductionPage(BaseWorkspacePage):
         self._single_axis_passed = True
         self.console_message.emit(f"[Production] Single Axis Functional Test PASSED for Node {node_id} {node_name}")
         self.progress_section.append_step(f"Single Axis PASSED for Node {node_id} {node_name}", level="success")
+        self.stage_section.set_stage_status("single_axis", "pass")
         self._refresh_sampling_action_states()
 
     def _handle_single_axis_failed(self, node_id: int, node_name: str, reason: str) -> None:
         self._single_axis_passed = False
         self.console_message.emit(f"[Production] Single Axis Functional Test FAILED for Node {node_id} {node_name}: {reason}")
         self.progress_section.append_step(f"Single Axis FAILED for Node {node_id} {node_name}: {reason}", level="error")
+        self.stage_section.set_stage_status("single_axis", "fail")
         self._refresh_sampling_action_states()
 
     def _handle_single_axis_aborted(self, node_id: int, node_name: str, reason: str) -> None:
         self._single_axis_passed = False
         self.console_message.emit(f"[Production] Single Axis Functional Test ABORTED for Node {node_id} {node_name}: {reason}")
         self.progress_section.append_step(f"Single Axis ABORTED for Node {node_id} {node_name}", level="warning")
+        self.stage_section.set_stage_status("single_axis", "fail")
         self._refresh_sampling_action_states()
 
     # Minimal passthrough to allow popups to query the runtime window via parent
@@ -382,6 +388,13 @@ class ProductionPage(BaseWorkspacePage):
         self.progress_section.append_step("Performance Test UI is present but command flow is not enabled yet")
 
     def _handle_start_sampling_requested(self) -> None:
+        if self._sampling_active and self._sampling_controller.is_active():
+            popup = self._ensure_sampling_popup()
+            popup.show()
+            popup.raise_()
+            popup.activateWindow()
+            self._refresh_sampling_action_states()
+            return
         try:
             node_id, node_name = self.test_control_section.selected_node()
         except RuntimeError as exc:
@@ -436,10 +449,19 @@ class ProductionPage(BaseWorkspacePage):
             self._refresh_sampling_action_states()
             return
 
+        popup = self._ensure_sampling_popup()
         self._sampling_node_id = node_id
         self._sampling_node_name = node_name
         self._sampling_runtime_window = runtime_window
         self._sampling_active = True
+        popup.set_context(node_id, node_name, layout.sheet_name)
+        popup.prepare_for_run(
+            total_samples=self._sampling_controller.samples_per_direction,
+            total_measurements=self._sampling_controller.total_measurements,
+        )
+        popup.show()
+        popup.raise_()
+        popup.activateWindow()
         self._attach_sampling_runtime_window(runtime_window)
         try:
             started = self._sampling_controller.start(
@@ -457,6 +479,11 @@ class ProductionPage(BaseWorkspacePage):
             self.console_message.emit(f"[Production] {reason}")
             self.progress_section.append_step(reason, level="error")
             self._set_status_result("FAIL", reason)
+            if self._sampling_popup is not None:
+                self._sampling_popup.set_status_text(reason)
+                self._sampling_popup.set_state_text("IDLE")
+                self._sampling_popup.set_final_status("IDLE")
+                self._sampling_popup.set_stop_available(False)
             self._refresh_sampling_action_states()
             return
         if not started:
@@ -464,6 +491,11 @@ class ProductionPage(BaseWorkspacePage):
             self._sampling_node_id = None
             self._sampling_node_name = None
             self._detach_sampling_runtime_window()
+            if self._sampling_popup is not None:
+                self._sampling_popup.set_status_text("Sampling did not start.")
+                self._sampling_popup.set_state_text("IDLE")
+                self._sampling_popup.set_final_status("IDLE")
+                self._sampling_popup.set_stop_available(False)
             self._refresh_sampling_action_states()
             if self._sampling_controller.last_result is None:
                 self._set_status_result("READY", "Sampling did not start.")
@@ -475,6 +507,49 @@ class ProductionPage(BaseWorkspacePage):
         self.progress_section.append_step(f"Sampling started for Node {node_id} {node_name}", level="success")
         self.progress_section.append_step(f"Derived sampling sheet: {layout.sheet_name}")
         self._set_status_result("TESTING", f"Sampling started for Node {node_id} {node_name}")
+        self.stage_section.set_stage_status("sampling", "testing")
+        popup.set_state_text("HOME_WAIT_RUN_ACK")
+        popup.set_status_text("Sampling started")
+        popup.set_final_status("RUNNING")
+        popup.set_stop_available(True)
+        self._refresh_sampling_action_states()
+
+    def _handle_sampling_stop_requested(self) -> None:
+        if self._sampling_active and self._sampling_controller.is_active():
+            self._sampling_controller.abort_by_user()
+
+    def _ensure_sampling_popup(self) -> SamplingTestPopup:
+        if self._sampling_popup is None:
+            self._sampling_popup = SamplingTestPopup(self)
+            self._sampling_popup.start_requested.connect(self._handle_start_sampling_requested)
+            self._sampling_popup.stop_requested.connect(self._handle_sampling_stop_requested)
+        self._refresh_sampling_popup_state()
+        return self._sampling_popup
+
+    def _refresh_sampling_popup_state(self) -> None:
+        if self._sampling_popup is None:
+            return
+        popup = self._sampling_popup
+        try:
+            node_id, node_name = self.test_control_section.selected_node()
+        except RuntimeError:
+            node_id, node_name = self._sampling_node_id, self._sampling_node_name
+        sheet_name = "-"
+        if self._ipqc_excel_adapter.has_loaded_workbook():
+            try:
+                active_group = self._ipqc_excel_adapter.active_sheet_group
+                if active_group:
+                    sheet_name = self._ipqc_excel_adapter.resolve_sampling_sheet_name(active_group)
+            except Exception:
+                sheet_name = "-"
+        popup.set_context(node_id, node_name, sheet_name)
+        popup.set_start_available(
+            self.stage_section._rows.get("sampling", (None, None))[1].isEnabled()
+            if "sampling" in self.stage_section._rows
+            else False,
+            self.stage_section._rows.get("sampling", (None, None))[1].toolTip() if "sampling" in self.stage_section._rows else "",
+        )
+        popup.set_stop_available(self._sampling_active and self._sampling_controller.is_active())
 
     def _attach_sampling_runtime_window(self, runtime_window) -> None:
         if runtime_window is None or not hasattr(runtime_window, "packet_received"):
@@ -507,35 +582,66 @@ class ProductionPage(BaseWorkspacePage):
     def _handle_sampling_log(self, text: str) -> None:
         self.console_message.emit(text)
         self.progress_section.append_step(text.replace("[Sampling] ", ""), level="info")
+        if self._sampling_popup is not None:
+            self._sampling_popup.append_log(text.replace("[Sampling] ", ""))
 
     def _handle_sampling_state_changed(self, text: str) -> None:
         self.progress_section.append_step(f"Sampling state: {text}")
+        if self._sampling_popup is not None:
+            self._sampling_popup.set_state_text(text)
+            self._sampling_popup.append_log(f"State: {text}")
 
     def _handle_sampling_status_changed(self, text: str) -> None:
         self.progress_section.append_step(text)
+        if self._sampling_popup is not None:
+            self._sampling_popup.set_status_text(text)
+            self._sampling_popup.append_log(text)
 
     def _handle_sampling_current_pwm_changed(self, pwm: int) -> None:
         self.progress_section.append_step(f"Sampling PWM: {int(pwm)}")
+        if self._sampling_popup is not None:
+            self._sampling_popup.set_current_pwm(int(pwm))
+            self._sampling_popup.append_log(f"Current PWM changed to {int(pwm)}")
 
     def _handle_sampling_current_direction_changed(self, direction: str) -> None:
         self.progress_section.append_step(f"Sampling direction: {direction}")
+        if self._sampling_popup is not None:
+            self._sampling_popup.set_current_direction(direction)
+            self._sampling_popup.append_log(f"Direction changed to {direction}")
 
     def _handle_sampling_current_sample_changed(self, sample_index: int) -> None:
         self.progress_section.append_step(f"Sampling sample index: {int(sample_index)}")
+        if self._sampling_popup is not None:
+            self._sampling_popup.set_current_sample(sample_index, self._sampling_controller.samples_per_direction)
+            self._sampling_popup.append_log(
+                f"Sample index changed to {int(sample_index)} / {self._sampling_controller.samples_per_direction}"
+            )
 
     def _handle_sampling_completed_count_changed(self, completed: int, total: int) -> None:
         self.progress_section.append_step(f"Sampling progress: {int(completed)}/{int(total)}")
+        if self._sampling_popup is not None:
+            self._sampling_popup.set_completed_counts(completed, total)
+            self._sampling_popup.append_log(f"Completed {int(completed)} / {int(total)}")
 
     def _handle_sampling_latest_measurement_changed(self, range_value: int, elapsed_seconds: float, speed: float) -> None:
         self.progress_section.append_step(
             f"Latest sampling measurement: range={int(range_value)}, time={float(elapsed_seconds):.6f}, speed={float(speed):.6f}"
         )
+        if self._sampling_popup is not None:
+            self._sampling_popup.set_latest_measurement_details(range_value, elapsed_seconds, speed)
+            self._sampling_popup.append_log(
+                f"Latest measurement range={int(range_value)}, time={float(elapsed_seconds):.6f}, speed={float(speed):.6f}"
+            )
 
     def _handle_sampling_latest_cell_written(self, cell_ref: str) -> None:
         self.progress_section.append_step(f"Latest workbook cell written: {cell_ref}")
+        if self._sampling_popup is not None:
+            self._sampling_popup.set_latest_workbook_cell(cell_ref)
+            self._sampling_popup.append_log(f"Workbook cell written: {cell_ref}")
 
     def _handle_sampling_measurement_completed(self, _result: object) -> None:
-        return
+        if self._sampling_popup is not None:
+            self._sampling_popup.append_log("Sample completed", level="success")
 
     def _handle_sampling_completed(self) -> None:
         self._sampling_active = False
@@ -545,6 +651,12 @@ class ProductionPage(BaseWorkspacePage):
         self.console_message.emit("[Production] Sampling completed")
         self.progress_section.append_step("Sampling completed", level="success")
         self._set_status_result("PASS", "Sampling completed")
+        self.stage_section.set_stage_status("sampling", "pass")
+        if self._sampling_popup is not None:
+            self._sampling_popup.set_state_text("COMPLETED")
+            self._sampling_popup.set_status_text("Sampling completed")
+            self._sampling_popup.set_final_status("COMPLETE")
+            self._sampling_popup.set_stop_available(False)
         self._refresh_sampling_action_states()
 
     def _handle_sampling_failed(self, reason: str) -> None:
@@ -555,6 +667,19 @@ class ProductionPage(BaseWorkspacePage):
         self.console_message.emit(f"[Production] Sampling failed: {reason}")
         self.progress_section.append_step(f"Sampling failed: {reason}", level="error")
         self._set_status_result("FAIL", reason)
+        self.stage_section.set_stage_status("sampling", "fail")
+        if self._sampling_popup is not None:
+            self._sampling_popup.set_state_text("FAILED")
+            self._sampling_popup.set_status_text(reason)
+            self._sampling_popup.set_failure_details(
+                pwm=self._sampling_controller.current_pwm,
+                direction=self._sampling_controller.current_direction,
+                sample_index=self._sampling_controller.current_sample_index,
+                reason=reason,
+                completed_count=self._sampling_controller.completed_measurements,
+                total_count=self._sampling_controller.total_measurements,
+            )
+            self._sampling_popup.set_stop_available(False)
         self._refresh_sampling_action_states()
 
     def _handle_sampling_aborted(self, reason: str) -> None:
@@ -565,6 +690,19 @@ class ProductionPage(BaseWorkspacePage):
         self.console_message.emit(f"[Production] Sampling aborted: {reason}")
         self.progress_section.append_step(f"Sampling aborted: {reason}", level="warning")
         self._set_status_result("ABORTED", reason)
+        self.stage_section.set_stage_status("sampling", "fail")
+        if self._sampling_popup is not None:
+            self._sampling_popup.set_state_text("ABORTED")
+            self._sampling_popup.set_status_text(reason)
+            self._sampling_popup.set_aborted_details(
+                pwm=self._sampling_controller.current_pwm,
+                direction=self._sampling_controller.current_direction,
+                sample_index=self._sampling_controller.current_sample_index,
+                reason=reason,
+                completed_count=self._sampling_controller.completed_measurements,
+                total_count=self._sampling_controller.total_measurements,
+            )
+            self._sampling_popup.set_stop_available(False)
         self._refresh_sampling_action_states()
 
     def _handle_clear_result(self) -> None:
@@ -1227,7 +1365,21 @@ class ProductionPage(BaseWorkspacePage):
             except Exception as exc:
                 enabled = False
                 reason = f"Sampling workbook is not ready: {exc}"
-        self.test_control_section.set_sampling_available(enabled, reason)
+        self.stage_section.set_stage_enabled("sampling", enabled, reason)
+        if self._sampling_popup is not None:
+            popup_enabled = bool(enabled and not self._sampling_active and not self._sampling_controller.is_active())
+            self._sampling_popup.set_start_available(popup_enabled, reason)
+            self._sampling_popup.set_stop_available(self._sampling_active and self._sampling_controller.is_active())
+            try:
+                active_group = self._ipqc_excel_adapter.active_sheet_group
+                sheet_name = self._ipqc_excel_adapter.resolve_sampling_sheet_name(active_group) if active_group else "-"
+            except Exception:
+                sheet_name = "-"
+            try:
+                node_id, node_name = self.test_control_section.selected_node()
+            except RuntimeError:
+                node_id, node_name = self._sampling_node_id, self._sampling_node_name
+            self._sampling_popup.set_context(node_id, node_name, sheet_name)
 
     def _get_supported_workbook_parameter_definitions(self) -> tuple[list[ParameterDefinition], str | None]:
         if not self._ipqc_excel_adapter.has_loaded_workbook():
@@ -1341,7 +1493,6 @@ class _CommunicationSection(PanelFrame):
     connect_requested = pyqtSignal(str, int)
     disconnect_requested = pyqtSignal()
     node_selected = pyqtSignal(int)
-    sampling_requested = pyqtSignal()
 
     def __init__(self) -> None:
         super().__init__("Communication", "")
@@ -1377,13 +1528,6 @@ class _CommunicationSection(PanelFrame):
         button_row.addWidget(self._connect_button)
         button_row.addWidget(self._status_label, 1)
         self.body_layout.addLayout(button_row)
-
-        sampling_button = QPushButton("Start Sampling")
-        sampling_button.setProperty("tone", "secondary")
-        sampling_button.setEnabled(False)
-        sampling_button.clicked.connect(self.sampling_requested.emit)
-        self._sampling_button = sampling_button
-        self.body_layout.addWidget(sampling_button)
 
         self._firmware_label = QLabel("MCU Firmware Version: -")
         self._firmware_label.setObjectName("DetailValue")
@@ -1455,14 +1599,6 @@ class _CommunicationSection(PanelFrame):
             raise RuntimeError("No ML 2.0 testable nodes configured for Production.")
         node_id, node_name = selected
         return int(node_id), str(node_name)
-
-    def set_sampling_available(self, enabled: bool, reason: str = "") -> None:
-        self._sampling_button.setEnabled(bool(enabled))
-        self._sampling_button.setToolTip(
-            "Start Sampling after Single Axis passes."
-            if enabled
-            else (reason or "Sampling is available after Single Axis passes.")
-        )
 
     def _handle_toggle(self) -> None:
         if self._connected:
@@ -1755,14 +1891,15 @@ class _ProductionInfoSection(PanelFrame):
 class _TestStagesSection(PanelFrame):
     configuration_requested = pyqtSignal()
     single_axis_requested = pyqtSignal()
+    sampling_requested = pyqtSignal()
     performance_requested = pyqtSignal()
 
     def __init__(self) -> None:
         super().__init__("Test Stages", "")
         self._rows: dict[str, tuple[QLabel, QPushButton]] = {}
         self.body_layout.addStretch(1)
-        self._add_stage_row("configuration", "Configuration", self.configuration_requested.emit)
         self._add_stage_row("single_axis", "Single Axis Functional Test", self.single_axis_requested.emit)
+        self._add_stage_row("sampling", "Sampling Test", self.sampling_requested.emit)
         self._add_stage_row("performance", "Performance Test", self.performance_requested.emit)
         self.body_layout.addStretch(1)
         self.reset_stage_states()
@@ -1795,6 +1932,9 @@ class _TestStagesSection(PanelFrame):
     def reset_stage_states(self) -> None:
         for key in self._rows:
             self.set_stage_status(key, "neutral")
+        self.set_stage_enabled("single_axis", True)
+        self.set_stage_enabled("sampling", False, "Sampling is available after Single Axis passes.")
+        self.set_stage_enabled("performance", False, "Performance Test is not implemented yet.")
 
     def set_stage_status(self, key: str, status: str) -> None:
         row = self._rows.get(key)
@@ -1810,8 +1950,17 @@ class _TestStagesSection(PanelFrame):
         elif normalized in {"fail", "failure", "timeout"}:
             color = "#C62828"
         dot.setStyleSheet(f"border-radius: 5px; background: {color};")
-        if key != "configuration":
-            button.setEnabled(True)
+
+    def set_stage_enabled(self, key: str, enabled: bool, reason: str = "") -> None:
+        row = self._rows.get(key)
+        if row is None:
+            return
+        _dot, button = row
+        button.setEnabled(bool(enabled))
+        if enabled:
+            button.setToolTip("Start Test")
+        else:
+            button.setToolTip(reason or "Stage is not available.")
 
 
 class _NodeStatusSection(PanelFrame):
@@ -1897,7 +2046,6 @@ class _TestControlSection(PanelFrame):
     run_requested = pyqtSignal()
     stop_requested = pyqtSignal()
     clear_requested = pyqtSignal()
-    sampling_requested = pyqtSignal()
 
     def __init__(self) -> None:
         super().__init__("Test Control", "")
@@ -1923,13 +2071,6 @@ class _TestControlSection(PanelFrame):
 
         self.body_layout.addLayout(button_row)
 
-        sampling_button = QPushButton("Start Sampling")
-        sampling_button.setProperty("tone", "secondary")
-        sampling_button.setEnabled(False)
-        sampling_button.clicked.connect(self.sampling_requested.emit)
-        self._sampling_button = sampling_button
-        self.body_layout.addWidget(sampling_button)
-
         clear_button = QPushButton("Clear Result")
         clear_button.setProperty("tone", "secondary")
         clear_button.clicked.connect(self.clear_requested.emit)
@@ -1944,15 +2085,6 @@ class _TestControlSection(PanelFrame):
             raise RuntimeError("No ML 2.0 testable nodes configured for Production.")
         node_id, node_name = selected
         return int(node_id), str(node_name)
-
-    def set_sampling_available(self, enabled: bool, reason: str = "") -> None:
-        self._sampling_button.setEnabled(bool(enabled))
-        self._sampling_button.setToolTip(
-            "Start Sampling after Single Axis passes."
-            if enabled
-            else (reason or "Sampling is available after Single Axis passes.")
-        )
-
 
 class _ResultSummarySection(PanelFrame):
     def __init__(self) -> None:

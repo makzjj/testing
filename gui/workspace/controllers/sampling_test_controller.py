@@ -87,6 +87,50 @@ class SamplingTestController:
     def is_active(self) -> bool:
         return self._running
 
+    @property
+    def node_id(self) -> int | None:
+        return self._node_id
+
+    @property
+    def node_name(self) -> str | None:
+        return self._node_name
+
+    @property
+    def base_group(self) -> str | None:
+        return self._base_group
+
+    @property
+    def sheet_name(self) -> str | None:
+        return self._layout.sheet_name if self._layout is not None else None
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    @property
+    def current_pwm(self) -> int:
+        return self._current_pwm
+
+    @property
+    def current_direction(self) -> str:
+        return self._current_direction
+
+    @property
+    def current_sample_index(self) -> int:
+        return self._current_sample_index
+
+    @property
+    def completed_measurements(self) -> int:
+        return self._completed_measurements
+
+    @property
+    def total_measurements(self) -> int:
+        return self._total_measurements
+
+    @property
+    def samples_per_direction(self) -> int:
+        return int(self._config.samples_per_direction)
+
     # Signal-like hooks
     def command_requested(self, payload: list[int]) -> None:  # pragma: no cover - overridden in tests
         pass
