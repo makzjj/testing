@@ -2886,6 +2886,12 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         self.assertNotIn("Controls", titles)
         self.assertNotIn("Latest Workbook Cells", {label.text() for label in popup.findChildren(QLabel)})
         self.assertFalse(popup.range_mode_combo.isEnabled())
+        self.assertTrue(popup.samples_per_pwm_combo.isEnabled())
+        self.assertTrue(popup.pwm_selection_combo.isEnabled())
+        self.assertEqual(popup.samples_per_pwm_combo.currentText(), "32")
+        self.assertEqual(popup.pwm_selection_combo.currentText(), "All")
+        self.assertEqual(popup.selected_pwm_values(), (100, 90, 80, 70, 60))
+        self.assertEqual(popup.selected_samples_per_pwm(), 32)
         self.assertTrue(popup.clear_logs_button.isVisible())
         button_texts = {button.text() for button in popup.findChildren(QPushButton)}
         self.assertIn("Clear Logs", button_texts)
@@ -2985,6 +2991,8 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             assert page._sampling_popup is not None
             popup = page._sampling_popup
             self.assertTrue(popup.start_button.isEnabled())
+            self.assertTrue(popup.samples_per_pwm_combo.isEnabled())
+            self.assertTrue(popup.pwm_selection_combo.isEnabled())
             popup.start_button.click()
             self._app.processEvents()
 
@@ -2993,6 +3001,93 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         self.assertFalse(popup.start_button.isEnabled())
         self.assertTrue(popup.stop_button.isEnabled())
         self.assertEqual(popup.final_status_value.text(), "RUNNING")
+
+    def test_popup_selected_configuration_drives_pwm_90_debug_run(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            ProductionPageWorkflowTests._create_ipqc_workbook(workbook_path)
+            self._load_workbook(page, workbook_path)
+            self._enable_single_axis_pass(page)
+            ProductionPageWorkflowTests._select_node(page, "Node 6 - H")
+
+            page._handle_start_sampling_requested()
+            self._app.processEvents()
+            assert page._sampling_popup is not None
+            popup = page._sampling_popup
+            popup.pwm_selection_combo.setCurrentText("90")
+            popup.samples_per_pwm_combo.setCurrentText("4")
+            self.assertEqual(popup.selected_pwm_values(), (90,))
+            self.assertEqual(popup.selected_samples_per_pwm(), 4)
+            popup.start_button.click()
+            self._app.processEvents()
+
+            self.assertFalse(popup.samples_per_pwm_combo.isEnabled())
+            self.assertFalse(popup.pwm_selection_combo.isEnabled())
+
+            runtime_window.packet_received.emit([0x88, 0x53, 0xFF, 0x42])
+            self._app.processEvents()
+            runtime_window.packet_received.emit([0x81, 0x4C])
+            self._app.processEvents()
+            runtime_window.packet_received.emit([0x82, 0x00, 0x00, 0x00, 10])
+            self._app.processEvents()
+
+            self.assertEqual(runtime_window.backend_client.sent_commands[2][1], build_run(90))
+            self.assertEqual(popup.current_pwm_value.text(), "90")
+            self.assertEqual(popup.current_sample_value.text(), "Sample 1 / 4")
+
+    def test_sampling_controller_selected_pwm_and_sample_count_drive_payloads_and_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "sampling_ipqc.xlsx"
+            ProductionPageWorkflowTests._create_ipqc_workbook(workbook_path)
+            adapter = IpqcExcelAdapter()
+            adapter.load_template(workbook_path)
+            clock = _SamplingManualClock([0.0, 0.05, 1.0, 1.5, 2.0, 2.4, 3.0, 3.4, 4.0, 4.4, 5.0, 5.4, 6.0, 6.4, 7.0, 7.4, 8.0, 8.4])
+            controller = _RecordingSamplingController(
+                adapter,
+                SamplingTestConfig(home_velocity=-190),
+                clock,
+            )
+
+            self.assertTrue(controller.start(8, "RZ", pwm_values=(90,), samples_per_pwm=4))
+            self.assertEqual(controller.commands[0], [0x88, 0xFF, 0x42])
+            controller.handle_runtime_packet([0x88, 0x53, 0xFF, 0x42])
+            controller.handle_runtime_packet([0x81, 0x4C])
+            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 10])
+
+            self.assertEqual(controller.commands[2], build_run(90))
+            for sample_index in range(1, 5):
+                pos_value = 10 + sample_index * 10
+                neg_value = 60 - sample_index * 10
+                controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x5A])
+                controller.handle_runtime_packet([0x81, 0x52])
+                controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, pos_value])
+                controller.handle_runtime_packet([0x88, 0x53, 0xFF, 0xA6])
+                controller.handle_runtime_packet([0x81, 0x4C])
+                controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, neg_value])
+
+            self.assertFalse(controller.is_active())
+            self.assertEqual(controller.pwms, [90])
+            self.assertEqual(controller.sample_indices[0], 1)
+            self.assertEqual(controller.sample_indices[-1], 4)
+            self.assertEqual(controller.completed_counts[-1], (8, 8))
+            self.assertEqual(len(controller.measurements), 8)
+
+            output_path = Path(tmpdir) / "sampling_90_only.xlsx"
+            adapter.save_completed_workbook(output_path)
+            sampling_sheet = load_workbook(output_path)["3X_D"]
+
+        self.assertIsNotNone(sampling_sheet["B6"].value)
+        self.assertIsNotNone(sampling_sheet["E6"].value)
+        self.assertIsNotNone(sampling_sheet["B7"].value)
+        self.assertIsNotNone(sampling_sheet["E7"].value)
+        self.assertIsNone(sampling_sheet["F6"].value)
+        self.assertIsNone(sampling_sheet["F7"].value)
+        self.assertIsNone(sampling_sheet["F23"].value)
+        self.assertIsNone(sampling_sheet["F40"].value)
 
     def test_sampling_popup_fields_update_from_controller_hooks(self) -> None:
         runtime_window = _FakeRuntimeWindow()

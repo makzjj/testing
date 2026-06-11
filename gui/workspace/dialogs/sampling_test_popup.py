@@ -81,6 +81,14 @@ class SamplingTestPopup(QDialog):
         self.range_mode_combo.setEnabled(False)
         self.range_mode_combo.setToolTip("TODO: range mode behavior is not implemented yet.")
 
+        self.samples_per_pwm_combo = QComboBox()
+        self.samples_per_pwm_combo.addItems(["1", "2", "4", "8", "16", "32"])
+        self.samples_per_pwm_combo.setCurrentIndex(5)
+
+        self.pwm_selection_combo = QComboBox()
+        self.pwm_selection_combo.addItems(["All", "100", "90", "80", "70", "60"])
+        self.pwm_selection_combo.setCurrentIndex(0)
+
         middle_summary_layout.addWidget(QLabel("Sampling Sheet"), 0, 0)
         middle_summary_layout.addWidget(self.sampling_sheet_value, 0, 1)
         middle_summary_layout.addWidget(QLabel("Current Status"), 1, 0)
@@ -89,6 +97,10 @@ class SamplingTestPopup(QDialog):
         middle_summary_layout.addWidget(self.reason_value, 2, 1)
         middle_summary_layout.addWidget(QLabel("Range Mode"), 3, 0)
         middle_summary_layout.addWidget(self.range_mode_combo, 3, 1)
+        middle_summary_layout.addWidget(QLabel("Samples per PWM"), 4, 0)
+        middle_summary_layout.addWidget(self.samples_per_pwm_combo, 4, 1)
+        middle_summary_layout.addWidget(QLabel("PWM Selection"), 5, 0)
+        middle_summary_layout.addWidget(self.pwm_selection_combo, 5, 1)
         middle_summary_layout.setColumnStretch(1, 1)
 
         button_column = QVBoxLayout()
@@ -264,6 +276,7 @@ class SamplingTestPopup(QDialog):
         self.set_latest_workbook_cell("-")
         self.set_start_available(False, "Sampling is already running.")
         self.set_stop_available(True)
+        self.set_sampling_configuration_enabled(False)
 
     def set_state_text(self, text: str) -> None:
         self.state_value.setText(str(text))
@@ -358,6 +371,19 @@ class SamplingTestPopup(QDialog):
     def clear_logs(self) -> None:
         self.log_output.clear()
         self.packet_log_output.clear()
+
+    def selected_pwm_values(self) -> tuple[int, ...]:
+        selection = self.pwm_selection_combo.currentText().strip()
+        if selection == "All":
+            return (100, 90, 80, 70, 60)
+        return (int(selection),)
+
+    def selected_samples_per_pwm(self) -> int:
+        return int(self.samples_per_pwm_combo.currentText())
+
+    def set_sampling_configuration_enabled(self, enabled: bool) -> None:
+        self.samples_per_pwm_combo.setEnabled(bool(enabled))
+        self.pwm_selection_combo.setEnabled(bool(enabled))
 
     def set_start_available(self, enabled: bool, reason: str = "") -> None:
         self._start_available = bool(enabled)

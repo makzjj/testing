@@ -493,9 +493,11 @@ class ProductionPage(BaseWorkspacePage):
         self._sampling_node_name = node_name
         self._sampling_runtime_window = runtime_window
         popup.set_context(node_id, node_name, layout.sheet_name)
+        selected_pwm_values = popup.selected_pwm_values()
+        selected_samples_per_pwm = popup.selected_samples_per_pwm()
         popup.prepare_for_run(
-            total_samples=self._sampling_controller.samples_per_direction,
-            total_measurements=self._sampling_controller.total_measurements,
+            total_samples=selected_samples_per_pwm,
+            total_measurements=len(selected_pwm_values) * selected_samples_per_pwm * 2,
         )
         popup.show()
         popup.raise_()
@@ -508,6 +510,8 @@ class ProductionPage(BaseWorkspacePage):
                 node_name,
                 single_axis_passed=self._single_axis_passed,
                 base_group=active_group,
+                pwm_values=selected_pwm_values,
+                samples_per_pwm=selected_samples_per_pwm,
             )
         except Exception as exc:
             reason = f"Sampling failed to start: {exc}"
@@ -523,6 +527,7 @@ class ProductionPage(BaseWorkspacePage):
                 self._sampling_popup.set_state_text("IDLE")
                 self._sampling_popup.set_final_status("IDLE")
                 self._sampling_popup.set_stop_available(False)
+                self._sampling_popup.set_sampling_configuration_enabled(True)
             self._refresh_sampling_action_states()
             return
         if not started:
@@ -535,6 +540,7 @@ class ProductionPage(BaseWorkspacePage):
                 self._sampling_popup.set_state_text("IDLE")
                 self._sampling_popup.set_final_status("IDLE")
                 self._sampling_popup.set_stop_available(False)
+                self._sampling_popup.set_sampling_configuration_enabled(True)
             self._refresh_sampling_action_states()
             if self._sampling_controller.last_result is None:
                 self._set_status_result("READY", "Sampling did not start.")
@@ -713,6 +719,7 @@ class ProductionPage(BaseWorkspacePage):
             self._sampling_popup.set_status_text("Sampling completed")
             self._sampling_popup.set_final_status("COMPLETED")
             self._sampling_popup.set_stop_available(False)
+            self._sampling_popup.set_sampling_configuration_enabled(True)
         self._refresh_sampling_action_states()
 
     def _handle_sampling_failed(self, reason: str) -> None:
@@ -734,6 +741,7 @@ class ProductionPage(BaseWorkspacePage):
                 total_count=self._sampling_controller.total_measurements,
             )
             self._sampling_popup.set_stop_available(False)
+            self._sampling_popup.set_sampling_configuration_enabled(True)
         self._refresh_sampling_action_states()
 
     def _handle_sampling_aborted(self, reason: str) -> None:
@@ -755,6 +763,7 @@ class ProductionPage(BaseWorkspacePage):
                 total_count=self._sampling_controller.total_measurements,
             )
             self._sampling_popup.set_stop_available(False)
+            self._sampling_popup.set_sampling_configuration_enabled(True)
         self._refresh_sampling_action_states()
 
     def _handle_clear_result(self) -> None:
@@ -1422,6 +1431,7 @@ class ProductionPage(BaseWorkspacePage):
             popup_enabled = bool(enabled and not self._sampling_active)
             self._sampling_popup.set_start_available(popup_enabled, reason)
             self._sampling_popup.set_stop_available(self._sampling_active)
+            self._sampling_popup.set_sampling_configuration_enabled(not self._sampling_controller.is_active())
             try:
                 active_group = self._ipqc_excel_adapter.active_sheet_group
                 sheet_name = self._ipqc_excel_adapter.resolve_sampling_sheet_name(active_group) if active_group else "-"

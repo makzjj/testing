@@ -65,12 +65,14 @@ class SamplingTestController:
         self._state = self.S_IDLE
         self._wait_for: str | None = None
         self._expected_response_description = ""
+        self._run_pwm_values: tuple[int, ...] = tuple(self._config.pwm_values)
+        self._run_samples_per_pwm = int(self._config.samples_per_direction)
         self._current_pwm_index = -1
         self._current_pwm = 0
         self._current_sample_index = 0
         self._current_direction = ""
         self._completed_measurements = 0
-        self._total_measurements = len(self._config.pwm_values) * self._config.samples_per_direction * 2
+        self._total_measurements = len(self._run_pwm_values) * self._run_samples_per_pwm * 2
         self._start_l_pos: int | None = None
         self._current_r_pos: int | None = None
         self._current_l_pos: int | None = None
@@ -129,7 +131,15 @@ class SamplingTestController:
 
     @property
     def samples_per_direction(self) -> int:
-        return int(self._config.samples_per_direction)
+        return int(self._run_samples_per_pwm)
+
+    @property
+    def pwm_values(self) -> tuple[int, ...]:
+        return tuple(self._run_pwm_values)
+
+    @property
+    def samples_per_pwm(self) -> int:
+        return int(self._run_samples_per_pwm)
 
     # Signal-like hooks
     def command_requested(self, payload: list[int]) -> None:  # pragma: no cover - overridden in tests
@@ -184,6 +194,8 @@ class SamplingTestController:
         *,
         single_axis_passed: bool = True,
         base_group: str | None = None,
+        pwm_values: list[int] | tuple[int, ...] | None = None,
+        samples_per_pwm: int | None = None,
     ) -> bool:
         if self._running:
             self.log_message("[Sampling] Sampling is already active.")
@@ -216,12 +228,31 @@ class SamplingTestController:
             self.sampling_failed(reason)
             return False
 
+        run_pwm_values = tuple(int(value) for value in (pwm_values if pwm_values is not None else self._config.pwm_values))
+        if not run_pwm_values:
+            reason = "No PWM values are configured for Sampling."
+            self.log_message(f"[Sampling] {reason}")
+            self.sampling_failed(reason)
+            return False
+
+        run_samples_per_pwm = int(samples_per_pwm if samples_per_pwm is not None else self._config.samples_per_direction)
+        if run_samples_per_pwm <= 0:
+            reason = "Sampling requires at least one sample per PWM."
+            self.log_message(f"[Sampling] {reason}")
+            self.sampling_failed(reason)
+            return False
+
+        self._run_pwm_values = run_pwm_values
+        self._run_samples_per_pwm = run_samples_per_pwm
+
         self._reset_runtime_state()
         self._running = True
         self._state = self.S_HOME_WAIT_ACK
         self.state_changed(self._state)
         self.status_changed("Sampling started")
-        self.log_message("Sampling started")
+        self.log_message(
+            f"Sampling started: pwm_values={list(self._run_pwm_values)}, samples_per_pwm={self._run_samples_per_pwm}"
+        )
         self._current_direction = "HOME"
         self.current_direction_changed(self._current_direction)
         self._expected_response_description = self._format_run_ack_description(self._config.home_velocity)
@@ -311,7 +342,7 @@ class SamplingTestController:
         self._pending_ack_time = None
         self._pending_sensor_time = None
         self._latest_result = None
-        self._total_measurements = len(self._config.pwm_values) * self._config.samples_per_direction * 2
+        self._total_measurements = len(self._run_pwm_values) * self._run_samples_per_pwm * 2
         self._stop_command_sent = False
 
     def _send_stopmotor(self) -> None:
@@ -329,9 +360,9 @@ class SamplingTestController:
 
     def _next_pwm(self) -> bool:
         self._current_pwm_index += 1
-        if self._current_pwm_index >= len(self._config.pwm_values):
+        if self._current_pwm_index >= len(self._run_pwm_values):
             return False
-        self._current_pwm = int(self._config.pwm_values[self._current_pwm_index])
+        self._current_pwm = int(self._run_pwm_values[self._current_pwm_index])
         self._current_sample_index = 1
         self.current_pwm_changed(self._current_pwm)
         self.current_sample_changed(self._current_sample_index)
@@ -595,17 +626,17 @@ class SamplingTestController:
             self._start_negative_leg()
             return
 
-        if self._current_sample_index < int(self._config.samples_per_direction):
+        if self._current_sample_index < int(self._run_samples_per_pwm):
             self._current_sample_index += 1
             self.current_sample_changed(self._current_sample_index)
             self._start_next_sample_pair()
             return
 
-        if self._current_pwm_index + 1 < len(self._config.pwm_values):
+        if self._current_pwm_index + 1 < len(self._run_pwm_values):
             self._current_pwm_index += 1
             self._current_sample_index = 1
             self.current_sample_changed(self._current_sample_index)
-            self._current_pwm = int(self._config.pwm_values[self._current_pwm_index])
+            self._current_pwm = int(self._run_pwm_values[self._current_pwm_index])
             self.current_pwm_changed(self._current_pwm)
             self._start_next_sample_pair()
             return
