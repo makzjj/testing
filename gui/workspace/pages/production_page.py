@@ -161,6 +161,7 @@ class ProductionPage(BaseWorkspacePage):
         self._parameter_controller.eeprom_save_finished.connect(self._handle_eeprom_save_finished)
         self.progress_section.refresh_requested.connect(self.refresh)
         self.progress_section.clear_requested.connect(self._handle_clear_progress_log)
+        self.test_control_section.node_selected.connect(self._handle_test_control_node_selected)
         self._current_programmed_pwm_value = "-"
         self._parameter_definitions = list(WORKBOOK_PARAMETER_DEFINITIONS.values())
         self._pending_parameter_requests: list[ParameterRequest] = []
@@ -777,6 +778,10 @@ class ProductionPage(BaseWorkspacePage):
     def _handle_clear_progress_log(self) -> None:
         self.progress_section.clear_log()
 
+    def _handle_test_control_node_selected(self) -> None:
+        self._clear_parameter_verification_cache()
+        self._refresh_workbook_action_states()
+
     def _handle_load_ipqc_workbook(self) -> None:
         path, _selected_filter = QFileDialog.getOpenFileName(
             self,
@@ -826,6 +831,7 @@ class ProductionPage(BaseWorkspacePage):
             return
         try:
             self._ipqc_excel_adapter.select_sheet_group(base_group)
+            self._clear_parameter_verification_cache()
             self._refresh_ipqc_expected_preview()
         except Exception as exc:
             self.console_message.emit(f"[Production] Failed to select IPQC sheet group '{base_group}': {exc}")
@@ -878,6 +884,8 @@ class ProductionPage(BaseWorkspacePage):
             return
         original_request_count = len(requests)
         requests, skipped_labels = self._filter_write_requests_by_previous_verification(requests)
+        if requests:
+            self._invalidate_parameter_verification_cache_for_requests(requests)
         persistent_requests = [request for request in requests if request.definition.persistent]
         runtime_requests = [request for request in requests if not request.definition.persistent]
         labels = ", ".join(self._parameter_write_log_name(request.definition) for request in requests if request.definition.build_write_command)
@@ -954,9 +962,32 @@ class ProductionPage(BaseWorkspacePage):
         requests = self._build_workbook_parameter_requests(node_id, node_name)
         if requests is None:
             return
-        self._pending_parameter_requests = requests
+        requests_to_verify, skipped_labels = self._filter_verify_requests_by_previous_verification(requests)
+        if skipped_labels:
+            self.progress_section.append_step(
+                f"SKIPPED: {len(skipped_labels)} parameter(s) already passed read-back verification."
+            )
+        if not requests_to_verify:
+            if self._all_supported_workbook_parameters_passed():
+                cached_results = self._get_cached_parameter_verification_results()
+                if cached_results:
+                    self._handle_parameter_verification_finished(
+                        True,
+                        "Workbook parameter read-back verification",
+                        cached_results,
+                    )
+                else:
+                    self._set_status_result("PASS", "Workbook parameter read-back verification")
+                    self.uuid_section.set_workbook_validation_result(True, "")
+                    self.uuid_section.set_last_workbook_action("Workbook parameter read-back verification completed")
+                self._refresh_connection_status()
+                return
+            self._set_status_result("FAIL", "Workbook parameter read-back verification could not be completed.")
+            self._refresh_connection_status()
+            return
+        self._pending_parameter_requests = requests_to_verify
         self._set_status_result("READING PARAMETERS", f"Reading and verifying workbook parameters for Node {node_id} {node_name}.")
-        started = self._parameter_controller.verify_parameters(requests)
+        started = self._parameter_controller.verify_parameters(requests_to_verify)
         if not started:
             self._pending_parameter_requests = []
         self._refresh_connection_status()
@@ -966,7 +997,7 @@ class ProductionPage(BaseWorkspacePage):
         self._pending_parameter_requests = []
         self._pending_persistent_parameter_requests = []
         self._pending_runtime_parameter_requests = []
-        self._last_parameter_verification_results_by_name = {}
+        self._clear_parameter_verification_cache()
         self._workbook_loaded = False
         self._workbook_write_completed = False
         self._workbook_verification_passed = False
@@ -1057,12 +1088,9 @@ class ProductionPage(BaseWorkspacePage):
         results_object: object,
     ) -> None:
         results = [result for result in results_object if isinstance(result, ParameterVerificationResult)]
-        self._last_parameter_verification_results_by_name = {
-            result.definition.name: result for result in results
-        }
-        result_by_name = {result.definition.name: result for result in results}
-        uuid_result = result_by_name.get("UUID")
-        pwm_result = result_by_name.get("PWM")
+        self._cache_parameter_verification_results(results)
+        uuid_result = self._last_parameter_verification_results_by_name.get("UUID")
+        pwm_result = self._last_parameter_verification_results_by_name.get("PWM")
         uuid_actual = uuid_result.actual_text if uuid_result and uuid_result.actual_text else "-"
         pwm_actual = pwm_result.actual_text if pwm_result and pwm_result.actual_text else "-"
         self._current_programmed_pwm_value = pwm_actual
@@ -1080,7 +1108,8 @@ class ProductionPage(BaseWorkspacePage):
                     silent=True,
                 ) and workbook_ok
 
-        self._workbook_verification_passed = passed and workbook_ok
+        all_required_passed = self._all_supported_workbook_parameters_passed()
+        self._workbook_verification_passed = passed and workbook_ok and all_required_passed
         self.uuid_section.set_workbook_validation_result(self._workbook_verification_passed, "" if self._workbook_verification_passed else reason)
         self.uuid_section.set_last_workbook_action("Workbook parameter read-back verification completed")
         if self._workbook_verification_passed:
@@ -1095,9 +1124,73 @@ class ProductionPage(BaseWorkspacePage):
                 self.progress_section.append_step(
                     f"{result.definition.name} read-back verification - expected {result.expected_text}, actual {actual_text}",
                     level="pass" if result.passed else "error",
-                )
+        )
         self._pending_parameter_requests = []
         self._refresh_workbook_action_states()
+
+    def _cache_parameter_verification_results(self, results: list[ParameterVerificationResult]) -> None:
+        for result in results:
+            existing = self._last_parameter_verification_results_by_name.get(result.definition.name)
+            if existing is not None and existing.passed and not result.passed:
+                continue
+            self._last_parameter_verification_results_by_name[result.definition.name] = result
+
+    def _clear_parameter_verification_cache(self) -> None:
+        self._last_parameter_verification_results_by_name = {}
+        self._workbook_verification_passed = False
+        if self._ipqc_excel_adapter.has_loaded_workbook():
+            self.uuid_section.set_workbook_validation_ready()
+
+    def _invalidate_parameter_verification_cache_for_requests(self, requests: list[ParameterRequest]) -> None:
+        invalidated = False
+        for request in requests:
+            if request.definition.name in self._last_parameter_verification_results_by_name:
+                invalidated = True
+            self._last_parameter_verification_results_by_name.pop(request.definition.name, None)
+        if invalidated:
+            self._workbook_verification_passed = False
+            if self._ipqc_excel_adapter.has_loaded_workbook():
+                self.uuid_section.set_workbook_validation_ready()
+
+    def _filter_verify_requests_by_previous_verification(
+        self,
+        requests: list[ParameterRequest],
+    ) -> tuple[list[ParameterRequest], list[str]]:
+        if not self._last_parameter_verification_results_by_name:
+            return list(requests), []
+
+        selected_requests: list[ParameterRequest] = []
+        skipped_labels: list[str] = []
+        for request in requests:
+            previous_result = self._last_parameter_verification_results_by_name.get(request.definition.name)
+            if previous_result is not None and previous_result.passed:
+                skipped_labels.append(self._parameter_write_log_name(request.definition))
+                continue
+            selected_requests.append(request)
+        return selected_requests, skipped_labels
+
+    def _get_cached_parameter_verification_results(self) -> list[ParameterVerificationResult]:
+        supported_definitions, validation_error = self._get_supported_workbook_parameter_definitions()
+        if validation_error is not None:
+            return list(self._last_parameter_verification_results_by_name.values())
+        results: list[ParameterVerificationResult] = []
+        for definition in supported_definitions:
+            result = self._last_parameter_verification_results_by_name.get(definition.name)
+            if result is not None:
+                results.append(result)
+        return results
+
+    def _all_supported_workbook_parameters_passed(self) -> bool:
+        supported_definitions, validation_error = self._get_supported_workbook_parameter_definitions()
+        if validation_error is not None:
+            return False
+        if not supported_definitions:
+            return False
+        return all(
+            (self._last_parameter_verification_results_by_name.get(definition.name) is not None)
+            and self._last_parameter_verification_results_by_name[definition.name].passed
+            for definition in supported_definitions
+        )
 
     def _filter_write_requests_by_previous_verification(
         self,
@@ -2108,6 +2201,7 @@ class _TestControlSection(PanelFrame):
     run_requested = pyqtSignal()
     stop_requested = pyqtSignal()
     clear_requested = pyqtSignal()
+    node_selected = pyqtSignal()
 
     def __init__(self) -> None:
         super().__init__("Test Control", "")
@@ -2115,6 +2209,7 @@ class _TestControlSection(PanelFrame):
         self._combo.setObjectName("AxisSelectorCombo")
         for node_id, node_name in get_ml20_testable_nodes():
             self._combo.addItem(f"Node {node_id} - {node_name}", (node_id, node_name))
+        self._combo.currentIndexChanged.connect(lambda _index: self.node_selected.emit())
         self.body_layout.addWidget(LabeledControl("Selected Node", self._combo))
 
         button_row = QHBoxLayout()

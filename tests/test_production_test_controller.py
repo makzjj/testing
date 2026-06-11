@@ -18,6 +18,10 @@ from PyQt6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton
 from gui.workspace.pages.production_page import ProductionPage
 from gui.workspace.dialogs.sampling_test_popup import SamplingTestPopup
 from gui.workspace.pages.single_axis_functional_popup import SingleAxisFunctionalPopup
+from gui.workspace.controllers.single_axis_functional_test_controller import (
+    FunctionalTestConfig,
+    SingleAxisFunctionalTestController,
+)
 from gui.workspace.controllers.sampling_test_controller import SamplingTestController, SamplingTestConfig
 from gui.workspace.widgets import ResponsiveRow
 from services.ipqc_excel_adapter import IpqcExcelAdapter
@@ -2557,6 +2561,14 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             page._single_axis_popup.mark_passed()
         self._app.processEvents()
 
+    @staticmethod
+    def _select_node(page: ProductionPage, node_text: str = "Node 6 - H") -> None:
+        combo = page.test_control_section._combo
+        for index in range(combo.count()):
+            if combo.itemText(index) == node_text:
+                combo.setCurrentIndex(index)
+                break
+
     def _sampling_stage_button(self, page: ProductionPage) -> QPushButton:
         return page.stage_section._rows["sampling"][1]
 
@@ -3882,6 +3894,311 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             self.assertEqual(runtime_window.backend_client.sent_commands, [])
             self.assertEqual(page.result_summary_section._status_label.text(), "FAIL")
             self.assertIn("Expected S/N in workbook B4 is invalid", page.result_summary_section._reason_label.text())
+
+    @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook guard tests.")
+    def test_parameter_verification_cache_skips_passed_results_and_finishes_after_retry(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+        definitions = {definition.name: definition for definition in default_workbook_parameter_definitions()}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            self._create_ipqc_workbook(workbook_path, with_optional_fields=False)
+            with patch(
+                "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
+                return_value=(str(workbook_path), "Excel Files (*.xlsx)"),
+            ):
+                page._handle_load_ipqc_workbook()
+            self._app.processEvents()
+
+        self._select_node(page, "Node 6 - H")
+        requests = [
+            page._parameter_controller.build_parameter_request(definitions["UUID"], 6, "H", "1223303010"),
+            page._parameter_controller.build_parameter_request(definitions["PWM"], 6, "H", "100"),
+        ]
+        calls: list[list[str]] = []
+
+        def fake_verify_parameters(requests_to_verify):
+            names = [request.definition.name for request in requests_to_verify]
+            calls.append(names)
+            if len(calls) == 1:
+                page._handle_parameter_verification_finished(
+                    False,
+                    "PWM read-back verification - expected 100, actual timeout",
+                    [
+                        ParameterVerificationResult(
+                            definition=definitions["UUID"],
+                            expected_text="1223303010",
+                            actual_text="1223303010",
+                            passed=True,
+                            reason="UUID read-back verification",
+                        ),
+                        ParameterVerificationResult(
+                            definition=definitions["PWM"],
+                            expected_text="100",
+                            actual_text="",
+                            passed=False,
+                            reason="PWM read-back verification - expected 100, actual timeout",
+                        ),
+                    ],
+                )
+            else:
+                page._handle_parameter_verification_finished(
+                    True,
+                    "Workbook parameter read-back verification",
+                    [
+                        ParameterVerificationResult(
+                            definition=definitions["PWM"],
+                            expected_text="100",
+                            actual_text="100",
+                            passed=True,
+                            reason="PWM read-back verification",
+                        )
+                    ],
+                )
+            return True
+
+        with patch.object(page, "_build_workbook_parameter_requests", return_value=requests), patch.object(
+            page._parameter_controller,
+            "verify_parameters",
+            side_effect=fake_verify_parameters,
+        ):
+            page._handle_verify_uuid()
+            self._app.processEvents()
+            page._handle_verify_uuid()
+            self._app.processEvents()
+
+        self.assertEqual(calls[0], ["UUID", "PWM"])
+        self.assertEqual(calls[1], ["PWM"])
+        self.assertTrue(page._last_parameter_verification_results_by_name["UUID"].passed)
+        self.assertEqual(page.uuid_section.workbook_validation_text, "Workbook Validation: PASSED")
+
+    @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook guard tests.")
+    def test_parameter_verification_cache_clears_on_workbook_load_node_change_and_written_parameter_update(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+        definitions = {definition.name: definition for definition in default_workbook_parameter_definitions()}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            workbook_path_2 = Path(tmpdir) / "ipqc_2.xlsx"
+            self._create_ipqc_workbook(workbook_path, with_optional_fields=False)
+            self._create_ipqc_workbook(workbook_path_2, with_optional_fields=False)
+            with patch(
+                "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
+                return_value=(str(workbook_path), "Excel Files (*.xlsx)"),
+            ):
+                page._handle_load_ipqc_workbook()
+            self._app.processEvents()
+
+            requests = [
+                page._parameter_controller.build_parameter_request(definitions["UUID"], 6, "H", "1223303010"),
+                page._parameter_controller.build_parameter_request(definitions["PWM"], 6, "H", "100"),
+            ]
+            verify_calls: list[list[str]] = []
+
+            def fake_verify_parameters(requests_to_verify):
+                names = [request.definition.name for request in requests_to_verify]
+                verify_calls.append(names)
+                if names == ["PWM"]:
+                    page._handle_parameter_verification_finished(
+                        True,
+                        "Workbook parameter read-back verification",
+                        [
+                            ParameterVerificationResult(
+                                definition=definitions["PWM"],
+                                expected_text="100",
+                                actual_text="100",
+                                passed=True,
+                                reason="PWM read-back verification",
+                            )
+                        ],
+                    )
+                elif len(verify_calls) == 1:
+                    page._handle_parameter_verification_finished(
+                        False,
+                        "PWM read-back verification - expected 100, actual timeout",
+                        [
+                            ParameterVerificationResult(
+                                definition=definitions["UUID"],
+                                expected_text="1223303010",
+                                actual_text="1223303010",
+                                passed=True,
+                                reason="UUID read-back verification",
+                            ),
+                            ParameterVerificationResult(
+                                definition=definitions["PWM"],
+                                expected_text="100",
+                                actual_text="",
+                                passed=False,
+                                reason="PWM read-back verification - expected 100, actual timeout",
+                            ),
+                        ],
+                    )
+                else:
+                    page._handle_parameter_verification_finished(
+                        True,
+                        "Workbook parameter read-back verification",
+                        [
+                            ParameterVerificationResult(
+                                definition=definitions["UUID"],
+                                expected_text="1223303010",
+                                actual_text="1223303010",
+                                passed=True,
+                                reason="UUID read-back verification",
+                            ),
+                            ParameterVerificationResult(
+                                definition=definitions["PWM"],
+                                expected_text="100",
+                                actual_text="100",
+                                passed=True,
+                                reason="PWM read-back verification",
+                            ),
+                        ],
+                    )
+                return True
+
+            with patch.object(page, "_build_workbook_parameter_requests", return_value=requests), patch.object(
+                page._parameter_controller,
+                "verify_parameters",
+                side_effect=fake_verify_parameters,
+            ):
+                page._handle_verify_uuid()
+                self._app.processEvents()
+
+                with patch(
+                    "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
+                    return_value=(str(workbook_path_2), "Excel Files (*.xlsx)"),
+                ):
+                    page._handle_load_ipqc_workbook()
+                self._app.processEvents()
+
+                page._handle_verify_uuid()
+                self._app.processEvents()
+
+                self._select_node(page, "Node 8 - RZ")
+                page._handle_test_control_node_selected()
+                page._handle_verify_uuid()
+                self._app.processEvents()
+
+            self.assertEqual(verify_calls[0], ["UUID", "PWM"])
+            self.assertEqual(verify_calls[1], ["UUID", "PWM"])
+            self.assertEqual(verify_calls[2], ["UUID", "PWM"])
+            self.assertTrue(page._last_parameter_verification_results_by_name["UUID"].passed)
+            self.assertEqual(page.uuid_section.workbook_validation_text, "Workbook Validation: PASSED")
+
+    @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook guard tests.")
+    def test_parameter_verification_cache_is_invalidated_by_written_parameter_update(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+        definitions = {definition.name: definition for definition in default_workbook_parameter_definitions()}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            self._create_ipqc_workbook(workbook_path, with_optional_fields=False)
+            with patch(
+                "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
+                return_value=(str(workbook_path), "Excel Files (*.xlsx)"),
+            ):
+                page._handle_load_ipqc_workbook()
+            self._app.processEvents()
+
+            requests = [
+                page._parameter_controller.build_parameter_request(definitions["UUID"], 6, "H", "1223303010"),
+                page._parameter_controller.build_parameter_request(definitions["PWM"], 6, "H", "100"),
+            ]
+            verify_calls: list[list[str]] = []
+            write_calls: list[list[str]] = []
+
+            def fake_verify_parameters(requests_to_verify):
+                names = [request.definition.name for request in requests_to_verify]
+                verify_calls.append(names)
+                if len(verify_calls) == 1:
+                    page._handle_parameter_verification_finished(
+                        False,
+                        "PWM read-back verification - expected 100, actual timeout",
+                        [
+                            ParameterVerificationResult(
+                                definition=definitions["UUID"],
+                                expected_text="1223303010",
+                                actual_text="1223303010",
+                                passed=True,
+                                reason="UUID read-back verification",
+                            ),
+                            ParameterVerificationResult(
+                                definition=definitions["PWM"],
+                                expected_text="100",
+                                actual_text="",
+                                passed=False,
+                                reason="PWM read-back verification - expected 100, actual timeout",
+                            ),
+                        ],
+                    )
+                else:
+                    page._handle_parameter_verification_finished(
+                        True,
+                        "Workbook parameter read-back verification",
+                        [
+                            ParameterVerificationResult(
+                                definition=definitions["PWM"],
+                                expected_text="100",
+                                actual_text="100",
+                                passed=True,
+                                reason="PWM read-back verification",
+                            )
+                        ],
+                    )
+                return True
+
+            def fake_write_parameters(requests_to_write):
+                names = [request.definition.name for request in requests_to_write]
+                write_calls.append(names)
+                page._handle_parameter_write_finished(True, "PWM write sent to Node 6 H.")
+                return True, "PWM write sent to Node 6 H."
+
+            with patch.object(page, "_build_workbook_parameter_requests", return_value=requests), patch.object(
+                page._parameter_controller,
+                "verify_parameters",
+                side_effect=fake_verify_parameters,
+            ), patch.object(page._parameter_controller, "write_parameters", side_effect=fake_write_parameters):
+                page._handle_verify_uuid()
+                self._app.processEvents()
+
+                page._handle_write_uuid()
+                self._app.processEvents()
+                self.assertEqual(write_calls[0], ["PWM"])
+
+                page._handle_verify_uuid()
+                self._app.processEvents()
+
+            self.assertEqual(verify_calls[0], ["UUID", "PWM"])
+            self.assertEqual(verify_calls[1], ["PWM"])
+            self.assertTrue(page._last_parameter_verification_results_by_name["UUID"].passed)
+            self.assertEqual(page.uuid_section.workbook_validation_text, "Workbook Validation: PASSED")
+
+    def test_single_axis_return_leg_range_display_uses_opposite_delta(self) -> None:
+        controller = SingleAxisFunctionalTestController(FunctionalTestConfig(reference_sensor="L", opposite_sensor="R"))
+        popup = SingleAxisFunctionalPopup(node_options=[(3, "X")], controller=controller, allow_safe_tx=True)
+        differences: list[int] = []
+        controller.difference_changed = lambda value: differences.append(value)
+
+        controller._state = controller.S_READ_RANGE1
+        controller._wait_for = "getpos_r1"
+        controller._handle_getpos(("G", 2_499_678))
+        self.assertEqual(popup.range_field.text(), "2499678")
+
+        controller._state = controller.S_READ_RANGE2
+        controller._wait_for = "getpos_r2"
+        controller._opposite_pos = 2_499_678
+        controller._range_1 = 2_499_678
+        controller._handle_getpos(("G", -100))
+
+        self.assertEqual(popup.range_field.text(), "2499778")
+        self.assertEqual(differences[-1], 100)
+        popup.close()
 
 
 class _SamplingManualClock:
