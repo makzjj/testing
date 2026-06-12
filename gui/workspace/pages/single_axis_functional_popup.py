@@ -1,8 +1,7 @@
-"""Compact Functional popup shell for future single-axis controller integration.
+"""Compact Functional popup shell for single-axis controller integration.
 
-This UI dialog is intentionally controller-agnostic. It exposes public methods
-that the future functional-test state machine/controller will call to update UI.
-Do not add binary builders/parsers or controller logic here.
+This dialog renders state and emits user actions. Controller and transport
+wiring live outside the widget boundary where practical.
 """
 
 from __future__ import annotations

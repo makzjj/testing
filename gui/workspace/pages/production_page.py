@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 from datetime import datetime
+from dataclasses import dataclass
 from pathlib import Path
 
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal
@@ -71,6 +72,13 @@ WORKBOOK_PARAMETER_DEFINITIONS: dict[str, ParameterDefinition] = {
 }
 
 
+@dataclass
+class _SamplingSession:
+    node_id: int
+    node_name: str
+    runtime_window: object
+
+
 def get_ml20_node_name(node_id: int) -> str:
     """Return the ML 2.0 display name for one node id."""
     return ML20_NODE_MAP.get(node_id, f"Node {node_id}")
@@ -112,11 +120,7 @@ class ProductionPage(BaseWorkspacePage):
         self._sampling_popup: SamplingTestPopup | None = None
         self._single_axis_passed = False
         self._sampling_controller = SamplingTestController(self._ipqc_excel_adapter, SamplingTestConfig())
-        self._sampling_runtime_window = None
-        self._sampling_active = False
-        self._sampling_node_id: int | None = None
-        self._sampling_node_name: str | None = None
-        self._sampling_command_handler = None
+        self._sampling_session: _SamplingSession | None = None
 
         self.stage_section.configuration_requested.connect(self._handle_run_test)
         self.stage_section.single_axis_requested.connect(self._handle_single_axis_test_requested)
@@ -335,7 +339,7 @@ class ProductionPage(BaseWorkspacePage):
         self._refresh_connection_status()
 
     def _handle_stop_test(self) -> None:
-        if self._sampling_active and self._sampling_controller.is_active():
+        if self._sampling_controller.is_active():
             self._sampling_controller.abort_by_user()
             self._refresh_sampling_action_states()
             return
@@ -395,7 +399,7 @@ class ProductionPage(BaseWorkspacePage):
         popup.show()
         popup.raise_()
         popup.activateWindow()
-        if self._sampling_active:
+        if self._sampling_controller.is_active():
             self._refresh_sampling_action_states()
             return
         self._refresh_sampling_action_states()
@@ -403,7 +407,8 @@ class ProductionPage(BaseWorkspacePage):
             try:
                 node_id, node_name = self.test_control_section.selected_node()
             except RuntimeError:
-                node_id, node_name = self._sampling_node_id, self._sampling_node_name
+                node_id = self._sampling_session.node_id if self._sampling_session is not None else None
+                node_name = self._sampling_session.node_name if self._sampling_session is not None else None
             active_group = self._ipqc_excel_adapter.active_sheet_group or "-"
             if node_id is not None and node_name and active_group != "-":
                 try:
@@ -421,7 +426,7 @@ class ProductionPage(BaseWorkspacePage):
                 self.progress_section.append_step(reason, level="warning")
 
     def _handle_sampling_popup_start_requested(self) -> None:
-        if self._sampling_active:
+        if self._sampling_controller.is_active():
             popup = self._ensure_sampling_popup()
             popup.show()
             popup.raise_()
@@ -490,9 +495,7 @@ class ProductionPage(BaseWorkspacePage):
             return
 
         popup = self._ensure_sampling_popup()
-        self._sampling_node_id = node_id
-        self._sampling_node_name = node_name
-        self._sampling_runtime_window = runtime_window
+        self._sampling_session = _SamplingSession(node_id=node_id, node_name=node_name, runtime_window=runtime_window)
         popup.set_context(node_id, node_name, layout.sheet_name)
         selected_pwm_values = popup.selected_pwm_values()
         selected_samples_per_pwm = popup.selected_samples_per_pwm()
@@ -504,7 +507,6 @@ class ProductionPage(BaseWorkspacePage):
         popup.raise_()
         popup.activateWindow()
         self._attach_sampling_runtime_window(runtime_window)
-        self._sampling_active = True
         try:
             started = self._sampling_controller.start(
                 node_id,
@@ -516,9 +518,7 @@ class ProductionPage(BaseWorkspacePage):
             )
         except Exception as exc:
             reason = f"Sampling failed to start: {exc}"
-            self._sampling_active = False
-            self._sampling_node_id = None
-            self._sampling_node_name = None
+            self._sampling_session = None
             self._detach_sampling_runtime_window()
             self.console_message.emit(f"[Production] {reason}")
             self.progress_section.append_step(reason, level="error")
@@ -532,9 +532,7 @@ class ProductionPage(BaseWorkspacePage):
             self._refresh_sampling_action_states()
             return
         if not started:
-            self._sampling_active = False
-            self._sampling_node_id = None
-            self._sampling_node_name = None
+            self._sampling_session = None
             self._detach_sampling_runtime_window()
             if self._sampling_popup is not None:
                 self._sampling_popup.set_status_text("Sampling did not start.")
@@ -547,7 +545,6 @@ class ProductionPage(BaseWorkspacePage):
                 self._set_status_result("READY", "Sampling did not start.")
             return
 
-        self._sampling_active = True
         self.console_message.emit(
             f"[Production] Sampling start requested for Node {node_id} {node_name} using sheet {layout.sheet_name}"
         )
@@ -556,8 +553,6 @@ class ProductionPage(BaseWorkspacePage):
         self._set_status_result("TESTING", f"Sampling started for Node {node_id} {node_name}")
         self.stage_section.set_stage_status("sampling", "testing")
         if self._sampling_popup is not None:
-            self._sampling_popup.set_state_text("HOME_WAIT_TPOS")
-            self._sampling_popup.set_status_text("Moving to home using TPOS 0")
             self._sampling_popup.set_final_status("RUNNING")
             self._sampling_popup.set_stop_available(True)
         self._refresh_sampling_action_states()
@@ -581,7 +576,8 @@ class ProductionPage(BaseWorkspacePage):
         try:
             node_id, node_name = self.test_control_section.selected_node()
         except RuntimeError:
-            node_id, node_name = self._sampling_node_id, self._sampling_node_name
+            node_id = self._sampling_session.node_id if self._sampling_session is not None else None
+            node_name = self._sampling_session.node_name if self._sampling_session is not None else None
         sheet_name = "-"
         if self._ipqc_excel_adapter.has_loaded_workbook():
             try:
@@ -592,12 +588,10 @@ class ProductionPage(BaseWorkspacePage):
                 sheet_name = "-"
         popup.set_context(node_id, node_name, sheet_name)
         popup.set_start_available(
-            self.stage_section._rows.get("sampling", (None, None))[1].isEnabled()
-            if "sampling" in self.stage_section._rows
-            else False,
-            self.stage_section._rows.get("sampling", (None, None))[1].toolTip() if "sampling" in self.stage_section._rows else "",
+            self.stage_section.stage_enabled("sampling"),
+            self.stage_section.stage_tooltip("sampling"),
         )
-        popup.set_stop_available(self._sampling_active)
+        popup.set_stop_available(self._sampling_controller.is_active())
 
     def _attach_sampling_runtime_window(self, runtime_window) -> None:
         if runtime_window is None or not hasattr(runtime_window, "packet_received"):
@@ -608,24 +602,24 @@ class ProductionPage(BaseWorkspacePage):
             pass
 
     def _detach_sampling_runtime_window(self) -> None:
-        runtime_window = self._sampling_runtime_window
+        runtime_window = self._sampling_session.runtime_window if self._sampling_session is not None else None
         if runtime_window is not None and hasattr(runtime_window, "packet_received"):
             try:
                 runtime_window.packet_received.disconnect(self._sampling_controller.handle_runtime_packet)
             except (TypeError, RuntimeError):
                 pass
-        self._sampling_runtime_window = None
+        self._sampling_session = None
 
     def _send_sampling_command(self, payload: list[int]) -> None:
-        runtime_window = self._sampling_runtime_window
+        runtime_window = self._sampling_session.runtime_window if self._sampling_session is not None else None
         backend_client = getattr(runtime_window, "backend_client", None) if runtime_window is not None else None
         if runtime_window is None or backend_client is None or not backend_client.is_connected():
             raise RuntimeError("Sampling runtime transport is not connected.")
-        if self._sampling_node_id is None:
+        if self._sampling_session is None:
             raise RuntimeError("Sampling node is not selected.")
-        backend_client.send_command_bytes(self._sampling_node_id, list(payload))
+        backend_client.send_command_bytes(self._sampling_session.node_id, list(payload))
         hex_str = " ".join(f"{byte:02X}" for byte in payload)
-        self._handle_sampling_packet_message(f"[TX] Node {self._sampling_node_id}: {hex_str}")
+        self._handle_sampling_packet_message(f"[TX] Node {self._sampling_session.node_id}: {hex_str}")
 
     def _handle_sampling_log(self, text: str) -> None:
         self.console_message.emit(text)
@@ -709,9 +703,6 @@ class ProductionPage(BaseWorkspacePage):
         self._sampling_popup.append_operator_log(message)
 
     def _handle_sampling_completed(self) -> None:
-        self._sampling_active = False
-        self._sampling_node_id = None
-        self._sampling_node_name = None
         self._detach_sampling_runtime_window()
         self._set_status_result("PASS", "Sampling completed")
         self.stage_section.set_stage_status("sampling", "pass")
@@ -724,9 +715,6 @@ class ProductionPage(BaseWorkspacePage):
         self._refresh_sampling_action_states()
 
     def _handle_sampling_failed(self, reason: str) -> None:
-        self._sampling_active = False
-        self._sampling_node_id = None
-        self._sampling_node_name = None
         self._detach_sampling_runtime_window()
         self._set_status_result("FAIL", reason)
         self.stage_section.set_stage_status("sampling", "fail")
@@ -746,9 +734,6 @@ class ProductionPage(BaseWorkspacePage):
         self._refresh_sampling_action_states()
 
     def _handle_sampling_aborted(self, reason: str) -> None:
-        self._sampling_active = False
-        self._sampling_node_id = None
-        self._sampling_node_name = None
         self._detach_sampling_runtime_window()
         self._set_status_result("ABORTED", reason)
         self.stage_section.set_stage_status("sampling", "fail")
@@ -768,7 +753,7 @@ class ProductionPage(BaseWorkspacePage):
         self._refresh_sampling_action_states()
 
     def _handle_clear_result(self) -> None:
-        if self._sampling_active and self._sampling_controller.is_active():
+        if self._sampling_controller.is_active():
             self._sampling_controller.abort_by_user()
         elif self._test_controller.is_active():
             self._test_controller.abort_test()
@@ -1494,7 +1479,7 @@ class ProductionPage(BaseWorkspacePage):
             and self._ipqc_excel_adapter.has_loaded_workbook()
             and serial_connected
             and node_selected
-            and not self._sampling_active
+            and not self._sampling_controller.is_active()
             and not self._test_controller.is_active()
         )
         if not self._single_axis_passed:
@@ -1505,7 +1490,7 @@ class ProductionPage(BaseWorkspacePage):
             reason = "Connect the serial link before starting Sampling."
         elif not node_selected:
             reason = "Select a node before starting Sampling."
-        elif self._sampling_active:
+        elif self._sampling_controller.is_active():
             reason = "Sampling is already running."
         elif self._test_controller.is_active():
             reason = "Stop the active Production test before starting Sampling."
@@ -1521,9 +1506,9 @@ class ProductionPage(BaseWorkspacePage):
                 reason = f"Sampling workbook is not ready: {exc}"
         self.stage_section.set_stage_enabled("sampling", enabled, reason)
         if self._sampling_popup is not None:
-            popup_enabled = bool(enabled and not self._sampling_active)
+            popup_enabled = bool(enabled and not self._sampling_controller.is_active())
             self._sampling_popup.set_start_available(popup_enabled, reason)
-            self._sampling_popup.set_stop_available(self._sampling_active)
+            self._sampling_popup.set_stop_available(self._sampling_controller.is_active())
             self._sampling_popup.set_sampling_configuration_enabled(not self._sampling_controller.is_active())
             try:
                 active_group = self._ipqc_excel_adapter.active_sheet_group
@@ -1533,7 +1518,8 @@ class ProductionPage(BaseWorkspacePage):
             try:
                 node_id, node_name = self.test_control_section.selected_node()
             except RuntimeError:
-                node_id, node_name = self._sampling_node_id, self._sampling_node_name
+                node_id = self._sampling_session.node_id if self._sampling_session is not None else None
+                node_name = self._sampling_session.node_name if self._sampling_session is not None else None
             self._sampling_popup.set_context(node_id, node_name, sheet_name)
 
     def _get_supported_workbook_parameter_definitions(self) -> tuple[list[ParameterDefinition], str | None]:
@@ -2116,6 +2102,18 @@ class _TestStagesSection(PanelFrame):
             button.setToolTip("Start Test")
         else:
             button.setToolTip(reason or "Stage is not available.")
+
+    def stage_enabled(self, key: str) -> bool:
+        row = self._rows.get(key)
+        if row is None:
+            return False
+        return row[1].isEnabled()
+
+    def stage_tooltip(self, key: str) -> str:
+        row = self._rows.get(key)
+        if row is None:
+            return ""
+        return row[1].toolTip()
 
 
 class _NodeStatusSection(PanelFrame):

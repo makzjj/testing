@@ -264,9 +264,9 @@ class SamplingTestPopup(QDialog):
 
     def prepare_for_run(self, *, total_samples: int, total_measurements: int) -> None:
         self._current_total_samples = int(total_samples)
-        self.set_state_text("HOME_WAIT_RUN_ACK")
-        self.set_status_text("Sampling started")
-        self.set_final_status("RUNNING")
+        self.set_state_text("IDLE")
+        self.set_status_text("Idle")
+        self.set_final_status("IDLE")
         self.set_reason_text("-", tone="neutral")
         self.set_current_pwm("-")
         self.set_current_direction("Setup")

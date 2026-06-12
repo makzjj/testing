@@ -2572,6 +2572,11 @@ class SamplingPageIntegrationTests(unittest.TestCase):
     def _sampling_stage_button(self, page: ProductionPage) -> QPushButton:
         return page.stage_section._rows["sampling"][1]
 
+    @staticmethod
+    def _mark_sampling_controller_running(controller, *args, **kwargs) -> bool:
+        controller._running = True
+        return True
+
     def test_sampling_cannot_start_before_single_axis_pass(self) -> None:
         runtime_window = _FakeRuntimeWindow()
         bridge = _FakeBridge(runtime_window)
@@ -2678,7 +2683,12 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             self._enable_single_axis_pass(page)
             ProductionPageWorkflowTests._select_node(page, "Node 6 - H")
 
-            with patch.object(SamplingTestController, "start", autospec=True, return_value=True):
+            with patch.object(
+                SamplingTestController,
+                "start",
+                autospec=True,
+                side_effect=self._mark_sampling_controller_running,
+            ):
                 page._handle_start_sampling_requested()
                 self._app.processEvents()
                 assert page._sampling_popup is not None
@@ -2766,11 +2776,12 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             self._enable_single_axis_pass(page)
             ProductionPageWorkflowTests._select_node(page, "Node 6 - H")
 
-            with patch.object(SamplingTestController, "start", autospec=True, return_value=True), patch.object(
-                page._sampling_controller,
-                "is_active",
-                return_value=True,
-            ), patch.object(page._sampling_controller, "_running", True):
+            with patch.object(
+                SamplingTestController,
+                "start",
+                autospec=True,
+                side_effect=self._mark_sampling_controller_running,
+            ):
                 page._handle_start_sampling_requested()
                 self._app.processEvents()
                 assert page._sampling_popup is not None
@@ -3013,8 +3024,8 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         self.assertFalse(popup.start_button.isEnabled())
         self.assertTrue(popup.stop_button.isEnabled())
         self.assertEqual(popup.final_status_value.text(), "RUNNING")
-        self.assertEqual(popup.state_value.text(), "HOME_WAIT_TPOS")
-        self.assertEqual(popup.status_value.text(), "Moving to home using TPOS 0")
+        self.assertEqual(popup.state_value.text(), "HOME_WAIT_VEL_ACK")
+        self.assertEqual(popup.status_value.text(), "Setting home velocity")
 
     def test_popup_selected_configuration_drives_pwm_90_debug_run(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -3187,13 +3198,19 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         self.assertFalse(popup.start_button.isEnabled())
         self.assertTrue(popup.stop_button.isEnabled())
 
+        page._sampling_controller._running = False
         page._handle_sampling_completed()
         self._app.processEvents()
         self.assertTrue(self._sampling_stage_button(page).isEnabled())
         self.assertTrue(popup.start_button.isEnabled())
         self.assertFalse(popup.stop_button.isEnabled())
 
-        with patch.object(SamplingTestController, "start", autospec=True, return_value=True):
+        with patch.object(
+            SamplingTestController,
+            "start",
+            autospec=True,
+            side_effect=self._mark_sampling_controller_running,
+        ):
             page._handle_start_sampling_requested()
             self._app.processEvents()
             assert page._sampling_popup is not None
@@ -3202,13 +3219,19 @@ class SamplingPageIntegrationTests(unittest.TestCase):
 
         assert page._sampling_popup is not None
         popup = page._sampling_popup
+        page._sampling_controller._running = False
         page._handle_sampling_failed("boom")
         self._app.processEvents()
         self.assertTrue(self._sampling_stage_button(page).isEnabled())
         self.assertTrue(popup.start_button.isEnabled())
         self.assertFalse(popup.stop_button.isEnabled())
 
-        with patch.object(SamplingTestController, "start", autospec=True, return_value=True):
+        with patch.object(
+            SamplingTestController,
+            "start",
+            autospec=True,
+            side_effect=self._mark_sampling_controller_running,
+        ):
             page._handle_start_sampling_requested()
             self._app.processEvents()
             assert page._sampling_popup is not None
@@ -3217,6 +3240,7 @@ class SamplingPageIntegrationTests(unittest.TestCase):
 
         assert page._sampling_popup is not None
         popup = page._sampling_popup
+        page._sampling_controller._running = False
         page._handle_sampling_aborted("stop")
         self._app.processEvents()
         self.assertTrue(self._sampling_stage_button(page).isEnabled())
@@ -3235,10 +3259,11 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             self._enable_single_axis_pass(page)
             ProductionPageWorkflowTests._select_node(page, "Node 6 - H")
 
-            with patch.object(SamplingTestController, "start", autospec=True, return_value=True), patch.object(
-                page._sampling_controller,
-                "is_active",
-                return_value=True,
+            with patch.object(
+                SamplingTestController,
+                "start",
+                autospec=True,
+                side_effect=self._mark_sampling_controller_running,
             ), patch.object(page._sampling_controller, "abort_by_user", return_value=True) as abort_mock:
                 page._handle_start_sampling_requested()
                 self._app.processEvents()
@@ -3265,10 +3290,11 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             self._enable_single_axis_pass(page)
             ProductionPageWorkflowTests._select_node(page, "Node 6 - H")
 
-            with patch.object(SamplingTestController, "start", autospec=True, return_value=True), patch.object(
-                page._sampling_controller,
-                "is_active",
-                return_value=True,
+            with patch.object(
+                SamplingTestController,
+                "start",
+                autospec=True,
+                side_effect=self._mark_sampling_controller_running,
             ), patch.object(page._sampling_controller, "abort_by_user", return_value=True) as abort_mock:
                 page._handle_start_sampling_requested()
                 self._app.processEvents()
@@ -3300,11 +3326,12 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             self._enable_single_axis_pass(page)
             ProductionPageWorkflowTests._select_node(page, "Node 6 - H")
 
-            with patch.object(SamplingTestController, "start", autospec=True, return_value=True) as start_mock, patch.object(
-                page._sampling_controller,
-                "is_active",
-                return_value=True,
-            ):
+            with patch.object(
+                SamplingTestController,
+                "start",
+                autospec=True,
+                side_effect=self._mark_sampling_controller_running,
+            ) as start_mock:
                 page._handle_start_sampling_requested()
                 self._app.processEvents()
                 self.assertTrue(page._sampling_popup is not None and page._sampling_popup.isVisible())
@@ -4304,6 +4331,21 @@ class SamplingControllerTests(unittest.TestCase):
         self.assertEqual(build_run(-90), [0x88, 0xFF, 0xA6])
         self.assertEqual(build_run(-190), [0x88, 0xFF, 0x42])
         self.assertEqual(build_vel(80), [0x84, 0x00, 0x50])
+
+    def test_sampling_controller_owns_state_sequence_for_home_startup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            adapter = self._build_adapter(tmpdir)
+            clock = _SamplingManualClock([0.0])
+            controller = _RecordingSamplingController(
+                adapter,
+                SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=1),
+                clock,
+            )
+
+            self.assertTrue(controller.start(8, "RZ"))
+            self.assertEqual(controller.states[0], "HOME_WAIT_VEL_ACK")
+            controller.handle_runtime_packet([0x84, 0x53, 0x00, 0x50])
+            self.assertIn("HOME_WAIT_TPOS", controller.states)
 
     def test_sampling_home_tpos_accepts_l_sensor_without_dd(self) -> None:
         for home_packet in ([0x81, 0x4C], [0x81, 0x5A, 0x4C]):
