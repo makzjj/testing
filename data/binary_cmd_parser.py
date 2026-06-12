@@ -315,6 +315,18 @@ def decode_command(cmd, params):
                 vel = int.from_bytes(bytes(params[1:3]), byteorder='big', signed=True)
                 return ("run_started", vel)
         return ("run_started", None)
+    elif cmd == 0x84:
+        # Velocity/PWM ACKs (support both live and legacy formats):
+        # - Live:   53 <vel_hi> <vel_lo>
+        # - Legacy: 53 84 <vel_hi> <vel_lo>
+        if len(params) >= 1 and params[0] == 0x53:
+            if len(params) >= 4 and params[1] == 0x84:
+                vel = int.from_bytes(bytes(params[2:4]), byteorder="big", signed=True)
+                return ("velocity_ack", vel)
+            if len(params) >= 3:
+                vel = int.from_bytes(bytes(params[1:3]), byteorder="big", signed=True)
+                return ("velocity_ack", vel)
+        return ("velocity_ack", None)
     elif cmd == 0xC3:
         # HUNTING results: 41=Accepted, 4E=Rejected/NACK, 54=Timeout
         if not params:

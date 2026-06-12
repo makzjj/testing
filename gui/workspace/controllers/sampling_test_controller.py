@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 import time
 
-from data.binary_cmd_builders import build_getpos, build_run, build_stopmotor, build_tpos
+from data.binary_cmd_builders import build_getpos, build_run, build_stopmotor, build_tpos, build_vel
 from data.binary_cmd_parser import decode_command
 from services.ipqc_excel_adapter import IpqcExcelAdapter, SamplingWorkbookLayout
 
@@ -37,6 +37,7 @@ class SamplingTestController:
     """State machine that drives sampling motion and writes workbook results."""
 
     S_IDLE = "IDLE"
+    S_HOME_WAIT_VEL_ACK = "HOME_WAIT_VEL_ACK"
     S_HOME_WAIT_TPOS = "HOME_WAIT_TPOS"
     S_HOME_WAIT_SENSOR = "HOME_WAIT_L_SENSOR"
     S_HOME_WAIT_GETPOS = "HOME_WAIT_GETPOS"
@@ -249,7 +250,7 @@ class SamplingTestController:
 
         self._reset_runtime_state()
         self._running = True
-        self._state = self.S_HOME_WAIT_TPOS
+        self._state = self.S_HOME_WAIT_VEL_ACK
         self.state_changed(self._state)
         self.status_changed("Sampling started")
         self.log_message(
@@ -257,10 +258,10 @@ class SamplingTestController:
         )
         self._current_direction = "HOME"
         self.current_direction_changed(self._current_direction)
-        self._expected_response_description = "TPOS home completion"
-        self._wait_for = "tpos_status"
-        self.status_changed("Moving to home using TPOS 0")
-        self.command_requested(build_tpos(0))
+        self._expected_response_description = "VEL ACK for home startup"
+        self._wait_for = "vel_ack"
+        self.status_changed("Setting home velocity")
+        self.command_requested(build_vel(80))
         return True
 
     def stop(self) -> bool:
@@ -313,6 +314,9 @@ class SamplingTestController:
             )
             return
 
+        if decoded_kind == "velocity_ack":
+            self._handle_velocity_ack(decoded_value)
+            return
         if decoded_kind == "run_started":
             self._handle_run_started(decoded_value)
             return
@@ -443,6 +447,33 @@ class SamplingTestController:
             f"Waiting for {expected_sensor} sensor event: PWM {self._current_pwm}, sample {self._current_sample_index}, direction {self._current_direction}"
         )
 
+    def _handle_velocity_ack(self, value: object) -> None:
+        if self._state != self.S_HOME_WAIT_VEL_ACK or self._wait_for != "vel_ack":
+            self._fail_with_stop(
+                self._build_unexpected_packet_reason(
+                    "VEL", self._expected_response_description or "velocity ACK"
+                )
+            )
+            return
+        if value is None:
+            self._fail_with_stop(
+                self._build_unexpected_packet_reason(
+                    "VEL", self._expected_response_description or "velocity ACK"
+                )
+            )
+            return
+        if int(value) != 80:
+            self._fail_with_stop(
+                f"Unexpected home velocity ACK {value}; expected 80."
+            )
+            return
+
+        self._set_state(self.S_HOME_WAIT_TPOS)
+        self._wait_for = "tpos_status"
+        self._expected_response_description = "TPOS home completion"
+        self.status_changed("Moving to home using TPOS 0")
+        self.command_requested(build_tpos(0))
+
     def _handle_tpos_status(self, value: dict | None) -> None:
         if not isinstance(value, dict) or "event" not in value:
             self._fail_with_stop(
@@ -471,6 +502,20 @@ class SamplingTestController:
                 self._set_state(self.S_HOME_WAIT_GETPOS)
                 self._expected_response_description = "GETPOS response for home position"
                 self.status_changed("Reading home position")
+                self.command_requested(build_getpos())
+                return
+            if event == "L":
+                self._wait_for = "getpos"
+                self._set_state(self.S_HOME_WAIT_GETPOS)
+                self._expected_response_description = "GETPOS response for home position"
+                self.status_changed("Home sensor reached; reading home position")
+                self.command_requested(build_getpos())
+                return
+            if event == "Z" and value.get("by") == "L":
+                self._wait_for = "getpos"
+                self._set_state(self.S_HOME_WAIT_GETPOS)
+                self._expected_response_description = "GETPOS response for home position"
+                self.status_changed("Home sensor reached; reading home position")
                 self.command_requested(build_getpos())
                 return
             self._fail_with_stop(

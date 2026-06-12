@@ -4,6 +4,7 @@ from data.binary_cmd_builders import (
     build_hunting_timeout,
     build_getpos,
     build_run,
+    build_vel,
     build_tpos,
     build_stopmotor,
     build_nodeconfig_query_payload,
@@ -30,6 +31,9 @@ class BinaryCommandBuilderTests(unittest.TestCase):
 
     def test_run_builder_negative_190(self):
         self.assertEqual(build_run(-190), [0x88, 0xFF, 0x42])
+
+    def test_vel_builder_positive_80(self):
+        self.assertEqual(build_vel(80), [0x84, 0x00, 0x50])
 
     def test_tpos_builder_positive_5000(self):
         self.assertEqual(build_tpos(5000), [0x81, 0x00, 0x00, 0x13, 0x88])
@@ -72,6 +76,11 @@ class BinaryCommandParserTests(unittest.TestCase):
         cmd2, val2 = decode_command(0x88, [0x53, 0x84, 0xFF, 0x42])
         self.assertEqual(cmd2, 'run_started')
         self.assertEqual(val2, -190)
+
+    def test_velocity_ack_decode(self):
+        cmd, val = decode_command(0x84, [0x53, 0x00, 0x50])
+        self.assertEqual(cmd, 'velocity_ack')
+        self.assertEqual(val, 80)
 
     def test_hunting_status_decode(self):
         self.assertEqual(decode_command(0xC3, [0x41]), ('hunting', 'accepted'))

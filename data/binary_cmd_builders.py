@@ -33,6 +33,14 @@ def build_run(velocity: int) -> list[int]:
     return [0x88, hi, lo]
 
 
+def build_vel(velocity: int) -> list[int]:
+    if not isinstance(velocity, int):
+        raise TypeError("velocity must be int")
+    vel = velocity & 0xFFFF
+    hi, lo = _twos_complement_16(vel)
+    return [0x84, hi, lo]
+
+
 def build_tpos(position: int) -> list[int]:
     if not isinstance(position, int):
         raise TypeError("position must be int")
