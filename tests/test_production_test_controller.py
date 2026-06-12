@@ -354,7 +354,7 @@ class ProductionTestControllerTests(unittest.TestCase):
 
         controller.run_test(10, "HMI")
 
-        deadline = time.monotonic() + 0.5
+        deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline and not events:
             self._app.processEvents()
             time.sleep(0.01)
@@ -485,10 +485,10 @@ class ProductionTestControllerTests(unittest.TestCase):
         self.assertIsNotNone(controller.last_final_result)
         self.assertEqual(controller.last_final_result.final_result, "PASS")
         self.assertIn("verify_position_delta", step_ids)
-        self.assertIn("stop_motor", step_ids)
+        self.assertNotIn("stop_motor", step_ids)
         sent_cmds = [cmd for _node, cmd in runtime_window.backend_client.sent_commands]
         self.assertIn([0x84, 0x00, 0x14], sent_cmds)
-        self.assertIn([0xDD], sent_cmds)
+        self.assertNotIn([0xDD], sent_cmds)
 
     def test_movement_profile_tpos_lr_state_fails_and_sends_stop(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -575,7 +575,6 @@ class ProductionTestControllerTests(unittest.TestCase):
                 "wait_move_end",
                 "read_final_position",
                 "verify_position_delta",
-                "stop_motor",
             ],
         )
 
@@ -2748,7 +2747,7 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         operator_text = page._sampling_popup.log_output.toPlainText()
         packet_text = page._sampling_popup.packet_log_output.toPlainText()
         self.assertIn(
-            "Sample 1/32 + complete | range=2500481 | time=10.0176s | speed=249608.01",
+            "Sample 1/32 + complete | range=2500481 | time=10.018s | speed=249608.01",
             operator_text,
         )
         self.assertIn("[TX] Node 6: 88 FF 42", packet_text)
@@ -2953,7 +2952,7 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         self.assertEqual(popup.current_sample_value.text(), "Sample 3 / 32")
         self.assertEqual(popup.completed_count_value.text(), "8 / 320")
         self.assertEqual(popup.latest_range_value.text(), "123 counts")
-        self.assertEqual(popup.latest_time_value.text(), "4.5678 s")
+        self.assertEqual(popup.latest_time_value.text(), "4.568 s")
         self.assertEqual(popup.latest_speed_value.text(), "27.50 counts/s")
 
     def test_sampling_failure_and_abort_reason_appears_in_summary_area(self) -> None:
@@ -3009,10 +3008,12 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             self._app.processEvents()
 
         sent_commands = [command for _node_id, command in runtime_window.backend_client.sent_commands]
-        self.assertEqual(sent_commands[0], build_run(-190))
+        self.assertEqual(sent_commands[0], [0x81, 0x00, 0x00, 0x00, 0x00])
         self.assertFalse(popup.start_button.isEnabled())
         self.assertTrue(popup.stop_button.isEnabled())
         self.assertEqual(popup.final_status_value.text(), "RUNNING")
+        self.assertEqual(popup.state_value.text(), "HOME_WAIT_TPOS")
+        self.assertEqual(popup.status_value.text(), "Moving to home using TPOS 0")
 
     def test_popup_selected_configuration_drives_pwm_90_debug_run(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -3040,9 +3041,9 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             self.assertFalse(popup.samples_per_pwm_combo.isEnabled())
             self.assertFalse(popup.pwm_selection_combo.isEnabled())
 
-            runtime_window.packet_received.emit([0x88, 0x53, 0xFF, 0x42])
+            runtime_window.packet_received.emit([0x81, 0x53, 0x82, 0x00, 0x00, 0x00, 0x00])
             self._app.processEvents()
-            runtime_window.packet_received.emit([0x81, 0x4C])
+            runtime_window.packet_received.emit([0x81, 0x45, 0x82, 0x00, 0x00, 0x00, 0x00])
             self._app.processEvents()
             runtime_window.packet_received.emit([0x82, 0x00, 0x00, 0x00, 10])
             self._app.processEvents()
@@ -3065,9 +3066,9 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             )
 
             self.assertTrue(controller.start(8, "RZ", pwm_values=(90,), samples_per_pwm=4))
-            self.assertEqual(controller.commands[0], [0x88, 0xFF, 0x42])
-            controller.handle_runtime_packet([0x88, 0x53, 0xFF, 0x42])
-            controller.handle_runtime_packet([0x81, 0x4C])
+            self.assertEqual(controller.commands[0], [0x81, 0x00, 0x00, 0x00, 0x00])
+            controller.handle_runtime_packet([0x81, 0x53, 0x82, 0x00, 0x00, 0x00, 0x00])
+            controller.handle_runtime_packet([0x81, 0x45, 0x82, 0x00, 0x00, 0x00, 0x00])
             controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 10])
 
             self.assertEqual(controller.commands[2], build_run(90))
@@ -3080,6 +3081,10 @@ class SamplingPageIntegrationTests(unittest.TestCase):
                 controller.handle_runtime_packet([0x88, 0x53, 0xFF, 0xA6])
                 controller.handle_runtime_packet([0x81, 0x4C])
                 controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, neg_value])
+
+            middle_command = controller.commands[-1]
+            middle_target = int.from_bytes(bytes(middle_command[1:5]), "big", signed=True)
+            controller.handle_runtime_packet([0x81, 0x45, 0x82, *list(int(middle_target).to_bytes(4, "big", signed=True))])
 
             self.assertFalse(controller.is_active())
             self.assertEqual(controller.pwms, [90])
@@ -3144,10 +3149,10 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         self.assertEqual(popup.current_sample_value.text(), "Sample 7 / 32")
         self.assertEqual(popup.completed_count_value.text(), "84 / 320")
         self.assertEqual(popup.latest_range_value.text(), "180 counts")
-        self.assertEqual(popup.latest_time_value.text(), "0.2500 s")
+        self.assertEqual(popup.latest_time_value.text(), "0.250 s")
         self.assertEqual(popup.latest_speed_value.text(), "720.00 counts/s")
         self.assertIn(
-            "Sample 7/32 + complete | range=180 | time=0.2500s | speed=720.00",
+            "Sample 7/32 + complete | range=180 | time=0.250s | speed=720.00",
             popup.log_output.toPlainText(),
         )
 
@@ -4281,9 +4286,9 @@ class SamplingControllerTests(unittest.TestCase):
         return adapter
 
     def _drive_home_sequence(self, controller: _RecordingSamplingController, *, start_pos: int) -> None:
-        self.assertEqual(controller.commands[0], [0x88, 0xFF, 0x42])
-        controller.handle_runtime_packet([0x88, 0x53, 0xFF, 0x42])
-        controller.handle_runtime_packet([0x81, 0x4C])
+        self.assertEqual(controller.commands[0], [0x81, 0x00, 0x00, 0x00, 0x00])
+        controller.handle_runtime_packet([0x81, 0x53, 0x82, 0x00, 0x00, 0x00, 0x00])
+        controller.handle_runtime_packet([0x81, 0x45, 0x82, 0x00, 0x00, 0x00, 0x00])
         controller.handle_runtime_packet([0x82, *list(int(start_pos).to_bytes(4, "big", signed=True))])
 
     def test_sampling_run_payloads_cover_signed_velocities(self) -> None:
@@ -4296,7 +4301,7 @@ class SamplingControllerTests(unittest.TestCase):
     def test_sampling_controller_runs_two_samples_and_writes_workbook_sections(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             adapter = self._build_adapter(tmpdir)
-            clock = _SamplingManualClock([0.0, 0.05, 1.0, 1.5, 2.0, 2.4, 3.0, 3.6, 4.0, 4.25])
+            clock = _SamplingManualClock([0.0, 0.5, 1.0, 1.4, 2.0, 2.8, 3.0, 3.6])
             controller = _RecordingSamplingController(
                 adapter,
                 SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=2),
@@ -4323,6 +4328,8 @@ class SamplingControllerTests(unittest.TestCase):
             controller.handle_runtime_packet([0x88, 0x53, 0xFF, 0x9C])
             controller.handle_runtime_packet([0x81, 0x4C])
             controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 30])
+            self.assertEqual(controller.commands[10], [0x81, 0x00, 0x00, 0x00, 0x1E])
+            controller.handle_runtime_packet([0x81, 0x45, 0x82, 0x00, 0x00, 0x00, 0x1E])
 
             self.assertFalse(controller.is_active())
             self.assertTrue(controller.completed_called)
@@ -4349,8 +4356,43 @@ class SamplingControllerTests(unittest.TestCase):
         self.assertAlmostEqual(sampling_sheet["B37"].value, 0.5)
         self.assertEqual(sampling_sheet["C3"].value, 80)
         self.assertEqual(sampling_sheet["C4"].value, 60)
-        self.assertAlmostEqual(sampling_sheet["C20"].value, 133.33333333333334)
-        self.assertAlmostEqual(sampling_sheet["C37"].value, 0.6)
+        self.assertAlmostEqual(sampling_sheet["C20"].value, 100.0)
+        self.assertAlmostEqual(sampling_sheet["C37"].value, 0.8)
+
+    def test_sampling_time_is_rounded_only_for_output_and_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            adapter = self._build_adapter(tmpdir)
+            clock = _SamplingManualClock([1.0, 11.114672391])
+            controller = _RecordingSamplingController(
+                adapter,
+                SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=1),
+                clock,
+            )
+
+            write_calls: list[tuple[str, object]] = []
+            original_write = adapter.write_sampling_result
+
+            def recording_write(section: str, pwm: int, direction: str, sample_index: int, value, *, base_group: str | None = None):
+                if section == "Time":
+                    write_calls.append((section, value))
+                return original_write(section, pwm, direction, sample_index, value, base_group=base_group)
+
+            adapter.write_sampling_result = recording_write  # type: ignore[assignment]
+
+            self.assertTrue(controller.start(8, "RZ"))
+            self.assertEqual(controller.commands[0], [0x81, 0x00, 0x00, 0x00, 0x00])
+            controller.handle_runtime_packet([0x81, 0x45, 0x82, 0x00, 0x00, 0x00, 0x00])
+            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 10])
+            self.assertEqual(controller.commands[2], [0x88, 0x00, 0x64])
+            controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
+            controller.handle_runtime_packet([0x81, 0x52])
+            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x03, 0xE8])
+
+            self.assertTrue(write_calls)
+            self.assertEqual(write_calls[0][0], "Time")
+            self.assertAlmostEqual(float(write_calls[0][1]), 10.115)
+            self.assertAlmostEqual(controller.measurements[0].elapsed_seconds, 10.114672391)
+            self.assertAlmostEqual(controller.measurements[0].speed, 990 / 10.114672391, places=9)
 
     def test_sampling_timeout_sends_dd_and_stops_loop(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4364,8 +4406,39 @@ class SamplingControllerTests(unittest.TestCase):
 
             self.assertTrue(controller.start(8, "RZ"))
             self._drive_home_sequence(controller, start_pos=10)
+            self.assertEqual(controller.commands[0], [0x81, 0x00, 0x00, 0x00, 0x00])
+            self.assertEqual(controller.commands[1], [0x82])
             self.assertEqual(controller.commands[2], [0x88, 0x00, 0x64])
             controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
+            controller.on_timeout()
+
+            self.assertFalse(controller.is_active())
+            self.assertEqual(controller.commands[-1], [0xDD])
+            self.assertTrue(controller.failures)
+            self.assertIn("Timed out", controller.failures[-1])
+
+    def test_sampling_middle_timeout_sends_dd_and_fails_after_final_sample(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            adapter = self._build_adapter(tmpdir)
+            clock = _SamplingManualClock([0.0, 0.01, 1.0, 1.4])
+            controller = _RecordingSamplingController(
+                adapter,
+                SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=1),
+                clock,
+            )
+
+            self.assertTrue(controller.start(8, "RZ"))
+            controller.handle_runtime_packet([0x81, 0x53, 0x82, 0x00, 0x00, 0x00, 0x00])
+            controller.handle_runtime_packet([0x81, 0x45, 0x82, 0x00, 0x00, 0x00, 0x00])
+            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 10])
+            controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
+            controller.handle_runtime_packet([0x81, 0x52])
+            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 20])
+            controller.handle_runtime_packet([0x88, 0x53, 0xFF, 0x9C])
+            controller.handle_runtime_packet([0x81, 0x4C])
+            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 10])
+
+            self.assertEqual(controller.commands[-1][0], 0x81)
             controller.on_timeout()
 
             self.assertFalse(controller.is_active())

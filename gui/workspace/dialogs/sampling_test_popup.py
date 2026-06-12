@@ -331,7 +331,7 @@ class SamplingTestPopup(QDialog):
 
     def set_latest_measurement_details(self, range_value: object, elapsed_seconds: object, speed: object) -> None:
         self.latest_range_value.setText(f"{int(range_value)} counts")
-        self.latest_time_value.setText(f"{float(elapsed_seconds):.4f} s")
+        self.latest_time_value.setText(f"{float(elapsed_seconds):.3f} s")
         self.latest_speed_value.setText(f"{float(speed):.2f} counts/s")
 
     def set_latest_workbook_cell(self, cell_ref: str) -> None:

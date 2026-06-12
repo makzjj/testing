@@ -454,7 +454,6 @@ class SingleAxisFunctionalTestController:
                         self._request_stopmotor()
                         return self._fail("Middle target unknown on reached")
                     if abs(pos - self._middle_target) <= self.cfg.movement_tolerance:
-                        self._request_stopmotor()
                         self._complete_pass()
                         return
                     self._request_stopmotor()
@@ -465,8 +464,6 @@ class SingleAxisFunctionalTestController:
                         self._request_stopmotor()
                         return self._fail("Middle target unknown on no-move")
                     if abs(pos - self._middle_target) <= self.cfg.movement_tolerance:
-                        # Stop motor and pass
-                        self._request_stopmotor()
                         self._complete_pass()
                         return
                     self._request_stopmotor()
@@ -477,7 +474,6 @@ class SingleAxisFunctionalTestController:
                         self._request_stopmotor()
                         return self._fail("Middle target unknown on reached")
                     if abs(pos - self._middle_target) <= self.cfg.movement_tolerance:
-                        self._request_stopmotor()
                         self._complete_pass()
                         return
                     self._request_stopmotor()

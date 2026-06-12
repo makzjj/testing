@@ -304,19 +304,6 @@ def build_safe_movement_profile(
                 send_command=False,
                 wait_for_response=False,
             ),
-            TestStep(
-                step_id="stop_motor",
-                step_name="Stop Motor Cleanup",
-                step_type="STOP_MOTOR",
-                command_id=CMD_STOPMOTOR,
-                command_name="bcmd_STOPMOTOR",
-                payload=[CMD_STOPMOTOR],
-                timeout_ms=timeout_ms,
-                stop_on_fail=False,
-                expected_response_command_id=None,
-                send_command=True,
-                wait_for_response=False,
-            ),
         ],
     )
 

@@ -556,8 +556,8 @@ class ProductionPage(BaseWorkspacePage):
         self._set_status_result("TESTING", f"Sampling started for Node {node_id} {node_name}")
         self.stage_section.set_stage_status("sampling", "testing")
         if self._sampling_popup is not None:
-            self._sampling_popup.set_state_text("HOME_WAIT_RUN_ACK")
-            self._sampling_popup.set_status_text("Sampling started")
+            self._sampling_popup.set_state_text("HOME_WAIT_TPOS")
+            self._sampling_popup.set_status_text("Moving to home using TPOS 0")
             self._sampling_popup.set_final_status("RUNNING")
             self._sampling_popup.set_stop_available(True)
         self._refresh_sampling_action_states()
@@ -669,7 +669,7 @@ class ProductionPage(BaseWorkspacePage):
 
     def _handle_sampling_latest_measurement_changed(self, range_value: int, elapsed_seconds: float, speed: float) -> None:
         self.progress_section.append_step(
-            f"Latest sampling measurement: range={int(range_value)}, time={float(elapsed_seconds):.6f}, speed={float(speed):.6f}"
+            f"Latest sampling measurement: range={int(range_value)}, time={float(elapsed_seconds):.3f}, speed={float(speed):.6f}"
         )
         if self._sampling_popup is not None:
             self._sampling_popup.set_latest_measurement_details(range_value, elapsed_seconds, speed)
@@ -703,7 +703,7 @@ class ProductionPage(BaseWorkspacePage):
         message = (
             f"Sample {getattr(result, 'sample_index', '?')}/{self._sampling_controller.samples_per_direction} "
             f"{direction_text} complete | range={getattr(result, 'range_value', '?')} | "
-            f"time={float(getattr(result, 'elapsed_seconds', 0.0)):.4f}s | "
+            f"time={float(getattr(result, 'elapsed_seconds', 0.0)):.3f}s | "
             f"speed={float(getattr(result, 'speed', 0.0)):.2f}"
         )
         self._sampling_popup.append_operator_log(message)

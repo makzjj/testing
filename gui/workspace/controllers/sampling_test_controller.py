@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 import time
 
-from data.binary_cmd_builders import build_getpos, build_run, build_stopmotor
+from data.binary_cmd_builders import build_getpos, build_run, build_stopmotor, build_tpos
 from data.binary_cmd_parser import decode_command
 from services.ipqc_excel_adapter import IpqcExcelAdapter, SamplingWorkbookLayout
 
@@ -37,12 +37,13 @@ class SamplingTestController:
     """State machine that drives sampling motion and writes workbook results."""
 
     S_IDLE = "IDLE"
-    S_HOME_WAIT_ACK = "HOME_WAIT_RUN_ACK"
+    S_HOME_WAIT_TPOS = "HOME_WAIT_TPOS"
     S_HOME_WAIT_SENSOR = "HOME_WAIT_L_SENSOR"
     S_HOME_WAIT_GETPOS = "HOME_WAIT_GETPOS"
     S_SAMPLE_WAIT_ACK = "SAMPLE_WAIT_RUN_ACK"
     S_SAMPLE_WAIT_SENSOR = "SAMPLE_WAIT_SENSOR"
     S_SAMPLE_WAIT_GETPOS = "SAMPLE_WAIT_GETPOS"
+    S_WAIT_MIDDLE_TPOS = "WAIT_FOR_MIDDLE_TPOS"
     S_FAILED = "FAILED"
     S_ABORTED = "ABORTED"
     S_COMPLETED = "COMPLETED"
@@ -79,6 +80,7 @@ class SamplingTestController:
         self._pending_ack_velocity: int | None = None
         self._pending_ack_time: float | None = None
         self._pending_sensor_time: float | None = None
+        self._middle_target: int | None = None
         self._latest_result: SamplingMeasurementResult | None = None
         self._stop_command_sent = False
 
@@ -247,7 +249,7 @@ class SamplingTestController:
 
         self._reset_runtime_state()
         self._running = True
-        self._state = self.S_HOME_WAIT_ACK
+        self._state = self.S_HOME_WAIT_TPOS
         self.state_changed(self._state)
         self.status_changed("Sampling started")
         self.log_message(
@@ -255,10 +257,10 @@ class SamplingTestController:
         )
         self._current_direction = "HOME"
         self.current_direction_changed(self._current_direction)
-        self._expected_response_description = self._format_run_ack_description(self._config.home_velocity)
-        self._pending_ack_velocity = int(self._config.home_velocity)
-        self._wait_for = "run_started"
-        self.command_requested(build_run(self._config.home_velocity))
+        self._expected_response_description = "TPOS home completion"
+        self._wait_for = "tpos_status"
+        self.status_changed("Moving to home using TPOS 0")
+        self.command_requested(build_tpos(0))
         return True
 
     def stop(self) -> bool:
@@ -341,6 +343,7 @@ class SamplingTestController:
         self._pending_ack_velocity = None
         self._pending_ack_time = None
         self._pending_sensor_time = None
+        self._middle_target = None
         self._latest_result = None
         self._total_measurements = len(self._run_pwm_values) * self._run_samples_per_pwm * 2
         self._stop_command_sent = False
@@ -432,13 +435,6 @@ class SamplingTestController:
             return
 
         self._pending_ack_time = self._clock()
-        if self._current_direction == "HOME":
-            self._set_state(self.S_HOME_WAIT_SENSOR)
-            self._wait_for = "tpos_status"
-            self._expected_response_description = "L sensor event for home move"
-            self.status_changed("Waiting for home sensor event")
-            return
-
         self._set_state(self.S_SAMPLE_WAIT_SENSOR)
         self._wait_for = "tpos_status"
         expected_sensor = "R" if self._current_direction == "+" else "L"
@@ -463,14 +459,37 @@ class SamplingTestController:
             )
             return
 
-        expected_sensor = "L" if self._current_direction in ("HOME", "-") else "R"
         if event == "Z":
             event = value.get("by")
 
-        if event not in ("L", "R"):
+        if self._state == self.S_HOME_WAIT_TPOS:
+            if event == "started":
+                self.status_changed("Waiting for TPOS home completion")
+                return
+            if event in ("reached", "no_move"):
+                self._wait_for = "getpos"
+                self._set_state(self.S_HOME_WAIT_GETPOS)
+                self._expected_response_description = "GETPOS response for home position"
+                self.status_changed("Reading home position")
+                self.command_requested(build_getpos())
+                return
             self._fail_with_stop(
                 self._build_unexpected_packet_reason(
-                    "TPOS", self._expected_response_description or "sensor event"
+                    "TPOS", self._expected_response_description or "TPOS home completion"
+                )
+            )
+            return
+
+        if self._state == self.S_WAIT_MIDDLE_TPOS:
+            if event == "started":
+                self.status_changed("Waiting for TPOS middle completion")
+                return
+            if event in ("reached", "no_move"):
+                self._complete()
+                return
+            self._fail_with_stop(
+                self._build_unexpected_packet_reason(
+                    "TPOS", self._expected_response_description or "TPOS middle completion"
                 )
             )
             return
@@ -483,11 +502,15 @@ class SamplingTestController:
             )
             return
 
-        if self._current_direction == "HOME" and event != "L":
+        expected_sensor = "L" if self._current_direction in ("HOME", "-") else "R"
+        if event not in ("L", "R"):
             self._fail_with_stop(
-                f"Wrong sensor event during home move. Expected L, got {event}. PWM={self._current_pwm}, sample_index={self._current_sample_index}."
+                self._build_unexpected_packet_reason(
+                    "TPOS", self._expected_response_description or "sensor event"
+                )
             )
             return
+
         if self._current_direction == "+" and event != "R":
             self._fail_with_stop(
                 f"Wrong sensor event during positive move. Expected R, got {event}. PWM={self._current_pwm}, sample_index={self._current_sample_index}."
@@ -501,7 +524,7 @@ class SamplingTestController:
 
         self._pending_sensor_time = self._clock()
         self._wait_for = "getpos"
-        self._set_state(self.S_HOME_WAIT_GETPOS if self._current_direction == "HOME" else self.S_SAMPLE_WAIT_GETPOS)
+        self._set_state(self.S_SAMPLE_WAIT_GETPOS)
         self._expected_response_description = "GETPOS response"
         self.command_requested(build_getpos())
 
@@ -557,6 +580,7 @@ class SamplingTestController:
             return_error = abs(int(self._current_l_pos) - int(self._start_l_pos or 0))
 
         speed = float(range_value) / float(elapsed_seconds)
+        rounded_elapsed_seconds = round(float(elapsed_seconds), 3)
         result = SamplingMeasurementResult(
             pwm=self._current_pwm,
             sample_index=self._current_sample_index,
@@ -592,7 +616,7 @@ class SamplingTestController:
                 self._current_pwm,
                 self._current_direction,
                 self._current_sample_index,
-                elapsed_seconds,
+                rounded_elapsed_seconds,
                 base_group=self._base_group,
             )
         except Exception as exc:
@@ -641,7 +665,16 @@ class SamplingTestController:
             self._start_next_sample_pair()
             return
 
-        self._complete()
+        self._move_to_middle_and_complete(range_value)
+
+    def _move_to_middle_and_complete(self, range_value: int) -> None:
+        self._middle_target = int(int(range_value) // 2)
+        self._set_state(self.S_WAIT_MIDDLE_TPOS)
+        self._wait_for = "tpos_status"
+        self._expected_response_description = "TPOS middle completion"
+        self.status_changed("Moving to middle")
+        self.log_message("Moving to middle")
+        self.command_requested(build_tpos(int(self._middle_target or 0)))
 
     def _coerce_packet(self, packet: list[int] | bytes | bytearray | dict[str, Any]) -> dict[str, Any] | None:
         if isinstance(packet, dict):
