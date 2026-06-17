@@ -15,14 +15,14 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton
 
-from gui.workspace.pages.production_page import ProductionPage
+from gui.workspace.pages.production_page import ProductionPage, _SamplingSession
 from gui.workspace.dialogs.sampling_test_popup import SamplingTestPopup
 from gui.workspace.pages.single_axis_functional_popup import SingleAxisFunctionalPopup
 from gui.workspace.controllers.single_axis_functional_test_controller import (
     FunctionalTestConfig,
     SingleAxisFunctionalTestController,
 )
-from gui.workspace.controllers.sampling_test_controller import SamplingTestController, SamplingTestConfig
+from gui.workspace.controllers.sampling_test_controller import SamplingResumeContext, SamplingTestController, SamplingTestConfig
 from gui.workspace.widgets import ResponsiveRow
 from services.ipqc_excel_adapter import IpqcExcelAdapter
 from gui.workspace.pages.production_parameter_controller import (
@@ -2606,6 +2606,7 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             workbook_path = Path(tmpdir) / "ipqc.xlsx"
             ProductionPageWorkflowTests._create_ipqc_workbook(workbook_path)
             self._load_workbook(page, workbook_path)
+            page._handle_ipqc_sheet_group_changed("3X")
             self._enable_single_axis_pass(page)
             ProductionPageWorkflowTests._select_node(page, "Node 6 - H")
 
@@ -2877,6 +2878,152 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         self.assertEqual(page._sampling_popup.final_status_value.text(), "IDLE")
         self.assertFalse(page._sampling_popup.stop_button.isEnabled())
         self.assertTrue(page._sampling_popup.start_button.isEnabled())
+
+    def test_sampling_popup_resume_button_is_between_start_and_stop_and_disabled_initially(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            ProductionPageWorkflowTests._create_ipqc_workbook(workbook_path)
+            self._load_workbook(page, workbook_path)
+            self._enable_single_axis_pass(page)
+            ProductionPageWorkflowTests._select_node(page, "Node 8 - RZ")
+
+            page._handle_start_sampling_requested()
+            self._app.processEvents()
+
+        assert page._sampling_popup is not None
+        popup = page._sampling_popup
+        self.assertLess(popup.start_button.y(), popup.resume_button.y())
+        self.assertLess(popup.resume_button.y(), popup.stop_button.y())
+        self.assertLess(popup.stop_button.y(), popup.close_button.y())
+        self.assertFalse(popup.resume_button.isEnabled())
+        self.assertIn("Resume unavailable: Sampling has not started.", popup.resume_hint_value.text())
+
+    def test_sampling_popup_resume_button_enables_after_abort_and_disables_after_encoder_reset_failure(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            ProductionPageWorkflowTests._create_ipqc_workbook(workbook_path)
+            self._load_workbook(page, workbook_path)
+            self._enable_single_axis_pass(page)
+            ProductionPageWorkflowTests._select_node(page, "Node 6 - H")
+            selected_node_id, selected_node_name = page.test_control_section.selected_node()
+            active_group = page._ipqc_excel_adapter.active_sheet_group
+
+            popup = page._ensure_sampling_popup()
+            self._app.processEvents()
+            page._sampling_controller._running = False
+            page._sampling_controller._state = SamplingTestController.S_ABORTED
+            page._sampling_controller._resume_context = SamplingResumeContext(
+                node_id=selected_node_id,
+                node_name=selected_node_name,
+                base_group=str(active_group or ""),
+                sheet_name=page._ipqc_excel_adapter.resolve_sampling_sheet_name(active_group) if active_group else "-",
+                pwm_values=(100,),
+                samples_per_direction=1,
+                current_pwm_index=0,
+                current_pwm=100,
+                current_sample_index=1,
+                current_direction="HOME",
+                completed_measurements=0,
+                total_measurements=2,
+                terminal_state=SamplingTestController.S_ABORTED,
+                reason="Sampling aborted by user.",
+                resumable=True,
+                sample_incomplete=False,
+            )
+            page._refresh_sampling_action_states()
+
+            self.assertTrue(popup.resume_button.isEnabled())
+            self.assertIn("Resume from PWM 100, sample 1", popup.resume_hint_value.text())
+
+            page._sampling_controller._resume_context = SamplingResumeContext(
+                node_id=selected_node_id,
+                node_name=selected_node_name,
+                base_group=str(active_group or ""),
+                sheet_name=page._ipqc_excel_adapter.resolve_sampling_sheet_name(active_group) if active_group else "-",
+                pwm_values=(100,),
+                samples_per_direction=1,
+                current_pwm_index=0,
+                current_pwm=100,
+                current_sample_index=1,
+                current_direction="+",
+                completed_measurements=0,
+                total_measurements=2,
+                terminal_state=SamplingTestController.S_FAILED,
+                reason="Unexpected encoder reset during sampling.",
+                resumable=False,
+                sample_incomplete=True,
+            )
+            page._sampling_controller._state = SamplingTestController.S_FAILED
+            page._refresh_sampling_action_states()
+
+            self.assertFalse(popup.resume_button.isEnabled())
+            self.assertIn("Resume unavailable:", popup.resume_hint_value.text())
+            self.assertIn("encoder reset", popup.resume_hint_value.text().lower())
+
+    def test_sampling_popup_resume_click_reuses_runtime_session_without_crash(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            ProductionPageWorkflowTests._create_ipqc_workbook(workbook_path)
+            self._load_workbook(page, workbook_path)
+            self._enable_single_axis_pass(page)
+            ProductionPageWorkflowTests._select_node(page, "Node 6 - H")
+            selected_node_id, selected_node_name = page.test_control_section.selected_node()
+            active_group = page._ipqc_excel_adapter.active_sheet_group
+            assert active_group is not None
+
+            popup = page._ensure_sampling_popup()
+            page._sampling_session = _SamplingSession(
+                node_id=selected_node_id,
+                node_name=selected_node_name,
+                runtime_window=runtime_window,
+            )
+            page._sampling_controller._running = False
+            page._sampling_controller._state = SamplingTestController.S_ABORTED
+            page._sampling_controller._current_pwm = 100
+            page._sampling_controller._current_sample_index = 2
+            page._sampling_controller._current_direction = "-"
+            page._sampling_controller._completed_measurements = 3
+            page._sampling_controller._total_measurements = 4
+            page._sampling_controller._resume_context = SamplingResumeContext(
+                node_id=selected_node_id,
+                node_name=selected_node_name,
+                base_group=str(active_group),
+                sheet_name=page._ipqc_excel_adapter.resolve_sampling_sheet_name(active_group),
+                pwm_values=(100,),
+                samples_per_direction=1,
+                current_pwm_index=0,
+                current_pwm=100,
+                current_sample_index=2,
+                current_direction="-",
+                completed_measurements=3,
+                total_measurements=4,
+                terminal_state=SamplingTestController.S_ABORTED,
+                reason="Sampling aborted by user.",
+                resumable=True,
+                sample_incomplete=True,
+            )
+            page._refresh_sampling_action_states()
+            self.assertTrue(popup.resume_button.isEnabled())
+
+            with patch.object(page._sampling_controller, "resume", wraps=page._sampling_controller.resume) as resume_mock:
+                popup.resume_button.click()
+                self._app.processEvents()
+
+            self.assertEqual(resume_mock.call_count, 1)
+            self.assertEqual(runtime_window.backend_client.sent_commands[0], (selected_node_id, [0x84, 0x00, 0x50]))
+            self.assertTrue(page._sampling_controller.is_active())
 
     def test_sampling_popup_uses_compact_three_row_layout(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -4316,6 +4463,22 @@ class SamplingControllerTests(unittest.TestCase):
         adapter.load_template(workbook_path)
         return adapter
 
+    def _build_sampling_controller(
+        self,
+        tmpdir: str,
+        clock_values: list[float],
+        *,
+        pwm_values: tuple[int, ...] = (100,),
+        samples_per_direction: int = 1,
+    ) -> _RecordingSamplingController:
+        adapter = self._build_adapter(tmpdir)
+        clock = _SamplingManualClock(clock_values)
+        return _RecordingSamplingController(
+            adapter,
+            SamplingTestConfig(home_velocity=-190, pwm_values=pwm_values, samples_per_direction=samples_per_direction),
+            clock,
+        )
+
     def _drive_home_sequence(self, controller: _RecordingSamplingController, *, start_pos: int) -> None:
         self.assertEqual(controller.commands[0], [0x84, 0x00, 0x50])
         controller.handle_runtime_packet([0x84, 0x53, 0x00, 0x50])
@@ -4347,17 +4510,156 @@ class SamplingControllerTests(unittest.TestCase):
             controller.handle_runtime_packet([0x84, 0x53, 0x00, 0x50])
             self.assertIn("HOME_WAIT_TPOS", controller.states)
 
+    def test_sampling_resume_from_home_abort_rehomes_to_first_pwm_sample(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            adapter = self._build_adapter(tmpdir)
+            clock = _SamplingManualClock([0.0])
+            controller = _RecordingSamplingController(
+                adapter,
+                SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=1),
+                clock,
+            )
+
+            self.assertTrue(controller.start(8, "RZ"))
+            controller.abort_by_user()
+            self.assertTrue(controller.can_resume)
+            self.assertEqual(controller.resume_summary, "Resume from PWM 100, sample 1")
+
+            start_len = len(controller.commands)
+            self.assertTrue(controller.resume(node_id=8, node_name="RZ", base_group="3X"))
+            self.assertEqual(controller.commands[start_len], [0x84, 0x00, 0x50])
+            controller.handle_runtime_packet([0x84, 0x53, 0x00, 0x50])
+            self.assertEqual(controller.commands[start_len + 1], [0x81, 0x00, 0x00, 0x00, 0x00])
+            controller.handle_runtime_packet([0x81, 0x53, 0x82, 0x00, 0x00, 0x00, 0x00])
+            controller.handle_runtime_packet([0x81, 0x45, 0x82, 0x00, 0x00, 0x00, 0x00])
+            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 10])
+            self.assertEqual(controller.commands[start_len + 3], [0x88, 0x00, 0x64])
+
+    def test_sampling_resume_from_positive_failure_rehomes_and_restarts_positive_leg(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            adapter = self._build_adapter(tmpdir)
+            clock = _SamplingManualClock([0.0, 0.05, 1.0])
+            controller = _RecordingSamplingController(
+                adapter,
+                SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=1),
+                clock,
+            )
+
+            self.assertTrue(controller.start(8, "RZ"))
+            self._drive_home_sequence(controller, start_pos=10)
+            controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
+            controller.handle_runtime_packet([0x81, 0x4C])
+
+            self.assertTrue(controller.can_resume)
+            self.assertIn("sample 1", controller.resume_summary.lower())
+
+            start_len = len(controller.commands)
+            self.assertTrue(controller.resume(node_id=8, node_name="RZ", base_group="3X"))
+            self.assertEqual(controller.commands[start_len], [0x84, 0x00, 0x50])
+            controller.handle_runtime_packet([0x84, 0x53, 0x00, 0x50])
+            controller.handle_runtime_packet([0x81, 0x53, 0x82, 0x00, 0x00, 0x00, 0x00])
+            controller.handle_runtime_packet([0x81, 0x45, 0x82, 0x00, 0x00, 0x00, 0x00])
+            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 10])
+            self.assertEqual(controller.commands[start_len + 3], [0x88, 0x00, 0x64])
+
+    def test_sampling_resume_from_negative_failure_overwrites_positive_cells(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            adapter = self._build_adapter(tmpdir)
+            clock = _SamplingManualClock([0.0, 0.5, 1.0, 1.4, 2.0, 2.4])
+            write_calls: list[tuple[str, int, str, int, object]] = []
+            original_write = adapter.write_sampling_result
+
+            def recording_write(
+                section: str,
+                pwm: int,
+                direction: str,
+                sample_index: int,
+                value,
+                *,
+                base_group: str | None = None,
+            ):
+                if section == "Range":
+                    write_calls.append((section, pwm, direction, sample_index, value))
+                return original_write(section, pwm, direction, sample_index, value, base_group=base_group)
+
+            adapter.write_sampling_result = recording_write  # type: ignore[assignment]
+            controller = _RecordingSamplingController(
+                adapter,
+                SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=1),
+                clock,
+            )
+
+            self.assertTrue(controller.start(8, "RZ"))
+            self._drive_home_sequence(controller, start_pos=10)
+            controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
+            controller.handle_runtime_packet([0x81, 0x52])
+            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 70])
+            controller.handle_runtime_packet([0x88, 0x53, 0xFF, 0x9C])
+            controller.handle_runtime_packet([0x81, 0x52])
+
+            self.assertTrue(controller.can_resume)
+            self.assertEqual(write_calls.count(("Range", 100, "+", 1, 60)), 1)
+
+            start_len = len(controller.commands)
+            self.assertTrue(controller.resume(node_id=8, node_name="RZ", base_group="3X"))
+            self.assertEqual(controller.commands[start_len], [0x84, 0x00, 0x50])
+            controller.handle_runtime_packet([0x84, 0x53, 0x00, 0x50])
+            controller.handle_runtime_packet([0x81, 0x53, 0x82, 0x00, 0x00, 0x00, 0x00])
+            controller.handle_runtime_packet([0x81, 0x45, 0x82, 0x00, 0x00, 0x00, 0x00])
+            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 10])
+            controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
+            controller.handle_runtime_packet([0x81, 0x52])
+            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 70])
+
+            self.assertEqual(write_calls.count(("Range", 100, "+", 1, 60)), 2)
+            self.assertEqual(controller.commands[start_len + 3], [0x88, 0x00, 0x64])
+
+    def test_sampling_resume_is_disabled_after_encoder_reset_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            adapter = self._build_adapter(tmpdir)
+            clock = _SamplingManualClock([0.0, 0.05])
+            controller = _RecordingSamplingController(
+                adapter,
+                SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=1),
+                clock,
+            )
+
+            self.assertTrue(controller.start(8, "RZ"))
+            self._drive_home_sequence(controller, start_pos=10)
+            controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
+            controller.handle_runtime_packet([0x81, 0x49])
+
+            self.assertFalse(controller.can_resume)
+            enabled, reason = controller.resume_availability(node_id=8, node_name="RZ", base_group="3X")
+            self.assertFalse(enabled)
+            self.assertIn("encoder reset", reason.lower())
+
+    def test_sampling_resume_requires_original_node_and_sheet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            adapter = self._build_adapter(tmpdir)
+            clock = _SamplingManualClock([0.0])
+            controller = _RecordingSamplingController(
+                adapter,
+                SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=1),
+                clock,
+            )
+
+            self.assertTrue(controller.start(8, "RZ"))
+            controller.abort_by_user()
+
+            enabled, reason = controller.resume_availability(node_id=9, node_name="PZ", base_group="3X")
+            self.assertFalse(enabled)
+            self.assertIn("original Sampling node", reason)
+
+            enabled, reason = controller.resume_availability(node_id=8, node_name="RZ", base_group="3X_A")
+            self.assertFalse(enabled)
+            self.assertIn("original Sampling sheet", reason)
+
     def test_sampling_home_tpos_accepts_l_sensor_without_dd(self) -> None:
         for home_packet in ([0x81, 0x4C], [0x81, 0x5A, 0x4C]):
             with self.subTest(home_packet=home_packet):
                 with tempfile.TemporaryDirectory() as tmpdir:
-                    adapter = self._build_adapter(tmpdir)
-                    clock = _SamplingManualClock([0.0])
-                    controller = _RecordingSamplingController(
-                        adapter,
-                        SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=1),
-                        clock,
-                    )
+                    controller = self._build_sampling_controller(tmpdir, [0.0])
 
                     self.assertTrue(controller.start(8, "RZ"))
                     controller.handle_runtime_packet([0x84, 0x53, 0x00, 0x50])
@@ -4370,15 +4672,71 @@ class SamplingControllerTests(unittest.TestCase):
                     self.assertEqual(controller.commands[-1], [0x88, 0x00, 0x64])
                     self.assertEqual(controller.failures, [])
 
+    def test_sampling_duplicate_positive_sensor_while_waiting_for_getpos_is_ignored(self) -> None:
+        duplicate_packets = ([0x81, 0x52], [0x81, 0x5A, 0x52])
+        for duplicate_packet in duplicate_packets:
+            with self.subTest(duplicate_packet=duplicate_packet):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    controller = self._build_sampling_controller(tmpdir, [0.0, 0.05, 1.0], samples_per_direction=2)
+
+                    self.assertTrue(controller.start(8, "RZ"))
+                    self._drive_home_sequence(controller, start_pos=10)
+                    controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
+                    controller.handle_runtime_packet([0x81, 0x52])
+
+                    self.assertEqual(controller.commands[-1], [0x82])
+                    controller.handle_runtime_packet(duplicate_packet)
+                    self.assertEqual(controller.commands[-1], [0x82])
+                    self.assertEqual(controller.commands.count([0xDD]), 0)
+
+                    controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 70])
+                    self.assertEqual(len(controller.measurements), 1)
+                    self.assertEqual(controller.commands[-1], [0x88, 0xFF, 0x9C])
+                    self.assertEqual(controller.failures, [])
+
+    def test_sampling_duplicate_negative_sensor_while_waiting_for_getpos_is_ignored(self) -> None:
+        duplicate_packets = ([0x81, 0x4C], [0x81, 0x5A, 0x4C])
+        for duplicate_packet in duplicate_packets:
+            with self.subTest(duplicate_packet=duplicate_packet):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    controller = self._build_sampling_controller(tmpdir, [0.0, 0.05, 1.0, 1.05], samples_per_direction=2)
+
+                    self.assertTrue(controller.start(8, "RZ"))
+                    self._drive_home_sequence(controller, start_pos=10)
+                    controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
+                    controller.handle_runtime_packet([0x81, 0x52])
+                    controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 70])
+
+                    self.assertEqual(controller.commands[-1], [0x88, 0xFF, 0x9C])
+                    controller.handle_runtime_packet([0x88, 0x53, 0xFF, 0x9C])
+
+                    controller.handle_runtime_packet(duplicate_packet)
+                    self.assertEqual(controller.commands[-1], [0x82])
+                    self.assertEqual(controller.commands.count([0xDD]), 0)
+
+                    controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 20])
+                    self.assertEqual(len(controller.measurements), 2)
+                    self.assertEqual(controller.commands[-1], [0x88, 0x00, 0x64])
+                    self.assertEqual(controller.failures, [])
+
+    def test_sampling_opposite_sensor_while_waiting_for_getpos_still_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controller = self._build_sampling_controller(tmpdir, [0.0, 0.05], samples_per_direction=1)
+
+            self.assertTrue(controller.start(8, "RZ"))
+            self._drive_home_sequence(controller, start_pos=10)
+            controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
+            controller.handle_runtime_packet([0x81, 0x52])
+            controller.handle_runtime_packet([0x81, 0x4C])
+
+            self.assertFalse(controller.is_active())
+            self.assertEqual(controller.commands[-1], [0xDD])
+            self.assertTrue(controller.failures)
+            self.assertIn("Unexpected packet", controller.failures[-1])
+
     def test_sampling_middle_tpos_l_sensor_is_not_treated_as_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            adapter = self._build_adapter(tmpdir)
-            clock = _SamplingManualClock([0.0, 0.05, 1.0])
-            controller = _RecordingSamplingController(
-                adapter,
-                SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=1),
-                clock,
-            )
+            controller = self._build_sampling_controller(tmpdir, [0.0, 0.05, 1.0])
 
             self.assertTrue(controller.start(8, "RZ"))
             controller.handle_runtime_packet([0x84, 0x53, 0x00, 0x50])

@@ -425,6 +425,39 @@ class ProductionPage(BaseWorkspacePage):
                 self.console_message.emit(f"[Production] {reason}")
                 self.progress_section.append_step(reason, level="warning")
 
+    def _handle_sampling_popup_resume_requested(self) -> None:
+        popup = self._ensure_sampling_popup()
+        popup.show()
+        popup.raise_()
+        popup.activateWindow()
+        if self._sampling_controller.is_active():
+            self._refresh_sampling_action_states()
+            return
+        try:
+            node_id, node_name = self.test_control_section.selected_node()
+        except RuntimeError:
+            node_id = self._sampling_session.node_id if self._sampling_session is not None else None
+            node_name = self._sampling_session.node_name if self._sampling_session is not None else None
+        active_group = self._ipqc_excel_adapter.active_sheet_group
+        resume_enabled, resume_reason = self._sampling_controller.resume_availability(
+            node_id=node_id,
+            node_name=node_name,
+            base_group=active_group,
+        )
+        if not resume_enabled:
+            if resume_reason:
+                self.console_message.emit(f"[Production] {resume_reason}")
+                self.progress_section.append_step(resume_reason, level="warning")
+            self._refresh_sampling_action_states()
+            return
+        if self._sampling_session is not None:
+            self._attach_sampling_runtime_window(self._sampling_session.runtime_window)
+        resumed = self._sampling_controller.resume(node_id=node_id, node_name=node_name, base_group=active_group)
+        if not resumed:
+            self._refresh_sampling_action_states()
+            return
+        self._refresh_sampling_action_states()
+
     def _handle_sampling_popup_start_requested(self) -> None:
         if self._sampling_controller.is_active():
             popup = self._ensure_sampling_popup()
@@ -565,6 +598,7 @@ class ProductionPage(BaseWorkspacePage):
         if self._sampling_popup is None:
             self._sampling_popup = SamplingTestPopup(self)
             self._sampling_popup.start_requested.connect(self._handle_sampling_popup_start_requested)
+            self._sampling_popup.resume_requested.connect(self._handle_sampling_popup_resume_requested)
             self._sampling_popup.stop_requested.connect(self._handle_sampling_stop_requested)
         self._refresh_sampling_popup_state()
         return self._sampling_popup
@@ -591,7 +625,25 @@ class ProductionPage(BaseWorkspacePage):
             self.stage_section.stage_enabled("sampling"),
             self.stage_section.stage_tooltip("sampling"),
         )
-        popup.set_stop_available(self._sampling_controller.is_active())
+        if self._sampling_controller.is_active():
+            popup.set_resume_available(False, "Resume unavailable: Sampling is already running.")
+            popup.set_resume_hint("Resume unavailable: Sampling is already running.")
+            popup.set_stop_available(True)
+        else:
+            try:
+                node_id, node_name = self.test_control_section.selected_node()
+            except RuntimeError:
+                node_id = self._sampling_session.node_id if self._sampling_session is not None else None
+                node_name = self._sampling_session.node_name if self._sampling_session is not None else None
+            active_group = self._ipqc_excel_adapter.active_sheet_group
+            resume_enabled, resume_reason = self._sampling_controller.resume_availability(
+                node_id=node_id,
+                node_name=node_name,
+                base_group=active_group,
+            )
+            popup.set_resume_available(resume_enabled, resume_reason)
+            popup.set_resume_hint(resume_reason)
+            popup.set_stop_available(False)
 
     def _attach_sampling_runtime_window(self, runtime_window) -> None:
         if runtime_window is None or not hasattr(runtime_window, "packet_received"):
@@ -601,14 +653,15 @@ class ProductionPage(BaseWorkspacePage):
         except (TypeError, RuntimeError):
             pass
 
-    def _detach_sampling_runtime_window(self) -> None:
+    def _detach_sampling_runtime_window(self, *, preserve_session: bool = False) -> None:
         runtime_window = self._sampling_session.runtime_window if self._sampling_session is not None else None
         if runtime_window is not None and hasattr(runtime_window, "packet_received"):
             try:
                 runtime_window.packet_received.disconnect(self._sampling_controller.handle_runtime_packet)
             except (TypeError, RuntimeError):
                 pass
-        self._sampling_session = None
+        if not preserve_session:
+            self._sampling_session = None
 
     def _send_sampling_command(self, payload: list[int]) -> None:
         runtime_window = self._sampling_session.runtime_window if self._sampling_session is not None else None
@@ -715,7 +768,7 @@ class ProductionPage(BaseWorkspacePage):
         self._refresh_sampling_action_states()
 
     def _handle_sampling_failed(self, reason: str) -> None:
-        self._detach_sampling_runtime_window()
+        self._detach_sampling_runtime_window(preserve_session=True)
         self._set_status_result("FAIL", reason)
         self.stage_section.set_stage_status("sampling", "fail")
         if self._sampling_popup is not None:
@@ -734,7 +787,7 @@ class ProductionPage(BaseWorkspacePage):
         self._refresh_sampling_action_states()
 
     def _handle_sampling_aborted(self, reason: str) -> None:
-        self._detach_sampling_runtime_window()
+        self._detach_sampling_runtime_window(preserve_session=True)
         self._set_status_result("ABORTED", reason)
         self.stage_section.set_stage_status("sampling", "fail")
         if self._sampling_popup is not None:
@@ -1521,6 +1574,17 @@ class ProductionPage(BaseWorkspacePage):
                 node_id = self._sampling_session.node_id if self._sampling_session is not None else None
                 node_name = self._sampling_session.node_name if self._sampling_session is not None else None
             self._sampling_popup.set_context(node_id, node_name, sheet_name)
+            if self._sampling_controller.is_active():
+                self._sampling_popup.set_resume_available(False, "Resume unavailable: Sampling is already running.")
+                self._sampling_popup.set_resume_hint("Resume unavailable: Sampling is already running.")
+            else:
+                resume_enabled, resume_reason = self._sampling_controller.resume_availability(
+                    node_id=node_id,
+                    node_name=node_name,
+                    base_group=active_group,
+                )
+                self._sampling_popup.set_resume_available(resume_enabled, resume_reason)
+                self._sampling_popup.set_resume_hint(resume_reason)
 
     def _get_supported_workbook_parameter_definitions(self) -> tuple[list[ParameterDefinition], str | None]:
         if not self._ipqc_excel_adapter.has_loaded_workbook():

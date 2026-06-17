@@ -24,6 +24,7 @@ class SamplingTestPopup(QDialog):
     """Modeless Sampling Test dialog that mirrors controller state."""
 
     start_requested = pyqtSignal()
+    resume_requested = pyqtSignal()
     stop_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -37,6 +38,7 @@ class SamplingTestPopup(QDialog):
         self._selected_node_name = "-"
         self._sampling_sheet_name = "-"
         self._start_available = False
+        self._resume_available = False
         self._stop_available = False
         self._current_total_samples = 32
 
@@ -76,6 +78,7 @@ class SamplingTestPopup(QDialog):
         self.sampling_sheet_value = self._make_value_label("-")
         self.status_value = self._make_value_label("Idle")
         self.reason_value = self._make_value_label("-")
+        self.resume_hint_value = self._make_value_label("Resume unavailable: Sampling has not started.")
         self.range_mode_combo = QComboBox()
         self.range_mode_combo.addItems(["Full Range", "Half Range", "Quarter Range"])
         self.range_mode_combo.setEnabled(False)
@@ -95,12 +98,14 @@ class SamplingTestPopup(QDialog):
         middle_summary_layout.addWidget(self.status_value, 1, 1)
         middle_summary_layout.addWidget(QLabel("Reason"), 2, 0)
         middle_summary_layout.addWidget(self.reason_value, 2, 1)
-        middle_summary_layout.addWidget(QLabel("Range Mode"), 3, 0)
-        middle_summary_layout.addWidget(self.range_mode_combo, 3, 1)
-        middle_summary_layout.addWidget(QLabel("Samples per PWM"), 4, 0)
-        middle_summary_layout.addWidget(self.samples_per_pwm_combo, 4, 1)
-        middle_summary_layout.addWidget(QLabel("PWM Selection"), 5, 0)
-        middle_summary_layout.addWidget(self.pwm_selection_combo, 5, 1)
+        middle_summary_layout.addWidget(QLabel("Resume"), 3, 0)
+        middle_summary_layout.addWidget(self.resume_hint_value, 3, 1)
+        middle_summary_layout.addWidget(QLabel("Range Mode"), 4, 0)
+        middle_summary_layout.addWidget(self.range_mode_combo, 4, 1)
+        middle_summary_layout.addWidget(QLabel("Samples per PWM"), 5, 0)
+        middle_summary_layout.addWidget(self.samples_per_pwm_combo, 5, 1)
+        middle_summary_layout.addWidget(QLabel("PWM Selection"), 6, 0)
+        middle_summary_layout.addWidget(self.pwm_selection_combo, 6, 1)
         middle_summary_layout.setColumnStretch(1, 1)
 
         button_column = QVBoxLayout()
@@ -112,6 +117,12 @@ class SamplingTestPopup(QDialog):
         self.start_button.setProperty("tone", "primary")
         self.start_button.clicked.connect(lambda: self.start_requested.emit())
         button_column.addWidget(self.start_button)
+
+        self.resume_button = QPushButton("Resume Sampling")
+        self.resume_button.setProperty("tone", "primary")
+        self.resume_button.clicked.connect(lambda: self.resume_requested.emit())
+        self.resume_button.setEnabled(False)
+        button_column.addWidget(self.resume_button)
 
         self.stop_button = QPushButton("Stop Sampling")
         self.stop_button.setProperty("tone", "danger")
@@ -275,6 +286,7 @@ class SamplingTestPopup(QDialog):
         self.set_latest_measurement("-")
         self.set_latest_workbook_cell("-")
         self.set_start_available(False, "Sampling is already running.")
+        self.set_resume_available(False, "Resume unavailable: Sampling is already running.")
         self.set_stop_available(True)
         self.set_sampling_configuration_enabled(False)
 
@@ -393,6 +405,18 @@ class SamplingTestPopup(QDialog):
             if enabled
             else (reason or "Sampling is available after Single Axis passes.")
         )
+
+    def set_resume_available(self, enabled: bool, reason: str = "") -> None:
+        self._resume_available = bool(enabled)
+        self.resume_button.setEnabled(bool(enabled))
+        self.resume_button.setToolTip(
+            "Resume Sampling from the stored run context."
+            if enabled
+            else (reason or "Resume unavailable: Sampling has not started.")
+        )
+
+    def set_resume_hint(self, text: str) -> None:
+        self.resume_hint_value.setText(text or "Resume unavailable: Sampling has not started.")
 
     def set_stop_available(self, enabled: bool) -> None:
         self._stop_available = bool(enabled)
