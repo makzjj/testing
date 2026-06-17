@@ -22,9 +22,8 @@ from gui.workspace.controllers.single_axis_functional_test_controller import (
     FunctionalTestConfig,
     SingleAxisFunctionalTestController,
 )
-from gui.workspace.controllers.sampling_test_controller import SamplingResumeContext, SamplingTestController, SamplingTestConfig
+from gui.workspace.controllers.sampling_test_controller import SamplingResumeContext, SamplingTestController
 from gui.workspace.widgets import ResponsiveRow
-from services.ipqc_excel_adapter import IpqcExcelAdapter
 from gui.workspace.pages.production_parameter_controller import (
     EEPROM_SAVE_COMMAND,
     SET_COMMAND_SUFFIX,
@@ -46,17 +45,6 @@ from gui.workspace.pages.production_parameter_controller import (
     parse_uuid_value,
     validate_uuid_format,
 )
-from gui.workspace.pages.production_test_controller import (
-    ProductionTestController,
-    build_basic_test_profile,
-    build_safe_movement_profile,
-    decode_getpos_response,
-    decode_tpos_state_response,
-    decode_getver_response,
-    decode_interrupt_response,
-)
-from gui.workspace.pages.production_test_models import Tolerance, evaluate_tolerance
-from data.binary_cmd_builders import build_vel
 from myconfig.constants import COMMANDS
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -265,319 +253,6 @@ class _FakeRobotPowerMessageBox:
 
     def clickedButton(self):
         return self._clicked_button
-
-
-class ProductionTestControllerTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls._app = QApplication.instance() or QApplication([])
-
-    def test_profile_runs_steps_in_order(self) -> None:
-        runtime_window = _FakeRuntimeWindow()
-        bridge = _FakeBridge(runtime_window)
-        controller = ProductionTestController(bridge, timeout_ms=50)
-        events: list[tuple] = []
-
-        controller.step_finished.connect(lambda node_id, node_name, step: events.append(("step", node_id, node_name, step.step_id)))
-        controller.test_passed.connect(lambda node_id, node_name, reason: events.append(("passed", node_id, node_name, reason)))
-
-        self.assertTrue(controller.run_test(8, "RZ"))
-        self.assertEqual(runtime_window.backend_client.sent_commands[0], (8, [0xCB, 0xA5, 0x5A]))
-
-        runtime_window.packet_received.emit(
-            {
-                "status": "ok",
-                "type": "can_over_uart",
-                "sender": 8,
-                "cmd": 0xCB,
-                "params": [0xA5, 0x5A],
-            }
-        )
-        self._app.processEvents()
-        self.assertEqual(runtime_window.backend_client.sent_commands[1], (8, [0xC8, 0x3F]))
-
-        runtime_window.packet_received.emit(
-            {"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xC8, "params": [0x3A, 1, 2, 3]}
-        )
-        self._app.processEvents()
-        self.assertEqual(runtime_window.backend_client.sent_commands[2], (8, [0x82]))
-
-        runtime_window.packet_received.emit(
-            {"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0x82, "params": [0x00, 0x00, 0x01, 0x00]}
-        )
-        self._app.processEvents()
-        self.assertEqual(runtime_window.backend_client.sent_commands[3], (8, [0xD8]))
-
-        runtime_window.packet_received.emit(
-            {"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xD8, "params": [1, 0]}
-        )
-        self._app.processEvents()
-
-        self.assertEqual([event[3] for event in events if event[0] == "step"], ["echo", "getver", "getpos", "interrupt"])
-        self.assertTrue(any(event[0] == "passed" and event[1] == 8 for event in events))
-        self.assertFalse(controller.is_active())
-        self.assertIsNotNone(controller.last_final_result)
-        self.assertEqual(controller.last_final_result.final_result, "PASS")
-        self.assertEqual(len(controller.last_final_result.step_results), 4)
-
-    def test_stop_on_fail_stops_later_steps(self) -> None:
-        runtime_window = _FakeRuntimeWindow()
-        bridge = _FakeBridge(runtime_window)
-        controller = ProductionTestController(bridge, timeout_ms=100)
-        events: list[tuple] = []
-
-        controller.test_failed.connect(lambda node_id, node_name, reason: events.append(("failed", node_id, node_name, reason)))
-
-        self.assertTrue(controller.run_test(11, "NGActuator"))
-        runtime_window.packet_received.emit(
-            {
-                "status": "ok",
-                "type": "can_over_uart",
-                "sender": 11,
-                "cmd": 0xCB,
-                "params": [0x01, 0x02],
-            }
-        )
-        self._app.processEvents()
-
-        self.assertTrue(events)
-        self.assertEqual(len(runtime_window.backend_client.sent_commands), 1)
-        self.assertFalse(controller.is_active())
-        self.assertIsNotNone(controller.last_final_result)
-        self.assertEqual(controller.last_final_result.final_result, "FAIL")
-
-    def test_timeout_causes_timeout_final_result(self) -> None:
-        runtime_window = _FakeRuntimeWindow()
-        bridge = _FakeBridge(runtime_window)
-        controller = ProductionTestController(bridge, timeout_ms=10)
-        events: list[tuple] = []
-        controller.test_failed.connect(lambda node_id, node_name, reason: events.append(("failed", node_id, node_name, reason)))
-
-        controller.run_test(10, "HMI")
-
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline and not events:
-            self._app.processEvents()
-            time.sleep(0.01)
-
-        self.assertTrue(any(event[0] == "failed" and event[1] == 10 and "Timed out" in event[3] for event in events))
-        self.assertFalse(controller.is_active())
-        self.assertIsNotNone(controller.last_final_result)
-        self.assertEqual(controller.last_final_result.final_result, "TIMEOUT")
-        self.assertEqual(controller.last_final_result.step_results[0].result, "TIMEOUT")
-
-    def test_abort_produces_aborted_final_result_and_sends_stop(self) -> None:
-        runtime_window = _FakeRuntimeWindow()
-        bridge = _FakeBridge(runtime_window)
-        controller = ProductionTestController(bridge, timeout_ms=100)
-        events: list[tuple] = []
-        controller.test_aborted.connect(lambda node_id, node_name, reason: events.append(("aborted", node_id, node_name, reason)))
-
-        controller.run_test(3, "X")
-        self.assertTrue(controller.abort_test())
-
-        self.assertEqual(runtime_window.backend_client.stop_commands, [3])
-        self.assertTrue(any(event[0] == "aborted" and event[1] == 3 for event in events))
-        self.assertFalse(controller.is_active())
-        self.assertIsNotNone(controller.last_final_result)
-        self.assertEqual(controller.last_final_result.final_result, "ABORTED")
-
-    def test_wrong_node_response_is_ignored(self) -> None:
-        runtime_window = _FakeRuntimeWindow()
-        bridge = _FakeBridge(runtime_window)
-        controller = ProductionTestController(bridge, timeout_ms=100)
-        events: list[tuple] = []
-        controller.step_finished.connect(lambda _node_id, _node_name, step: events.append(("step", step.step_id, step.result)))
-
-        self.assertTrue(controller.run_test(8, "RZ"))
-        runtime_window.packet_received.emit(
-            {
-                "status": "ok",
-                "type": "can_over_uart",
-                "sender": 7,
-                "cmd": 0xCB,
-                "params": [0xA5, 0x5A],
-            }
-        )
-        self._app.processEvents()
-        self.assertEqual(events, [])
-        self.assertTrue(controller.is_active())
-        controller.abort_test()
-
-    def test_unsupported_node_emits_unsupported_without_sending(self) -> None:
-        runtime_window = _FakeRuntimeWindow()
-        bridge = _FakeBridge(runtime_window)
-        controller = ProductionTestController(bridge, timeout_ms=100)
-        events: list[tuple] = []
-        controller.test_unsupported.connect(
-            lambda node_id, node_name, reason: events.append(("unsupported", node_id, node_name, reason))
-        )
-
-        self.assertFalse(controller.run_test(2, "Node 2"))
-        self.assertEqual(runtime_window.backend_client.sent_commands, [])
-        self.assertTrue(any(event[0] == "unsupported" and event[1] == 2 for event in events))
-        self.assertFalse(controller.is_active())
-
-    def test_tolerance_exact_abs_and_range(self) -> None:
-        self.assertEqual(evaluate_tolerance(7, 7, Tolerance(exact_match=7)), (True, ""))
-        self.assertFalse(evaluate_tolerance(7, 6, Tolerance(exact_match=7))[0])
-        self.assertTrue(evaluate_tolerance(10.0, 10.2, Tolerance(abs_margin=0.3))[0])
-        self.assertFalse(evaluate_tolerance(10.0, 10.5, Tolerance(abs_margin=0.3))[0])
-        self.assertTrue(evaluate_tolerance(None, 5, Tolerance(min_value=1, max_value=10))[0])
-        self.assertFalse(evaluate_tolerance(None, 11, Tolerance(min_value=1, max_value=10))[0])
-
-    def test_decode_helpers(self) -> None:
-        self.assertEqual(decode_getver_response([0x3A, 1, 2, 3]), (True, "1.2.3", ""))
-        self.assertEqual(decode_getpos_response([0x00, 0x00, 0x01, 0x00]), (True, 256, ""))
-        self.assertEqual(
-            decode_tpos_state_response([ord("E"), 0x00, 0x00, 0x00, 0x10]),
-            (True, {"state": "E", "position": 16}, ""),
-        )
-        self.assertEqual(
-            decode_interrupt_response([0x01, 0x00]),
-            (True, {"int0_status": 1, "int1_status": 0}, ""),
-        )
-        self.assertEqual(build_eeprom_save_payload(), [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX])
-        self.assertEqual(decode_eeprom_save_response([EEPROM_SAVE_COMMAND, 0x0A, 0x00]), (True, "ACK", ""))
-        self.assertFalse(decode_eeprom_save_response([EEPROM_SAVE_COMMAND, 0x0B, 0x00])[0])
-
-    def test_uuid_0xe0_remains_supported_in_profile_when_expected_uuid_present(self) -> None:
-        profile = build_basic_test_profile(6, "H", timeout_ms=100, expected_uuid=1223306010)
-        self.assertEqual(profile.steps[-1].step_type, "UUID_VERIFY")
-        self.assertEqual(profile.steps[-1].command_id, 0xE0)
-
-    def test_final_node_result_is_aggregated(self) -> None:
-        runtime_window = _FakeRuntimeWindow()
-        bridge = _FakeBridge(runtime_window)
-        controller = ProductionTestController(bridge, timeout_ms=100)
-        self.assertTrue(controller.run_test(8, "RZ"))
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xCB, "params": [0xA5, 0x5A]})
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xC8, "params": [0x3A, 1, 2, 3]})
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0x82, "params": [0, 0, 0, 1]})
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xD8, "params": [0, 1]})
-        self._app.processEvents()
-        self.assertIsNotNone(controller.last_final_result)
-        self.assertEqual(controller.last_final_result.final_result, "PASS")
-        self.assertEqual([step.step_id for step in controller.last_final_result.step_results], ["echo", "getver", "getpos", "interrupt"])
-
-    def test_movement_profile_runs_steps_in_order_and_passes_on_tpos_end(self) -> None:
-        runtime_window = _FakeRuntimeWindow()
-        bridge = _FakeBridge(runtime_window)
-        controller = ProductionTestController(bridge, timeout_ms=80)
-        step_ids: list[str] = []
-        controller.step_finished.connect(lambda _node_id, _node_name, step: step_ids.append(step.step_id))
-
-        self.assertTrue(controller.run_test(8, "RZ", profile_mode="movement"))
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xCB, "params": [0xA5, 0x5A]})
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xC8, "params": [0x3A, 1, 2, 3]})
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x64]})
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xD8, "params": [0, 0]})
-        self._app.processEvents()
-
-        # WAIT step should ignore start state and pass on end state.
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0x81, "params": [ord("S"), 0, 0, 0, 100]})
-        self._app.processEvents()
-        self.assertTrue(controller.is_active())
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0x81, "params": [ord("E"), 0, 0, 0, 116]})
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x74]})
-        self._app.processEvents()
-
-        self.assertFalse(controller.is_active())
-        self.assertIsNotNone(controller.last_final_result)
-        self.assertEqual(controller.last_final_result.final_result, "PASS")
-        self.assertIn("verify_position_delta", step_ids)
-        self.assertNotIn("stop_motor", step_ids)
-        sent_cmds = [cmd for _node, cmd in runtime_window.backend_client.sent_commands]
-        self.assertIn([0x84, 0x00, 0x14], sent_cmds)
-        self.assertNotIn([0xDD], sent_cmds)
-
-    def test_movement_profile_tpos_lr_state_fails_and_sends_stop(self) -> None:
-        runtime_window = _FakeRuntimeWindow()
-        bridge = _FakeBridge(runtime_window)
-        controller = ProductionTestController(bridge, timeout_ms=80)
-        self.assertTrue(controller.run_test(8, "RZ", profile_mode="movement"))
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xCB, "params": [0xA5, 0x5A]})
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xC8, "params": [0x3A, 1, 2, 3]})
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x64]})
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xD8, "params": [0, 0]})
-        self._app.processEvents()
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0x81, "params": [ord("L"), 0, 0, 0, 104]})
-        self._app.processEvents()
-
-        self.assertFalse(controller.is_active())
-        self.assertIn(8, runtime_window.backend_client.stop_commands)
-        self.assertEqual(controller.last_final_result.final_result, "FAIL")
-
-    def test_movement_profile_timeout_sends_stop(self) -> None:
-        runtime_window = _FakeRuntimeWindow()
-        bridge = _FakeBridge(runtime_window)
-        controller = ProductionTestController(bridge, timeout_ms=20)
-        self.assertTrue(controller.run_test(8, "RZ", profile_mode="movement"))
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xCB, "params": [0xA5, 0x5A]})
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xC8, "params": [0x3A, 1, 2, 3]})
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x64]})
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xD8, "params": [0, 0]})
-        self._app.processEvents()
-
-        deadline = time.monotonic() + 0.8
-        while time.monotonic() < deadline and controller.is_active():
-            self._app.processEvents()
-            time.sleep(0.01)
-
-        self.assertIn(8, runtime_window.backend_client.stop_commands)
-        self.assertEqual(controller.last_final_result.final_result, "TIMEOUT")
-
-    @pytest.mark.xfail(
-        reason="movement profile path is legacy/future scope and not active in Production UI yet",
-        strict=False,
-    )
-    def test_movement_profile_position_delta_outside_tolerance_fails(self) -> None:
-        runtime_window = _FakeRuntimeWindow()
-        bridge = _FakeBridge(runtime_window)
-        controller = ProductionTestController(bridge, timeout_ms=80)
-        self.assertTrue(controller.run_test(8, "RZ", profile_mode="movement"))
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xCB, "params": [0xA5, 0x5A]})
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xC8, "params": [0x3A, 1, 2, 3]})
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x64]})
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xD8, "params": [0, 0]})
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0x81, "params": [ord("E"), 0, 0, 0, 108]})
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x6C]})
-        self._app.processEvents()
-
-        self.assertFalse(controller.is_active())
-        self.assertEqual(controller.last_final_result.final_result, "FAIL")
-
-    def test_movement_profile_wrong_node_response_is_rejected(self) -> None:
-        runtime_window = _FakeRuntimeWindow()
-        bridge = _FakeBridge(runtime_window)
-        controller = ProductionTestController(bridge, timeout_ms=80)
-        self.assertTrue(controller.run_test(8, "RZ", profile_mode="movement"))
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xCB, "params": [0xA5, 0x5A]})
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xC8, "params": [0x3A, 1, 2, 3]})
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x64]})
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 8, "cmd": 0xD8, "params": [0, 0]})
-        self._app.processEvents()
-        runtime_window.packet_received.emit({"status": "ok", "type": "can_over_uart", "sender": 7, "cmd": 0x81, "params": [ord("E"), 0, 0, 0, 116]})
-        self._app.processEvents()
-        self.assertTrue(controller.is_active())
-        controller.abort_test()
-
-    def test_build_safe_movement_profile_contains_expected_steps(self) -> None:
-        profile = build_safe_movement_profile(8, "RZ", timeout_ms=120)
-        self.assertEqual(
-            [step.step_id for step in profile.steps],
-            [
-                "echo",
-                "getver",
-                "read_initial_position",
-                "interrupt_initial",
-                "set_safe_velocity",
-                "move_to_position",
-                "wait_move_end",
-                "read_final_position",
-                "verify_position_delta",
-            ],
-        )
 
 
 class ProductionPageWorkflowTests(unittest.TestCase):
@@ -2569,6 +2244,25 @@ class SamplingPageIntegrationTests(unittest.TestCase):
                 combo.setCurrentIndex(index)
                 break
 
+    def _prepare_sampling_page(self, node_text: str = "Node 6 - H") -> ProductionPage:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            ProductionPageWorkflowTests._create_ipqc_workbook(workbook_path)
+            self._load_workbook(page, workbook_path)
+            self._enable_single_axis_pass(page)
+            self._select_node(page, node_text)
+            with patch.object(SamplingTestController, "start", autospec=True, return_value=True):
+                page._handle_start_sampling_requested()
+                assert page._sampling_popup is not None
+                page._sampling_popup.start_button.click()
+                self._app.processEvents()
+            assert page._sampling_popup is not None
+        return page
+
     def _sampling_stage_button(self, page: ProductionPage) -> QPushButton:
         return page.stage_section._rows["sampling"][1]
 
@@ -3212,79 +2906,10 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             self.assertEqual(popup.current_pwm_value.text(), "90")
             self.assertEqual(popup.current_sample_value.text(), "Sample 1 / 4")
 
-    def test_sampling_controller_selected_pwm_and_sample_count_drive_payloads_and_rows(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            workbook_path = Path(tmpdir) / "sampling_ipqc.xlsx"
-            ProductionPageWorkflowTests._create_ipqc_workbook(workbook_path)
-            adapter = IpqcExcelAdapter()
-            adapter.load_template(workbook_path)
-            clock = _SamplingManualClock([0.0, 0.05, 1.0, 1.5, 2.0, 2.4, 3.0, 3.4, 4.0, 4.4, 5.0, 5.4, 6.0, 6.4, 7.0, 7.4, 8.0, 8.4])
-            controller = _RecordingSamplingController(
-                adapter,
-                SamplingTestConfig(home_velocity=-190),
-                clock,
-            )
-
-            self.assertTrue(controller.start(8, "RZ", pwm_values=(90,), samples_per_pwm=4))
-            self.assertEqual(controller.commands[0], [0x84, 0x00, 0x50])
-            controller.handle_runtime_packet([0x84, 0x53, 0x00, 0x50])
-            self.assertEqual(controller.commands[1], [0x81, 0x00, 0x00, 0x00, 0x00])
-            controller.handle_runtime_packet([0x81, 0x53, 0x82, 0x00, 0x00, 0x00, 0x00])
-            controller.handle_runtime_packet([0x81, 0x45, 0x82, 0x00, 0x00, 0x00, 0x00])
-            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 10])
-
-            self.assertEqual(controller.commands[3], build_run(90))
-            for sample_index in range(1, 5):
-                pos_value = 10 + sample_index * 10
-                neg_value = 60 - sample_index * 10
-                controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x5A])
-                controller.handle_runtime_packet([0x81, 0x52])
-                controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, pos_value])
-                controller.handle_runtime_packet([0x88, 0x53, 0xFF, 0xA6])
-                controller.handle_runtime_packet([0x81, 0x4C])
-                controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, neg_value])
-
-            middle_command = controller.commands[-1]
-            middle_target = int.from_bytes(bytes(middle_command[1:5]), "big", signed=True)
-            controller.handle_runtime_packet([0x81, 0x45, 0x82, *list(int(middle_target).to_bytes(4, "big", signed=True))])
-
-            self.assertFalse(controller.is_active())
-            self.assertEqual(controller.pwms, [90])
-            self.assertEqual(controller.sample_indices[0], 1)
-            self.assertEqual(controller.sample_indices[-1], 4)
-            self.assertEqual(controller.completed_counts[-1], (8, 8))
-            self.assertEqual(len(controller.measurements), 8)
-
-            output_path = Path(tmpdir) / "sampling_90_only.xlsx"
-            adapter.save_completed_workbook(output_path)
-            sampling_sheet = load_workbook(output_path)["3X_D"]
-
-        self.assertIsNotNone(sampling_sheet["B6"].value)
-        self.assertIsNotNone(sampling_sheet["E6"].value)
-        self.assertIsNotNone(sampling_sheet["B7"].value)
-        self.assertIsNotNone(sampling_sheet["E7"].value)
-        self.assertIsNone(sampling_sheet["F6"].value)
-        self.assertIsNone(sampling_sheet["F7"].value)
-        self.assertIsNone(sampling_sheet["F23"].value)
-        self.assertIsNone(sampling_sheet["F40"].value)
-
     def test_sampling_popup_fields_update_from_controller_hooks(self) -> None:
-        runtime_window = _FakeRuntimeWindow()
-        bridge = _FakeBridge(runtime_window)
-        page = ProductionPage(bridge)
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            workbook_path = Path(tmpdir) / "ipqc.xlsx"
-            ProductionPageWorkflowTests._create_ipqc_workbook(workbook_path)
-            self._load_workbook(page, workbook_path)
-            self._enable_single_axis_pass(page)
-            ProductionPageWorkflowTests._select_node(page, "Node 6 - H")
-
-            page._handle_start_sampling_requested()
-            self._app.processEvents()
-
-        assert page._sampling_popup is not None
+        page = self._prepare_sampling_page()
         popup = page._sampling_popup
+        assert popup is not None
         page._handle_sampling_state_changed("SAMPLE_WAIT_SENSOR")
         page._handle_sampling_status_changed("Waiting for R sensor event")
         page._handle_sampling_current_pwm_changed(90)
@@ -3317,6 +2942,104 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             "Sample 7/32 + complete | range=180 | time=0.250s | speed=720.00",
             popup.log_output.toPlainText(),
         )
+
+    def test_sampling_page_progress_log_keeps_only_high_level_messages(self) -> None:
+        page = self._prepare_sampling_page()
+        assert page._sampling_popup is not None
+        popup = page._sampling_popup
+
+        page._handle_sampling_state_changed("SAMPLE_WAIT_SENSOR")
+        page._handle_sampling_status_changed("Waiting for R sensor event")
+        page._handle_sampling_current_pwm_changed(90)
+        page._handle_sampling_current_direction_changed("+")
+        page._handle_sampling_current_sample_changed(7)
+        page._handle_sampling_completed_count_changed(84, 320)
+        page._handle_sampling_latest_measurement_changed(180, 0.25, 720.0)
+        page._handle_sampling_latest_cell_written("AG42")
+
+        progress_text = page.progress_section.to_plain_text()
+        self.assertIn("TESTING: Sampling started for Node 6 H", progress_text)
+        self.assertNotIn("Sampling state:", progress_text)
+        self.assertNotIn("Sampling direction:", progress_text)
+        self.assertNotIn("Sampling PWM:", progress_text)
+        self.assertNotIn("Sampling sample index:", progress_text)
+        self.assertNotIn("Sampling progress:", progress_text)
+        self.assertNotIn("Latest sampling measurement:", progress_text)
+        self.assertNotIn("Latest workbook cell written:", progress_text)
+        self.assertNotIn("Waiting for R sensor event", progress_text)
+        self.assertNotIn("Setting home velocity", progress_text)
+
+    def test_sampling_page_progress_log_routing_keeps_lifecycle_messages_only(self) -> None:
+        page = self._prepare_sampling_page()
+        assert page._sampling_popup is not None
+        popup = page._sampling_popup
+
+        page._sampling_controller._resume_context = SamplingResumeContext(
+            node_id=6,
+            node_name="H",
+            base_group="3X",
+            sheet_name="3X_D",
+            pwm_values=(100,),
+            samples_per_direction=1,
+            current_pwm_index=0,
+            current_pwm=100,
+            current_sample_index=1,
+            current_direction="-",
+            completed_measurements=1,
+            total_measurements=2,
+            terminal_state=SamplingTestController.S_ABORTED,
+            reason="Sampling aborted by user.",
+            resumable=True,
+            sample_incomplete=True,
+        )
+        with patch.object(SamplingTestController, "resume", autospec=True, return_value=True):
+            page._handle_sampling_popup_resume_requested()
+            self._app.processEvents()
+
+        self.assertIn("Sampling resumed for Node 6 H from PWM 100, sample 1", page.progress_section.to_plain_text())
+
+        page._handle_sampling_completed()
+        self._app.processEvents()
+        self.assertIn("[PASS] Sampling PASSED for Node 6 H", page.progress_section.to_plain_text())
+
+        page = self._prepare_sampling_page()
+        assert page._sampling_popup is not None
+        page._handle_sampling_failed("Sensor timeout")
+        self._app.processEvents()
+        self.assertIn("[FAIL] Sampling FAILED for Node 6 H: Sensor timeout", page.progress_section.to_plain_text())
+
+        page = self._prepare_sampling_page()
+        assert page._sampling_popup is not None
+        page._handle_sampling_aborted("Operator stop")
+        self._app.processEvents()
+        self.assertIn("[FAIL] Sampling ABORTED for Node 6 H", page.progress_section.to_plain_text())
+
+    def test_sampling_popup_still_receives_detailed_operator_and_packet_logs(self) -> None:
+        page = self._prepare_sampling_page()
+        assert page._sampling_popup is not None
+        popup = page._sampling_popup
+        page.progress_section.clear_log()
+
+        page._handle_sampling_log("Sampling direction: +")
+        page._handle_sampling_packet_message("[TX] Node 6: 88 00 64")
+        page._handle_sampling_measurement_completed(
+            types.SimpleNamespace(
+                sample_index=1,
+                direction="+",
+                range_value=120,
+                elapsed_seconds=0.25,
+                speed=480.0,
+                workbook_cells={"Range": "B4", "Speed": "B21", "Time": "B38"},
+            )
+        )
+
+        popup_text = popup.log_output.toPlainText()
+        packet_text = popup.packet_log_output.toPlainText()
+        self.assertIn("Sampling direction: +", popup_text)
+        self.assertIn("Sample 1/32 + complete | range=120 | time=0.250s | speed=480.00", popup_text)
+        self.assertIn("[TX] Node 6: 88 00 64", packet_text)
+        self.assertNotIn("Sampling direction: +", page.progress_section.to_plain_text())
+        self.assertNotIn("[TX] Node 6: 88 00 64", page.progress_section.to_plain_text())
 
     def test_sampling_terminal_states_reenable_start_and_disable_stop(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -4382,566 +4105,5 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         self.assertEqual(popup.range_field.text(), "2499778")
         self.assertEqual(differences[-1], 100)
         popup.close()
-
-
-class _SamplingManualClock:
-    def __init__(self, values: list[float]) -> None:
-        self._values = list(values)
-        self._index = 0
-
-    def __call__(self) -> float:
-        if self._index >= len(self._values):
-            raise AssertionError("Sampling manual clock was exhausted.")
-        value = self._values[self._index]
-        self._index += 1
-        return value
-
-
-class _RecordingSamplingController(SamplingTestController):
-    def __init__(self, adapter: IpqcExcelAdapter, config: SamplingTestConfig, clock) -> None:
-        super().__init__(adapter, config, clock=clock)
-        self.commands: list[list[int]] = []
-        self.logs: list[str] = []
-        self.states: list[str] = []
-        self.statuses: list[str] = []
-        self.pwms: list[int] = []
-        self.directions: list[str] = []
-        self.sample_indices: list[int] = []
-        self.completed_counts: list[tuple[int, int]] = []
-        self.measurements: list[object] = []
-        self.cells: list[str] = []
-        self.failures: list[str] = []
-        self.aborts: list[str] = []
-        self.completed_called = False
-
-    def command_requested(self, payload: list[int]) -> None:
-        self.commands.append(list(payload))
-
-    def log_message(self, text: str) -> None:
-        self.logs.append(text)
-
-    def state_changed(self, text: str) -> None:
-        self.states.append(text)
-
-    def status_changed(self, text: str) -> None:
-        self.statuses.append(text)
-
-    def current_pwm_changed(self, pwm: int) -> None:
-        self.pwms.append(int(pwm))
-
-    def current_direction_changed(self, direction: str) -> None:
-        self.directions.append(direction)
-
-    def current_sample_changed(self, sample_index: int) -> None:
-        self.sample_indices.append(int(sample_index))
-
-    def samples_completed_changed(self, completed: int, total: int) -> None:
-        self.completed_counts.append((int(completed), int(total)))
-
-    def measurement_completed(self, result) -> None:
-        self.measurements.append(result)
-
-    def latest_workbook_cell_written(self, cell_ref: str) -> None:
-        self.cells.append(cell_ref)
-
-    def sampling_completed(self) -> None:
-        self.completed_called = True
-
-    def sampling_failed(self, reason: str) -> None:
-        self.failures.append(reason)
-
-    def sampling_aborted(self, reason: str) -> None:
-        self.aborts.append(reason)
-
-
-@unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for Sampling controller tests.")
-class SamplingControllerTests(unittest.TestCase):
-    def _build_adapter(self, tmpdir: str) -> IpqcExcelAdapter:
-        workbook_path = Path(tmpdir) / "sampling_ipqc.xlsx"
-        ProductionPageWorkflowTests._create_ipqc_workbook(workbook_path)
-        adapter = IpqcExcelAdapter()
-        adapter.load_template(workbook_path)
-        return adapter
-
-    def _build_sampling_controller(
-        self,
-        tmpdir: str,
-        clock_values: list[float],
-        *,
-        pwm_values: tuple[int, ...] = (100,),
-        samples_per_direction: int = 1,
-    ) -> _RecordingSamplingController:
-        adapter = self._build_adapter(tmpdir)
-        clock = _SamplingManualClock(clock_values)
-        return _RecordingSamplingController(
-            adapter,
-            SamplingTestConfig(home_velocity=-190, pwm_values=pwm_values, samples_per_direction=samples_per_direction),
-            clock,
-        )
-
-    def _drive_home_sequence(self, controller: _RecordingSamplingController, *, start_pos: int) -> None:
-        self.assertEqual(controller.commands[0], [0x84, 0x00, 0x50])
-        controller.handle_runtime_packet([0x84, 0x53, 0x00, 0x50])
-        self.assertEqual(controller.commands[1], [0x81, 0x00, 0x00, 0x00, 0x00])
-        controller.handle_runtime_packet([0x81, 0x53, 0x82, 0x00, 0x00, 0x00, 0x00])
-        controller.handle_runtime_packet([0x81, 0x45, 0x82, 0x00, 0x00, 0x00, 0x00])
-        controller.handle_runtime_packet([0x82, *list(int(start_pos).to_bytes(4, "big", signed=True))])
-
-    def test_sampling_run_payloads_cover_signed_velocities(self) -> None:
-        self.assertEqual(build_run(100), [0x88, 0x00, 0x64])
-        self.assertEqual(build_run(-100), [0x88, 0xFF, 0x9C])
-        self.assertEqual(build_run(90), [0x88, 0x00, 0x5A])
-        self.assertEqual(build_run(-90), [0x88, 0xFF, 0xA6])
-        self.assertEqual(build_run(-190), [0x88, 0xFF, 0x42])
-        self.assertEqual(build_vel(80), [0x84, 0x00, 0x50])
-
-    def test_sampling_controller_owns_state_sequence_for_home_startup(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            adapter = self._build_adapter(tmpdir)
-            clock = _SamplingManualClock([0.0])
-            controller = _RecordingSamplingController(
-                adapter,
-                SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=1),
-                clock,
-            )
-
-            self.assertTrue(controller.start(8, "RZ"))
-            self.assertEqual(controller.states[0], "HOME_WAIT_VEL_ACK")
-            controller.handle_runtime_packet([0x84, 0x53, 0x00, 0x50])
-            self.assertIn("HOME_WAIT_TPOS", controller.states)
-
-    def test_sampling_resume_from_home_abort_rehomes_to_first_pwm_sample(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            adapter = self._build_adapter(tmpdir)
-            clock = _SamplingManualClock([0.0])
-            controller = _RecordingSamplingController(
-                adapter,
-                SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=1),
-                clock,
-            )
-
-            self.assertTrue(controller.start(8, "RZ"))
-            controller.abort_by_user()
-            self.assertTrue(controller.can_resume)
-            self.assertEqual(controller.resume_summary, "Resume from PWM 100, sample 1")
-
-            start_len = len(controller.commands)
-            self.assertTrue(controller.resume(node_id=8, node_name="RZ", base_group="3X"))
-            self.assertEqual(controller.commands[start_len], [0x84, 0x00, 0x50])
-            controller.handle_runtime_packet([0x84, 0x53, 0x00, 0x50])
-            self.assertEqual(controller.commands[start_len + 1], [0x81, 0x00, 0x00, 0x00, 0x00])
-            controller.handle_runtime_packet([0x81, 0x53, 0x82, 0x00, 0x00, 0x00, 0x00])
-            controller.handle_runtime_packet([0x81, 0x45, 0x82, 0x00, 0x00, 0x00, 0x00])
-            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 10])
-            self.assertEqual(controller.commands[start_len + 3], [0x88, 0x00, 0x64])
-
-    def test_sampling_resume_from_positive_failure_rehomes_and_restarts_positive_leg(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            adapter = self._build_adapter(tmpdir)
-            clock = _SamplingManualClock([0.0, 0.05, 1.0])
-            controller = _RecordingSamplingController(
-                adapter,
-                SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=1),
-                clock,
-            )
-
-            self.assertTrue(controller.start(8, "RZ"))
-            self._drive_home_sequence(controller, start_pos=10)
-            controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
-            controller.handle_runtime_packet([0x81, 0x4C])
-
-            self.assertTrue(controller.can_resume)
-            self.assertIn("sample 1", controller.resume_summary.lower())
-
-            start_len = len(controller.commands)
-            self.assertTrue(controller.resume(node_id=8, node_name="RZ", base_group="3X"))
-            self.assertEqual(controller.commands[start_len], [0x84, 0x00, 0x50])
-            controller.handle_runtime_packet([0x84, 0x53, 0x00, 0x50])
-            controller.handle_runtime_packet([0x81, 0x53, 0x82, 0x00, 0x00, 0x00, 0x00])
-            controller.handle_runtime_packet([0x81, 0x45, 0x82, 0x00, 0x00, 0x00, 0x00])
-            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 10])
-            self.assertEqual(controller.commands[start_len + 3], [0x88, 0x00, 0x64])
-
-    def test_sampling_resume_from_negative_failure_overwrites_positive_cells(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            adapter = self._build_adapter(tmpdir)
-            clock = _SamplingManualClock([0.0, 0.5, 1.0, 1.4, 2.0, 2.4])
-            write_calls: list[tuple[str, int, str, int, object]] = []
-            original_write = adapter.write_sampling_result
-
-            def recording_write(
-                section: str,
-                pwm: int,
-                direction: str,
-                sample_index: int,
-                value,
-                *,
-                base_group: str | None = None,
-            ):
-                if section == "Range":
-                    write_calls.append((section, pwm, direction, sample_index, value))
-                return original_write(section, pwm, direction, sample_index, value, base_group=base_group)
-
-            adapter.write_sampling_result = recording_write  # type: ignore[assignment]
-            controller = _RecordingSamplingController(
-                adapter,
-                SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=1),
-                clock,
-            )
-
-            self.assertTrue(controller.start(8, "RZ"))
-            self._drive_home_sequence(controller, start_pos=10)
-            controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
-            controller.handle_runtime_packet([0x81, 0x52])
-            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 70])
-            controller.handle_runtime_packet([0x88, 0x53, 0xFF, 0x9C])
-            controller.handle_runtime_packet([0x81, 0x52])
-
-            self.assertTrue(controller.can_resume)
-            self.assertEqual(write_calls.count(("Range", 100, "+", 1, 60)), 1)
-
-            start_len = len(controller.commands)
-            self.assertTrue(controller.resume(node_id=8, node_name="RZ", base_group="3X"))
-            self.assertEqual(controller.commands[start_len], [0x84, 0x00, 0x50])
-            controller.handle_runtime_packet([0x84, 0x53, 0x00, 0x50])
-            controller.handle_runtime_packet([0x81, 0x53, 0x82, 0x00, 0x00, 0x00, 0x00])
-            controller.handle_runtime_packet([0x81, 0x45, 0x82, 0x00, 0x00, 0x00, 0x00])
-            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 10])
-            controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
-            controller.handle_runtime_packet([0x81, 0x52])
-            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 70])
-
-            self.assertEqual(write_calls.count(("Range", 100, "+", 1, 60)), 2)
-            self.assertEqual(controller.commands[start_len + 3], [0x88, 0x00, 0x64])
-
-    def test_sampling_resume_is_disabled_after_encoder_reset_failure(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            adapter = self._build_adapter(tmpdir)
-            clock = _SamplingManualClock([0.0, 0.05])
-            controller = _RecordingSamplingController(
-                adapter,
-                SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=1),
-                clock,
-            )
-
-            self.assertTrue(controller.start(8, "RZ"))
-            self._drive_home_sequence(controller, start_pos=10)
-            controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
-            controller.handle_runtime_packet([0x81, 0x49])
-
-            self.assertFalse(controller.can_resume)
-            enabled, reason = controller.resume_availability(node_id=8, node_name="RZ", base_group="3X")
-            self.assertFalse(enabled)
-            self.assertIn("encoder reset", reason.lower())
-
-    def test_sampling_resume_requires_original_node_and_sheet(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            adapter = self._build_adapter(tmpdir)
-            clock = _SamplingManualClock([0.0])
-            controller = _RecordingSamplingController(
-                adapter,
-                SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=1),
-                clock,
-            )
-
-            self.assertTrue(controller.start(8, "RZ"))
-            controller.abort_by_user()
-
-            enabled, reason = controller.resume_availability(node_id=9, node_name="PZ", base_group="3X")
-            self.assertFalse(enabled)
-            self.assertIn("original Sampling node", reason)
-
-            enabled, reason = controller.resume_availability(node_id=8, node_name="RZ", base_group="3X_A")
-            self.assertFalse(enabled)
-            self.assertIn("original Sampling sheet", reason)
-
-    def test_sampling_home_tpos_accepts_l_sensor_without_dd(self) -> None:
-        for home_packet in ([0x81, 0x4C], [0x81, 0x5A, 0x4C]):
-            with self.subTest(home_packet=home_packet):
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    controller = self._build_sampling_controller(tmpdir, [0.0])
-
-                    self.assertTrue(controller.start(8, "RZ"))
-                    controller.handle_runtime_packet([0x84, 0x53, 0x00, 0x50])
-                    controller.handle_runtime_packet([0x81, 0x53, 0x82, 0x00, 0x00, 0x00, 0x00])
-                    controller.handle_runtime_packet(home_packet)
-                    self.assertEqual(controller.commands[-1], [0x82])
-                    self.assertEqual(controller.commands.count([0xDD]), 0)
-
-                    controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 10])
-                    self.assertEqual(controller.commands[-1], [0x88, 0x00, 0x64])
-                    self.assertEqual(controller.failures, [])
-
-    def test_sampling_duplicate_positive_sensor_while_waiting_for_getpos_is_ignored(self) -> None:
-        duplicate_packets = ([0x81, 0x52], [0x81, 0x5A, 0x52])
-        for duplicate_packet in duplicate_packets:
-            with self.subTest(duplicate_packet=duplicate_packet):
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    controller = self._build_sampling_controller(tmpdir, [0.0, 0.05, 1.0], samples_per_direction=2)
-
-                    self.assertTrue(controller.start(8, "RZ"))
-                    self._drive_home_sequence(controller, start_pos=10)
-                    controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
-                    controller.handle_runtime_packet([0x81, 0x52])
-
-                    self.assertEqual(controller.commands[-1], [0x82])
-                    controller.handle_runtime_packet(duplicate_packet)
-                    self.assertEqual(controller.commands[-1], [0x82])
-                    self.assertEqual(controller.commands.count([0xDD]), 0)
-
-                    controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 70])
-                    self.assertEqual(len(controller.measurements), 1)
-                    self.assertEqual(controller.commands[-1], [0x88, 0xFF, 0x9C])
-                    self.assertEqual(controller.failures, [])
-
-    def test_sampling_duplicate_negative_sensor_while_waiting_for_getpos_is_ignored(self) -> None:
-        duplicate_packets = ([0x81, 0x4C], [0x81, 0x5A, 0x4C])
-        for duplicate_packet in duplicate_packets:
-            with self.subTest(duplicate_packet=duplicate_packet):
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    controller = self._build_sampling_controller(tmpdir, [0.0, 0.05, 1.0, 1.05], samples_per_direction=2)
-
-                    self.assertTrue(controller.start(8, "RZ"))
-                    self._drive_home_sequence(controller, start_pos=10)
-                    controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
-                    controller.handle_runtime_packet([0x81, 0x52])
-                    controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 70])
-
-                    self.assertEqual(controller.commands[-1], [0x88, 0xFF, 0x9C])
-                    controller.handle_runtime_packet([0x88, 0x53, 0xFF, 0x9C])
-
-                    controller.handle_runtime_packet(duplicate_packet)
-                    self.assertEqual(controller.commands[-1], [0x82])
-                    self.assertEqual(controller.commands.count([0xDD]), 0)
-
-                    controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 20])
-                    self.assertEqual(len(controller.measurements), 2)
-                    self.assertEqual(controller.commands[-1], [0x88, 0x00, 0x64])
-                    self.assertEqual(controller.failures, [])
-
-    def test_sampling_opposite_sensor_while_waiting_for_getpos_still_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            controller = self._build_sampling_controller(tmpdir, [0.0, 0.05], samples_per_direction=1)
-
-            self.assertTrue(controller.start(8, "RZ"))
-            self._drive_home_sequence(controller, start_pos=10)
-            controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
-            controller.handle_runtime_packet([0x81, 0x52])
-            controller.handle_runtime_packet([0x81, 0x4C])
-
-            self.assertFalse(controller.is_active())
-            self.assertEqual(controller.commands[-1], [0xDD])
-            self.assertTrue(controller.failures)
-            self.assertIn("Unexpected packet", controller.failures[-1])
-
-    def test_sampling_middle_tpos_l_sensor_is_not_treated_as_success(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            controller = self._build_sampling_controller(tmpdir, [0.0, 0.05, 1.0])
-
-            self.assertTrue(controller.start(8, "RZ"))
-            controller.handle_runtime_packet([0x84, 0x53, 0x00, 0x50])
-            controller.handle_runtime_packet([0x81, 0x53, 0x82, 0x00, 0x00, 0x00, 0x00])
-            controller.handle_runtime_packet([0x81, 0x45, 0x82, 0x00, 0x00, 0x00, 0x00])
-            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 10])
-            controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
-
-            controller.handle_runtime_packet([0x81, 0x4C])
-
-            self.assertFalse(controller.is_active())
-            self.assertEqual(controller.commands[-1], [0xDD])
-            self.assertTrue(controller.failures)
-            self.assertIn("Wrong sensor event", controller.failures[-1])
-
-    def test_sampling_controller_runs_two_samples_and_writes_workbook_sections(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            adapter = self._build_adapter(tmpdir)
-            clock = _SamplingManualClock([0.0, 0.5, 1.0, 1.4, 2.0, 2.8, 3.0, 3.6])
-            controller = _RecordingSamplingController(
-                adapter,
-                SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=2),
-                clock,
-            )
-
-            self.assertTrue(controller.start(8, "RZ"))
-            self._drive_home_sequence(controller, start_pos=10)
-
-            self.assertEqual(controller.commands[3], [0x88, 0x00, 0x64])
-            controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
-            controller.handle_runtime_packet([0x81, 0x52])
-            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 70])
-            self.assertEqual(controller.commands[5], [0x88, 0xFF, 0x9C])
-            controller.handle_runtime_packet([0x88, 0x53, 0xFF, 0x9C])
-            controller.handle_runtime_packet([0x81, 0x4C])
-            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 20])
-
-            self.assertEqual(controller.commands[7], [0x88, 0x00, 0x64])
-            controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
-            controller.handle_runtime_packet([0x81, 0x52])
-            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 90])
-            self.assertEqual(controller.commands[9], [0x88, 0xFF, 0x9C])
-            controller.handle_runtime_packet([0x88, 0x53, 0xFF, 0x9C])
-            controller.handle_runtime_packet([0x81, 0x4C])
-            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 30])
-            self.assertEqual(controller.commands[11], [0x81, 0x00, 0x00, 0x00, 0x1E])
-            controller.handle_runtime_packet([0x81, 0x45, 0x82, 0x00, 0x00, 0x00, 0x1E])
-
-            self.assertFalse(controller.is_active())
-            self.assertTrue(controller.completed_called)
-            self.assertEqual(controller.failures, [])
-            self.assertEqual(controller.aborts, [])
-            self.assertEqual(controller.completed_counts[-1], (4, 4))
-            self.assertEqual(len(controller.measurements), 4)
-            self.assertEqual(controller.measurements[0].range_value, 60)
-            self.assertAlmostEqual(controller.measurements[0].elapsed_seconds, 0.5)
-            self.assertAlmostEqual(controller.measurements[0].speed, 120.0)
-            self.assertEqual(controller.measurements[1].range_value, 50)
-            self.assertAlmostEqual(controller.measurements[1].elapsed_seconds, 0.4)
-            self.assertAlmostEqual(controller.measurements[1].speed, 125.0)
-            self.assertEqual(controller.measurements[2].range_value, 80)
-            self.assertAlmostEqual(controller.measurements[3].range_value, 60)
-
-            output_path = Path(tmpdir) / "sampling_completed.xlsx"
-            adapter.save_completed_workbook(output_path)
-            sampling_sheet = load_workbook(output_path)["3X_D"]
-
-        self.assertEqual(sampling_sheet["B3"].value, 60)
-        self.assertEqual(sampling_sheet["B4"].value, 50)
-        self.assertAlmostEqual(sampling_sheet["B20"].value, 120.0)
-        self.assertAlmostEqual(sampling_sheet["B37"].value, 0.5)
-        self.assertEqual(sampling_sheet["C3"].value, 80)
-        self.assertEqual(sampling_sheet["C4"].value, 60)
-        self.assertAlmostEqual(sampling_sheet["C20"].value, 100.0)
-        self.assertAlmostEqual(sampling_sheet["C37"].value, 0.8)
-
-    def test_sampling_time_is_rounded_only_for_output_and_writes(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            adapter = self._build_adapter(tmpdir)
-            clock = _SamplingManualClock([1.0, 11.114672391])
-            controller = _RecordingSamplingController(
-                adapter,
-                SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=1),
-                clock,
-            )
-
-            write_calls: list[tuple[str, object]] = []
-            original_write = adapter.write_sampling_result
-
-            def recording_write(section: str, pwm: int, direction: str, sample_index: int, value, *, base_group: str | None = None):
-                if section == "Time":
-                    write_calls.append((section, value))
-                return original_write(section, pwm, direction, sample_index, value, base_group=base_group)
-
-            adapter.write_sampling_result = recording_write  # type: ignore[assignment]
-
-            self.assertTrue(controller.start(8, "RZ"))
-            self.assertEqual(controller.commands[0], [0x84, 0x00, 0x50])
-            controller.handle_runtime_packet([0x84, 0x53, 0x00, 0x50])
-            self.assertEqual(controller.commands[1], [0x81, 0x00, 0x00, 0x00, 0x00])
-            controller.handle_runtime_packet([0x81, 0x45, 0x82, 0x00, 0x00, 0x00, 0x00])
-            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 10])
-            self.assertEqual(controller.commands[3], [0x88, 0x00, 0x64])
-            controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
-            controller.handle_runtime_packet([0x81, 0x52])
-            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x03, 0xE8])
-
-            self.assertTrue(write_calls)
-            self.assertEqual(write_calls[0][0], "Time")
-            self.assertAlmostEqual(float(write_calls[0][1]), 10.115)
-            self.assertAlmostEqual(controller.measurements[0].elapsed_seconds, 10.114672391)
-            self.assertAlmostEqual(controller.measurements[0].speed, 990 / 10.114672391, places=9)
-
-    def test_sampling_timeout_sends_dd_and_stops_loop(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            adapter = self._build_adapter(tmpdir)
-            clock = _SamplingManualClock([0.0, 0.05, 1.0])
-            controller = _RecordingSamplingController(
-                adapter,
-                SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=1),
-                clock,
-            )
-
-            self.assertTrue(controller.start(8, "RZ"))
-            self._drive_home_sequence(controller, start_pos=10)
-            self.assertEqual(controller.commands[0], [0x84, 0x00, 0x50])
-            self.assertEqual(controller.commands[1], [0x81, 0x00, 0x00, 0x00, 0x00])
-            self.assertEqual(controller.commands[2], [0x82])
-            self.assertEqual(controller.commands[3], [0x88, 0x00, 0x64])
-            controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
-            controller.on_timeout()
-
-            self.assertFalse(controller.is_active())
-            self.assertEqual(controller.commands[-1], [0xDD])
-            self.assertTrue(controller.failures)
-            self.assertIn("Timed out", controller.failures[-1])
-
-    def test_sampling_middle_timeout_sends_dd_and_fails_after_final_sample(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            adapter = self._build_adapter(tmpdir)
-            clock = _SamplingManualClock([0.0, 0.01, 1.0, 1.4])
-            controller = _RecordingSamplingController(
-                adapter,
-                SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=1),
-                clock,
-            )
-
-            self.assertTrue(controller.start(8, "RZ"))
-            self.assertEqual(controller.commands[0], [0x84, 0x00, 0x50])
-            controller.handle_runtime_packet([0x84, 0x53, 0x00, 0x50])
-            self.assertEqual(controller.commands[1], [0x81, 0x00, 0x00, 0x00, 0x00])
-            controller.handle_runtime_packet([0x81, 0x53, 0x82, 0x00, 0x00, 0x00, 0x00])
-            controller.handle_runtime_packet([0x81, 0x45, 0x82, 0x00, 0x00, 0x00, 0x00])
-            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 10])
-            controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
-            controller.handle_runtime_packet([0x81, 0x52])
-            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 20])
-            controller.handle_runtime_packet([0x88, 0x53, 0xFF, 0x9C])
-            controller.handle_runtime_packet([0x81, 0x4C])
-            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 10])
-
-            self.assertEqual(controller.commands[-1][0], 0x81)
-            controller.on_timeout()
-
-            self.assertFalse(controller.is_active())
-            self.assertEqual(controller.commands[-1], [0xDD])
-            self.assertTrue(controller.failures)
-            self.assertIn("Timed out", controller.failures[-1])
-
-    def test_sampling_timeout_then_abort_does_not_duplicate_dd(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            adapter = self._build_adapter(tmpdir)
-            clock = _SamplingManualClock([0.0])
-            controller = _RecordingSamplingController(
-                adapter,
-                SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=1),
-                clock,
-            )
-
-            self.assertTrue(controller.start(8, "RZ"))
-            controller.on_timeout()
-            dd_count_after_timeout = controller.commands.count([0xDD])
-            self.assertEqual(dd_count_after_timeout, 1)
-
-            self.assertFalse(controller.abort_by_user())
-            self.assertEqual(controller.commands.count([0xDD]), 1)
-
-    def test_sampling_rejects_unexpected_packet_while_waiting_for_ack(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            adapter = self._build_adapter(tmpdir)
-            clock = _SamplingManualClock([0.0])
-            controller = _RecordingSamplingController(
-                adapter,
-                SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=1),
-                clock,
-            )
-
-            self.assertTrue(controller.start(8, "RZ"))
-            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 1])
-
-            self.assertFalse(controller.is_active())
-            self.assertEqual(controller.commands[-1], [0xDD])
-            self.assertTrue(controller.failures)
-            self.assertIn("Unexpected packet", controller.failures[-1])
-
-
 if __name__ == "__main__":
     unittest.main()

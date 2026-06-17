@@ -456,6 +456,14 @@ class ProductionPage(BaseWorkspacePage):
         if not resumed:
             self._refresh_sampling_action_states()
             return
+        context = self._sampling_controller.resume_context
+        if context is not None:
+            message = (
+                f"Sampling resumed for Node {context.node_id} {context.node_name} "
+                f"from PWM {context.current_pwm}, sample {context.current_sample_index}"
+            )
+            self.console_message.emit(f"[Production] {message}")
+            self.progress_section.append_step(message)
         self._refresh_sampling_action_states()
 
     def _handle_sampling_popup_start_requested(self) -> None:
@@ -578,11 +586,6 @@ class ProductionPage(BaseWorkspacePage):
                 self._set_status_result("READY", "Sampling did not start.")
             return
 
-        self.console_message.emit(
-            f"[Production] Sampling start requested for Node {node_id} {node_name} using sheet {layout.sheet_name}"
-        )
-        self.progress_section.append_step(f"Sampling started for Node {node_id} {node_name}", level="success")
-        self.progress_section.append_step(f"Derived sampling sheet: {layout.sheet_name}")
         self._set_status_result("TESTING", f"Sampling started for Node {node_id} {node_name}")
         self.stage_section.set_stage_status("sampling", "testing")
         if self._sampling_popup is not None:
@@ -675,8 +678,6 @@ class ProductionPage(BaseWorkspacePage):
         self._handle_sampling_packet_message(f"[TX] Node {self._sampling_session.node_id}: {hex_str}")
 
     def _handle_sampling_log(self, text: str) -> None:
-        self.console_message.emit(text)
-        self.progress_section.append_step(text, level="info")
         if self._sampling_popup is not None:
             self._sampling_popup.append_operator_log(text)
 
@@ -685,44 +686,34 @@ class ProductionPage(BaseWorkspacePage):
             self._sampling_popup.append_packet_log(text)
 
     def _handle_sampling_state_changed(self, text: str) -> None:
-        self.progress_section.append_step(f"Sampling state: {text}")
         if self._sampling_popup is not None:
             self._sampling_popup.set_state_text(text)
 
     def _handle_sampling_status_changed(self, text: str) -> None:
-        self.progress_section.append_step(text)
         if self._sampling_popup is not None:
             self._sampling_popup.set_status_text(text)
 
     def _handle_sampling_current_pwm_changed(self, pwm: int) -> None:
-        self.progress_section.append_step(f"Sampling PWM: {int(pwm)}")
         if self._sampling_popup is not None:
             self._sampling_popup.set_current_pwm(int(pwm))
 
     def _handle_sampling_current_direction_changed(self, direction: str) -> None:
-        self.progress_section.append_step(f"Sampling direction: {direction}")
         if self._sampling_popup is not None:
             self._sampling_popup.set_current_direction(direction)
 
     def _handle_sampling_current_sample_changed(self, sample_index: int) -> None:
-        self.progress_section.append_step(f"Sampling sample index: {int(sample_index)}")
         if self._sampling_popup is not None:
             self._sampling_popup.set_current_sample(sample_index, self._sampling_controller.samples_per_direction)
 
     def _handle_sampling_completed_count_changed(self, completed: int, total: int) -> None:
-        self.progress_section.append_step(f"Sampling progress: {int(completed)}/{int(total)}")
         if self._sampling_popup is not None:
             self._sampling_popup.set_completed_counts(completed, total)
 
     def _handle_sampling_latest_measurement_changed(self, range_value: int, elapsed_seconds: float, speed: float) -> None:
-        self.progress_section.append_step(
-            f"Latest sampling measurement: range={int(range_value)}, time={float(elapsed_seconds):.3f}, speed={float(speed):.6f}"
-        )
         if self._sampling_popup is not None:
             self._sampling_popup.set_latest_measurement_details(range_value, elapsed_seconds, speed)
 
     def _handle_sampling_latest_cell_written(self, cell_ref: str) -> None:
-        self.progress_section.append_step(f"Latest workbook cell written: {cell_ref}")
         if self._sampling_popup is not None:
             current_text = self._sampling_popup.latest_cell_value.text()
             if "Range=" not in current_text and "Speed=" not in current_text and "Time=" not in current_text:
@@ -757,7 +748,7 @@ class ProductionPage(BaseWorkspacePage):
 
     def _handle_sampling_completed(self) -> None:
         self._detach_sampling_runtime_window()
-        self._set_status_result("PASS", "Sampling completed")
+        self._set_status_result("PASS", f"Sampling PASSED for {self._sampling_node_label()}")
         self.stage_section.set_stage_status("sampling", "pass")
         if self._sampling_popup is not None:
             self._sampling_popup.set_state_text("COMPLETED")
@@ -769,7 +760,7 @@ class ProductionPage(BaseWorkspacePage):
 
     def _handle_sampling_failed(self, reason: str) -> None:
         self._detach_sampling_runtime_window(preserve_session=True)
-        self._set_status_result("FAIL", reason)
+        self._set_status_result("FAIL", f"Sampling FAILED for {self._sampling_node_label()}: {reason}")
         self.stage_section.set_stage_status("sampling", "fail")
         if self._sampling_popup is not None:
             self._sampling_popup.set_state_text("FAILED")
@@ -788,7 +779,7 @@ class ProductionPage(BaseWorkspacePage):
 
     def _handle_sampling_aborted(self, reason: str) -> None:
         self._detach_sampling_runtime_window(preserve_session=True)
-        self._set_status_result("ABORTED", reason)
+        self._set_status_result("FAIL", f"Sampling ABORTED for {self._sampling_node_label()}")
         self.stage_section.set_stage_status("sampling", "fail")
         if self._sampling_popup is not None:
             self._sampling_popup.set_state_text("ABORTED")
@@ -1685,6 +1676,20 @@ class ProductionPage(BaseWorkspacePage):
                 log_message = reason
             self.progress_section.append_step(log_message, level=level)
         self._last_status_entry = entry
+
+    def _sampling_node_label(self) -> str:
+        if self._sampling_session is not None:
+            node_id = self._sampling_session.node_id
+            node_name = self._sampling_session.node_name
+        else:
+            try:
+                node_id, node_name = self.test_control_section.selected_node()
+            except RuntimeError:
+                node_id = None
+                node_name = None
+        if node_id is None or not node_name:
+            return "Node ?"
+        return f"Node {int(node_id)} {node_name}"
 
 
 class _ConnectionStatusSection(PanelFrame):

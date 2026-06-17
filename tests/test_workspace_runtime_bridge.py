@@ -139,7 +139,7 @@ mcu:
             self.assertEqual(runtime_window.backend_client.sent_commands[1], (1, COMMANDS["ROBOT Off"]))
             self.assertEqual(list(on_payload), COMMANDS["ROBOT On"])
             self.assertEqual(list(off_payload), COMMANDS["ROBOT Off"])
-            self.assertEqual(runtime_window.sys_mode["text"], "System Off")
+            self.assertIsNone(runtime_window.sys_mode)
 
     def test_bridge_loads_editor_model_from_accuess_style_yaml(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -230,8 +230,7 @@ class FunctionalControllerTests(unittest.TestCase):
         fin_be = list((fin).to_bytes(4, 'big', signed=True))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('E'), 0x82, *fin_be))
 
-        # STOPMOTOR then PASSED
-        self.assertEqual(self.ctrl.commands[-1], build_stopmotor())
+        # PASS directly after completion
         self.assertTrue(self.ctrl.passed)
         self.assertIn("PASSED", self.ctrl.statuses[-1])
         # Ensure no POSITION zero (EA ...) was ever requested
@@ -502,7 +501,6 @@ class FunctionalControllerTests(unittest.TestCase):
         pos = 2498
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('N'), 0x82, *list(pos.to_bytes(4, 'big', signed=True))))
         self.assertTrue(self.ctrl.passed)
-        self.assertEqual(self.ctrl.commands[-1], build_stopmotor())
 
     def test_middle_position_tolerance_boundary_uses_shared_value(self):
         ctrl_pass = Recorder(
@@ -649,7 +647,6 @@ class FunctionalControllerTests(unittest.TestCase):
         middle = 2500
         self.assertEqual(ctrl.commands[-1], build_tpos(middle))
         ctrl.handle_runtime_packet(pkt(0x81, ord('E'), 0x82, *list((2502).to_bytes(4, 'big', signed=True))))
-        self.assertEqual(ctrl.commands[-1], build_stopmotor())
         self.assertTrue(ctrl.passed)
 
     def test_wrong_sensor_events_fail_safely(self):

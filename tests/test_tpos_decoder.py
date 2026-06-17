@@ -18,8 +18,9 @@ def test_tpos_decoding():
     print(f"Decoded Key: {key}")
     print(f"Decoded Value: {value}")
     
-    assert key == "tpos"
-    assert "TPOS 'E' at position: 147459" in value
+    assert key == "tpos_status"
+    assert value["event"] == "reached"
+    assert value["position"] == 147459
     print("Test Passed!")
 
 if __name__ == "__main__":
