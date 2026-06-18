@@ -60,3 +60,9 @@ class BaseWorkspacePage(QScrollArea):
     def add_full_width(self, widget: QWidget) -> None:
         """Add one section that spans the page width."""
         self.content_layout.addWidget(widget)
+
+    def build_session_state(self):  # pragma: no cover - optional shell hook
+        return None
+
+    def handle_session_metadata_edit_requested(self) -> bool:  # pragma: no cover - optional shell hook
+        return False

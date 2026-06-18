@@ -93,6 +93,7 @@ class IpqcExcelAdapterTests(unittest.TestCase):
         self.assertEqual(expected.serial_number, "1223303010")
         self.assertEqual(expected.pwm, "100")
         self.assertEqual(expected.operator, "operator-a")
+        self.assertEqual(expected.assembler, "")
         self.assertEqual(expected.other_parameters, "N/A")
 
     def test_read_expected_uuid_serial_reads_b4_only(self) -> None:
@@ -117,6 +118,45 @@ class IpqcExcelAdapterTests(unittest.TestCase):
 
         self.assertEqual(pwm_value, "100")
 
+    def test_write_production_metadata_inserts_assembler_row_and_preserves_parameter_lookup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template_path = self._create_ipqc_template(tmpdir)
+            adapter = IpqcExcelAdapter()
+            adapter.load_template(template_path)
+            adapter.write_production_metadata("  operator-b  ", " assembler-b ")
+            discovered_rows, _raw_labels = adapter.discover_programming_parameter_rows()
+            output_path = Path(tmpdir) / "ipqc_completed.xlsx"
+            adapter.save_completed_workbook(output_path)
+            summary = load_workbook(output_path)["3X"]
+
+        self.assertEqual(summary["A4"].value, "Assembler")
+        self.assertEqual(summary["B3"].value, "operator-b")
+        self.assertEqual(summary["B4"].value, "assembler-b")
+        self.assertEqual(summary["A5"].value, "UUID")
+        self.assertEqual(summary["B5"].value, "1223303010")
+        self.assertEqual(summary["A6"].value, "PWM")
+        self.assertEqual(summary["B6"].value, "100")
+        self.assertEqual(discovered_rows["uuid"], 5)
+        self.assertEqual(discovered_rows["pwm"], 6)
+
+    def test_read_production_metadata_reads_inserted_assembler_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template_path = self._create_ipqc_template(tmpdir)
+            workbook = load_workbook(template_path)
+            summary = workbook["3X"]
+            summary.insert_rows(4, 1)
+            summary["A4"] = "Assembler"
+            summary["B3"] = "operator-a"
+            summary["B4"] = "assembler-a"
+            workbook.save(template_path)
+
+            adapter = IpqcExcelAdapter()
+            adapter.load_template(template_path)
+            metadata = adapter.read_production_metadata()
+
+        self.assertEqual(metadata.operator_name, "operator-a")
+        self.assertEqual(metadata.assembler_name, "assembler-a")
+
     def test_missing_required_expected_cell_is_reported_clearly(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             template_path = self._create_ipqc_template(tmpdir)
@@ -126,7 +166,7 @@ class IpqcExcelAdapterTests(unittest.TestCase):
 
             adapter = IpqcExcelAdapter()
             adapter.load_template(template_path)
-            with self.assertRaisesRegex(ValueError, "B4"):
+            with self.assertRaisesRegex(ValueError, "serial number/UUID"):
                 adapter.read_expected_summary(strict=True)
 
     def test_write_uuid_and_pwm_actual_and_checks(self) -> None:

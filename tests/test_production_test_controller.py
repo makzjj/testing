@@ -285,32 +285,34 @@ class ProductionPageWorkflowTests(unittest.TestCase):
         ws["C2"] = "Programmed"
         ws["D2"] = "Check"
         ws["A3"] = "Operator"
-        ws["A4"] = "UUID"
-        ws["A5"] = "PWM"
-        ws["A6"] = "Proportionate (P)"
-        ws["A7"] = "Integral (I)"
-        ws["A8"] = "Derivative (D)"
-        ws["A9"] = "PID_SlewRate"
-        ws["A10"] = "RampDown_Slope"
-        ws["A11"] = "RampDown_Step"
-        ws["A12"] = "RampDown_MinVel"
-        ws["A13"] = "RampDown_TargetOffset"
-        ws["A14"] = "RampDown_Region"
-        ws["A15"] = "Acceptable_Error"
-        ws["B4"] = "1223303010"
-        ws["B5"] = "100"
+        ws["A4"] = "Assembler"
+        ws["A5"] = "UUID"
+        ws["A6"] = "PWM"
+        ws["A7"] = "Proportionate (P)"
+        ws["A8"] = "Integral (I)"
+        ws["A9"] = "Derivative (D)"
+        ws["A10"] = "PID_SlewRate"
+        ws["A11"] = "RampDown_Slope"
+        ws["A12"] = "RampDown_Step"
+        ws["A13"] = "RampDown_MinVel"
+        ws["A14"] = "RampDown_TargetOffset"
+        ws["A15"] = "RampDown_Region"
+        ws["A16"] = "Acceptable_Error"
+        ws["B3"] = "operator-a"
+        ws["B4"] = "assembler-a"
+        ws["B5"] = "1223303010"
+        ws["B6"] = "100"
         if with_optional_fields:
-            ws["B6"] = "0.125"
-            ws["B7"] = "0.025"
-            ws["B8"] = "0.010"
-            ws["B9"] = "1500"
-            ws["B10"] = "-25"
-            ws["B11"] = "4"
-            ws["B12"] = "8"
-            ws["B13"] = "-12"
-            ws["B14"] = "75"
-            ws["B15"] = "30"
-            ws["B3"] = "operator-a"
+            ws["B7"] = "0.125"
+            ws["B8"] = "0.025"
+            ws["B9"] = "0.010"
+            ws["B10"] = "1500"
+            ws["B11"] = "-25"
+            ws["B12"] = "4"
+            ws["B13"] = "8"
+            ws["B14"] = "-12"
+            ws["B15"] = "75"
+            ws["B16"] = "30"
             ws["C3"] = "N/A"
             ws["D3"] = "N/A"
         ProductionPageWorkflowTests._populate_sampling_sheet(sampling_3x)
@@ -361,18 +363,18 @@ class ProductionPageWorkflowTests(unittest.TestCase):
 
     @staticmethod
     def _populate_updated_programming_values(sheet) -> None:
-        sheet["B4"] = "1243203029"
-        sheet["B5"] = "0"
-        sheet["B6"] = "2000"
-        sheet["B7"] = "1"
-        sheet["B8"] = "35000"
-        sheet["B9"] = "0"
-        sheet["B10"] = "6"
-        sheet["B11"] = "3"
-        sheet["B12"] = "90"
-        sheet["B13"] = "512"
-        sheet["B14"] = "5"
-        sheet["B15"] = "256"
+        sheet["B5"] = "1243203029"
+        sheet["B6"] = "0"
+        sheet["B7"] = "2000"
+        sheet["B8"] = "1"
+        sheet["B9"] = "35000"
+        sheet["B10"] = "0"
+        sheet["B11"] = "6"
+        sheet["B12"] = "3"
+        sheet["B13"] = "90"
+        sheet["B14"] = "512"
+        sheet["B15"] = "5"
+        sheet["B16"] = "256"
 
     def test_production_page_updates_ui_for_runtime_backed_selected_node_pass(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -455,7 +457,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self._create_ipqc_workbook(template_path)
             workbook = load_workbook(template_path)
             summary = workbook["3X"]
-            for row in range(6, 16):
+            for row in range(7, 17):
                 summary[f"B{row}"] = None
             workbook.save(template_path)
 
@@ -529,18 +531,19 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             workbook = load_workbook(template_path)
             summary = workbook["3X"]
             summary["B3"] = "operator-a"
-            summary["B4"] = "123456789"
-            summary["B5"] = "80"
-            summary["B6"] = "2000"
-            summary["B7"] = "1"
-            summary["B8"] = "35000"
-            summary["B9"] = "0"
-            summary["B10"] = "40"
-            summary["B11"] = "3"
-            summary["B12"] = "50"
-            summary["B13"] = "512"
-            summary["B14"] = "10"
-            summary["B15"] = "256"
+            summary["B4"] = "assembler-a"
+            summary["B5"] = "123456789"
+            summary["B6"] = "80"
+            summary["B7"] = "2000"
+            summary["B8"] = "1"
+            summary["B9"] = "35000"
+            summary["B10"] = "0"
+            summary["B11"] = "40"
+            summary["B12"] = "3"
+            summary["B13"] = "50"
+            summary["B14"] = "512"
+            summary["B15"] = "10"
+            summary["B16"] = "256"
             workbook.save(template_path)
 
             with patch(
@@ -731,18 +734,18 @@ class ProductionPageWorkflowTests(unittest.TestCase):
 
             output_sheet = page._ipqc_excel_adapter._workbook["3X"]
             expected_rows = {
-                4: ("123456789", "PASS"),
-                5: ("80", "PASS"),
-                6: ("2000", "PASS"),
-                7: ("1", "PASS"),
-                8: ("35000", "PASS"),
-                9: ("0", "PASS"),
-                10: ("40", "PASS"),
-                11: ("3", "PASS"),
-                12: ("50", "PASS"),
-                13: ("512", "PASS"),
-                14: ("10", "PASS"),
-                15: ("256", "PASS"),
+                5: ("123456789", "PASS"),
+                6: ("80", "PASS"),
+                7: ("2000", "PASS"),
+                8: ("1", "PASS"),
+                9: ("35000", "PASS"),
+                10: ("0", "PASS"),
+                11: ("40", "PASS"),
+                12: ("3", "PASS"),
+                13: ("50", "PASS"),
+                14: ("512", "PASS"),
+                15: ("10", "PASS"),
+                16: ("256", "PASS"),
             }
             for row, (actual_text, check_text) in expected_rows.items():
                 with self.subTest(row=row):
@@ -1642,10 +1645,10 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self._app.processEvents()
 
             output_sheet = page._ipqc_excel_adapter._workbook["3X"]
-            self.assertEqual(output_sheet["C4"].value, str(expected_uuid))
-            self.assertEqual(output_sheet["D4"].value, "PASS")
-            self.assertEqual(output_sheet["C5"].value, "100")
+            self.assertEqual(output_sheet["C5"].value, str(expected_uuid))
             self.assertEqual(output_sheet["D5"].value, "PASS")
+            self.assertEqual(output_sheet["C6"].value, "100")
+            self.assertEqual(output_sheet["D6"].value, "PASS")
             self.assertEqual(page.uuid_section.workbook_validation_text, "Workbook Validation: PASSED")
             self.assertTrue(page.uuid_section.save_button.isEnabled())
             self.assertFalse(hasattr(page, "_result_logger"))
@@ -1696,16 +1699,16 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self._app.processEvents()
 
             output_sheet = page._ipqc_excel_adapter._workbook["3X"]
-            self.assertEqual(output_sheet["C4"].value, "1223303011")
-            self.assertEqual(output_sheet["D4"].value, "FAIL")
-            self.assertEqual(output_sheet["C5"].value, "50")
+            self.assertEqual(output_sheet["C5"].value, "1223303011")
             self.assertEqual(output_sheet["D5"].value, "FAIL")
+            self.assertEqual(output_sheet["C6"].value, "50")
+            self.assertEqual(output_sheet["D6"].value, "FAIL")
             self.assertIn("Workbook Validation: FAILED", page.uuid_section.workbook_validation_text)
             self.assertFalse(page.uuid_section.save_button.isEnabled())
             self.assertIn("expected 1223303010, actual 1223303011", page.progress_section.to_plain_text())
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook write wiring tests.")
-    def test_production_page_write_uuid_logs_pwm_blocked_when_b5_invalid(self) -> None:
+    def test_production_page_write_uuid_logs_pwm_blocked_when_b6_invalid(self) -> None:
         runtime_window = _FakeRuntimeWindow()
         runtime_window.node_status[3] = {
             "connected": True,
@@ -1721,7 +1724,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             workbook_path = Path(tmpdir) / "ipqc.xlsx"
             self._create_ipqc_workbook(workbook_path, with_optional_fields=False)
             wb = load_workbook(workbook_path)
-            wb["3X"]["B5"] = "bad-pwm"
+            wb["3X"]["B6"] = "bad-pwm"
             wb.save(workbook_path)
 
             with patch(
@@ -1735,7 +1738,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self._app.processEvents()
 
             self.assertEqual(runtime_window.backend_client.sent_commands, [])
-            self.assertIn("Expected PWM in workbook B5 is invalid", page.result_summary_section._reason_label.text())
+        self.assertIn("Expected PWM in workbook B6 is invalid", page.result_summary_section._reason_label.text())
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook write wiring tests.")
     def test_production_page_workbook_write_failure_is_reporting_error(self) -> None:
@@ -1808,10 +1811,10 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self._app.processEvents()
 
             output_sheet = page._ipqc_excel_adapter._workbook["3X"]
-            self.assertEqual(output_sheet["C4"].value, str(expected_uuid))
-            self.assertEqual(output_sheet["D4"].value, "PASS")
-            self.assertEqual(output_sheet["C5"].value, "100")
+            self.assertEqual(output_sheet["C5"].value, str(expected_uuid))
             self.assertEqual(output_sheet["D5"].value, "PASS")
+            self.assertEqual(output_sheet["C6"].value, "100")
+            self.assertEqual(output_sheet["D6"].value, "PASS")
             self.assertEqual(page.uuid_section.workbook_validation_text, "Workbook Validation: PASSED")
             self.assertTrue(page.uuid_section.save_button.isEnabled())
             self.assertEqual(page.progress_section.to_plain_text().count("[PASS] Workbook parameter read-back verification"), 1)
@@ -1862,10 +1865,10 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self._app.processEvents()
 
             output_sheet = page._ipqc_excel_adapter._workbook["3X"]
-            self.assertEqual(output_sheet["C4"].value, "1223303011")
-            self.assertEqual(output_sheet["D4"].value, "FAIL")
-            self.assertEqual(output_sheet["C5"].value, "50")
+            self.assertEqual(output_sheet["C5"].value, "1223303011")
             self.assertEqual(output_sheet["D5"].value, "FAIL")
+            self.assertEqual(output_sheet["C6"].value, "50")
+            self.assertEqual(output_sheet["D6"].value, "FAIL")
             self.assertIn("Workbook Validation: FAILED", page.uuid_section.workbook_validation_text)
             self.assertFalse(page.uuid_section.save_button.isEnabled())
             self.assertIn("[FAIL] UUID read-back verification", page.progress_section.to_plain_text())
@@ -1908,10 +1911,10 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self._app.processEvents()
 
             output_sheet = page._ipqc_excel_adapter._workbook["3X"]
-            self.assertEqual(output_sheet["C4"].value, "1223303010")
-            self.assertEqual(output_sheet["D4"].value, "PASS")
-            self.assertEqual(output_sheet["C5"].value, "50")
-            self.assertEqual(output_sheet["D5"].value, "FAIL")
+            self.assertEqual(output_sheet["C5"].value, "1223303010")
+            self.assertEqual(output_sheet["D5"].value, "PASS")
+            self.assertEqual(output_sheet["C6"].value, "50")
+            self.assertEqual(output_sheet["D6"].value, "FAIL")
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook UUID verify tests.")
     def test_production_page_verify_pwm_timeout_writes_fail_after_read_back_only(self) -> None:
@@ -1937,8 +1940,8 @@ class ProductionPageWorkflowTests(unittest.TestCase):
                 self._app.processEvents()
 
             output_sheet = page._ipqc_excel_adapter._workbook["3X"]
-            self.assertIn(output_sheet["C5"].value, (None, ""))
-            self.assertIn(output_sheet["D5"].value, (None, ""))
+            self.assertIn(output_sheet["C6"].value, (None, ""))
+            self.assertIn(output_sheet["D6"].value, (None, ""))
             page._handle_verify_uuid()
             self._app.processEvents()
             self.assertEqual(runtime_window.backend_client.sent_commands[-1], (3, [0xE0, 0x3F]))
@@ -1946,15 +1949,15 @@ class ProductionPageWorkflowTests(unittest.TestCase):
                 {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0xE0, "params": [0x3A, *build_uuid_write_payload(1223303010)[2:]]}
             )
             self._app.processEvents()
-            self.assertIn(output_sheet["C5"].value, (None, ""))
-            self.assertIn(output_sheet["D5"].value, (None, ""))
+            self.assertIn(output_sheet["C6"].value, (None, ""))
+            self.assertIn(output_sheet["D6"].value, (None, ""))
             page._parameter_controller._handle_parameter_verify_timeout()
             self._app.processEvents()
 
-            self.assertEqual(output_sheet["C4"].value, "1223303010")
-            self.assertEqual(output_sheet["D4"].value, "PASS")
-            self.assertIn(output_sheet["C5"].value, (None, ""))
-            self.assertIn(output_sheet["D5"].value, (None, ""))
+            self.assertEqual(output_sheet["C5"].value, "1223303010")
+            self.assertEqual(output_sheet["D5"].value, "PASS")
+            self.assertIn(output_sheet["C6"].value, (None, ""))
+            self.assertIn(output_sheet["D6"].value, (None, ""))
             self.assertIn("actual timeout", page.progress_section.to_plain_text())
             self.assertIn("Workbook Validation: FAILED", page.uuid_section.workbook_validation_text)
 
@@ -2125,18 +2128,18 @@ class ProductionParameterControllerTests(unittest.TestCase):
         controller = ProductionParameterController(_FakeBridge(_FakeRuntimeWindow()))
         defs = {definition.name: definition for definition in default_workbook_parameter_definitions()}
         expected_cells = {
-            "UUID": ("B4", "C4", "D4"),
-            "PWM": ("B5", "C5", "D5"),
-            "PID_P": ("B6", "C6", "D6"),
-            "PID_I": ("B7", "C7", "D7"),
-            "PID_D": ("B8", "C8", "D8"),
-            "PID_SlewRate": ("B9", "C9", "D9"),
-            "RampDown_Slope": ("B10", "C10", "D10"),
-            "RampDown_Step": ("B11", "C11", "D11"),
-            "RampDown_MinVel": ("B12", "C12", "D12"),
-            "RampDown_TargetOffset": ("B13", "C13", "D13"),
-            "RampDown_Region": ("B14", "C14", "D14"),
-            "Acceptable_Error": ("B15", "C15", "D15"),
+            "UUID": ("B5", "C5", "D5"),
+            "PWM": ("B6", "C6", "D6"),
+            "PID_P": ("B7", "C7", "D7"),
+            "PID_I": ("B8", "C8", "D8"),
+            "PID_D": ("B9", "C9", "D9"),
+            "PID_SlewRate": ("B10", "C10", "D10"),
+            "RampDown_Slope": ("B11", "C11", "D11"),
+            "RampDown_Step": ("B12", "C12", "D12"),
+            "RampDown_MinVel": ("B13", "C13", "D13"),
+            "RampDown_TargetOffset": ("B14", "C14", "D14"),
+            "RampDown_Region": ("B15", "C15", "D15"),
+            "Acceptable_Error": ("B16", "C16", "D16"),
         }
         for name, cells in expected_cells.items():
             with self.subTest(name=name):
@@ -3753,7 +3756,7 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             workbook_path = Path(tmpdir) / "ipqc.xlsx"
             self._create_ipqc_workbook(workbook_path, with_optional_fields=False)
             wb = load_workbook(workbook_path)
-            for row in range(4, 16):
+            for row in range(5, 17):
                 wb["3X"][f"A{row}"] = f"Unsupported {row}"
             wb.save(workbook_path)
             with patch(
@@ -3783,7 +3786,7 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             workbook_path = Path(tmpdir) / "ipqc.xlsx"
             self._create_ipqc_workbook(workbook_path, with_optional_fields=False)
             wb = load_workbook(workbook_path)
-            wb["3X"]["B4"] = "not-a-uuid"
+            wb["3X"]["B5"] = "not-a-uuid"
             wb.save(workbook_path)
             with patch(
                 "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
@@ -3799,7 +3802,7 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             self._app.processEvents()
             self.assertEqual(runtime_window.backend_client.sent_commands, [])
             self.assertEqual(page.result_summary_section._status_label.text(), "FAIL")
-            self.assertIn("Expected S/N in workbook B4 is invalid", page.result_summary_section._reason_label.text())
+            self.assertIn("Expected S/N in workbook B5 is invalid", page.result_summary_section._reason_label.text())
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook guard tests.")
     def test_parameter_verification_cache_skips_passed_results_and_finishes_after_retry(self) -> None:

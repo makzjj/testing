@@ -40,6 +40,9 @@ class WorkspaceSnapshotFactory:
             active_page=active_page,
             alerts_text=alerts_text,
             has_live_runtime=has_live_runtime,
+            operator_name="Missing",
+            assembler_name="Missing",
+            metadata_edit_enabled=False,
         )
 
     def build_boot_messages(self, project_definition: ProjectDefinition) -> list[str]:

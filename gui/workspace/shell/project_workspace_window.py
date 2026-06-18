@@ -97,6 +97,7 @@ class ProjectWorkspaceWindow(QMainWindow):
 
         self.live_session_panel = LiveSessionPanel()
         self.live_session_panel.setMaximumHeight(104)
+        self.live_session_panel.edit_requested.connect(self._handle_session_edit_requested)
         right_layout.addWidget(self.live_session_panel, 0)
 
         self._update_shell_widths()
@@ -129,6 +130,8 @@ class ProjectWorkspaceWindow(QMainWindow):
                 page.config_path_changed.connect(self.top_bar.update_config_path)
             if hasattr(page, "project_definition_changed"):
                 page.project_definition_changed.connect(self._handle_project_definition_changed)
+            if hasattr(page, "session_state_changed"):
+                page.session_state_changed.connect(self._refresh_live_session_panel)
             if hasattr(page, "action_requested"):
                 page.action_requested.connect(self._handle_action)
 
@@ -140,14 +143,13 @@ class ProjectWorkspaceWindow(QMainWindow):
         self.top_bar.set_active_route(route_id)
 
         route_label = get_route_label(self._navigation_items, route_id)
-        session_state = self._bridge.get_session_state(route_label)
-        self.live_session_panel.update_state(session_state)
-
         page = self._pages[route_id]
         if route_id == ROUTE_PROJECT_CONFIG:
+            session_state = self._bridge.get_session_state(route_label)
             page.refresh(session_state)
         else:
             page.refresh()
+        self._refresh_live_session_panel()
 
         if log_route_change:
             self.console_panel.append_line(f"Switched workspace route to {route_label}")
@@ -177,6 +179,17 @@ class ProjectWorkspaceWindow(QMainWindow):
         """Refresh shell-wide navigation and identity when the Project Config state changes."""
         self._sync_shell_to_project_definition(preferred_route=self._current_route_id, log_route_change=False)
 
+    def _handle_session_edit_requested(self) -> None:
+        """Route the global Session edit action to the active page owner."""
+        page = self._pages.get(self._current_route_id)
+        if page is None:
+            return
+        handler = getattr(page, "handle_session_metadata_edit_requested", None)
+        if not callable(handler):
+            return
+        if handler():
+            self._refresh_live_session_panel()
+
     def _sync_shell_to_project_definition(self, preferred_route: str | None, log_route_change: bool) -> None:
         """Refresh shell navigation, title, and active route from the latest project definition."""
         self._project_definition = self._bridge.project_definition
@@ -188,6 +201,19 @@ class ProjectWorkspaceWindow(QMainWindow):
         )
         self.setWindowTitle(f"{WORKSPACE_TITLE_PREFIX} - {self._project_definition.display_name}")
         self.set_active_page(self._resolve_available_route(preferred_route), log_route_change=log_route_change)
+
+    def _refresh_live_session_panel(self, *_args: object) -> None:
+        """Refresh the shell session card from the active page or bridge snapshot."""
+        page = self._pages.get(self._current_route_id)
+        session_state = None
+        if page is not None:
+            build_session_state = getattr(page, "build_session_state", None)
+            if callable(build_session_state):
+                session_state = build_session_state()
+        if session_state is None:
+            route_label = get_route_label(self._navigation_items, self._current_route_id)
+            session_state = self._bridge.get_session_state(route_label)
+        self.live_session_panel.update_state(session_state)
 
     def _resolve_available_route(self, preferred_route: str | None) -> str:
         """Resolve the best enabled route by preference: requested, Production, Firmware, then first enabled."""

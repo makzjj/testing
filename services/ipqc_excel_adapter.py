@@ -23,9 +23,16 @@ except ImportError:  # pragma: no cover - guarded at runtime.
 @dataclass(frozen=True)
 class IpqcExpectedSummary:
     operator: str = ""
+    assembler: str = ""
     serial_number: str = ""
     pwm: str = ""
     other_parameters: str = ""
+
+
+@dataclass(frozen=True)
+class ProductionWorkbookMetadata:
+    operator_name: str = ""
+    assembler_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -53,21 +60,21 @@ class IpqcExcelAdapter:
 
     _PROGRAMMING_ROW_LOOKUP: dict[str, int] = {
         "operator": 3,
-        "uuid": 4,
-        "pwm": 5,
-        "proportionate (p)": 6,
-        "pid_p": 6,
-        "integral (i)": 7,
-        "pid_i": 7,
-        "derivative (d)": 8,
-        "pid_d": 8,
-        "pid_slewrate": 9,
-        "rampdown_slope": 10,
-        "rampdown_step": 11,
-        "rampdown_minvel": 12,
-        "rampdown_targetoffset": 13,
-        "rampdown_region": 14,
-        "acceptable_error": 15,
+        "uuid": 5,
+        "pwm": 6,
+        "proportionate (p)": 7,
+        "pid_p": 7,
+        "integral (i)": 8,
+        "pid_i": 8,
+        "derivative (d)": 9,
+        "pid_d": 9,
+        "pid_slewrate": 10,
+        "rampdown_slope": 11,
+        "rampdown_step": 12,
+        "rampdown_minvel": 13,
+        "rampdown_targetoffset": 14,
+        "rampdown_region": 15,
+        "acceptable_error": 16,
     }
 
     _SUMMARY_PARAMETER_ALIASES: dict[str, int] = {
@@ -134,33 +141,66 @@ class IpqcExcelAdapter:
     def read_expected_summary(self, *, strict: bool = True) -> IpqcExpectedSummary:
         sheet = self._require_base_sheet()
 
-        operator = self._read_cell_text(sheet, "B3")
-        serial_number = self._read_cell_text(sheet, "B4")
-        pwm = self._read_cell_text(sheet, "B5")
-        other_parameters = self._read_cell_text(sheet, "B6")
+        operator_row = self._find_programming_label_row(sheet, "Operator")
+        assembler_row = self._find_programming_label_row(sheet, "Assembler")
+        serial_row = self._find_programming_label_row(sheet, "UUID")
+        pwm_row = self._find_programming_label_row(sheet, "PWM")
+        operator = self._read_cell_text(sheet, f"B{operator_row}") if operator_row is not None else ""
+        assembler = self._read_cell_text(sheet, f"B{assembler_row}") if assembler_row is not None else ""
+        serial_number = self._read_cell_text(sheet, f"B{serial_row}") if serial_row is not None else ""
+        pwm = self._read_cell_text(sheet, f"B{pwm_row}") if pwm_row is not None else ""
+        other_parameters = self._read_cell_text(sheet, f"B{(pwm_row + 1) if pwm_row is not None else 6}")
 
         if strict:
+            if not operator_row:
+                raise ValueError(f"Expected operator is missing in sheet '{sheet.title}' column A.")
             if not serial_number:
-                raise ValueError(f"Expected serial number/UUID is missing in sheet '{sheet.title}' cell B4.")
+                raise ValueError(f"Expected serial number/UUID is missing in sheet '{sheet.title}'.")
             if not pwm:
-                raise ValueError(f"Expected PWM is missing in sheet '{sheet.title}' cell B5.")
+                raise ValueError(f"Expected PWM is missing in sheet '{sheet.title}'.")
 
         return IpqcExpectedSummary(
             operator=operator,
+            assembler=assembler,
             serial_number=serial_number,
             pwm=pwm,
             other_parameters=other_parameters,
         )
 
     def read_expected_uuid_serial(self) -> str:
-        """Read expected UUID/S/N from active base sheet cell B4."""
+        """Read expected UUID/S/N from the label-based Programming sheet."""
         sheet = self._require_base_sheet()
-        return self._read_cell_text(sheet, "B4")
+        return self._read_programming_label_value(sheet, "UUID")
 
     def read_expected_pwm_value(self) -> str:
-        """Read expected PWM from active base sheet cell B5."""
+        """Read expected PWM from the label-based Programming sheet."""
         sheet = self._require_base_sheet()
-        return self._read_cell_text(sheet, "B5")
+        return self._read_programming_label_value(sheet, "PWM")
+
+    def read_production_metadata(self) -> ProductionWorkbookMetadata:
+        """Read operator and assembler metadata from the active Programming sheet."""
+        sheet = self._require_base_sheet()
+        operator = self._read_programming_label_value(sheet, "Operator")
+        assembler = self._read_programming_label_value(sheet, "Assembler")
+        return ProductionWorkbookMetadata(operator_name=operator, assembler_name=assembler)
+
+    def write_production_metadata(self, operator_name: str, assembler_name: str) -> None:
+        """Persist operator and assembler names in the active Programming sheet."""
+        sheet = self._require_base_sheet()
+        operator_row = self._find_programming_label_row(sheet, "Operator")
+        if operator_row is None:
+            raise ValueError(f"Programming sheet '{sheet.title}' is missing an Operator row.")
+        assembler_row = self._find_programming_label_row(sheet, "Assembler")
+        if assembler_row is None:
+            sheet.insert_rows(operator_row + 1, 1)
+            assembler_row = operator_row + 1
+            sheet[f"A{assembler_row}"] = "Assembler"
+        sheet[f"B{operator_row}"] = str(operator_name).strip()
+        sheet[f"B{assembler_row}"] = str(assembler_name).strip()
+        sheet[f"C{operator_row}"] = ""
+        sheet[f"D{operator_row}"] = ""
+        sheet[f"C{assembler_row}"] = ""
+        sheet[f"D{assembler_row}"] = ""
 
     def read_cell_text(self, cell_ref: str) -> str:
         """Read one text cell from the active base sheet."""
@@ -169,7 +209,10 @@ class IpqcExcelAdapter:
 
     def resolve_programming_row(self, parameter_name: str) -> int:
         normalized = self._normalize_programming_label(parameter_name)
-        row = self._PROGRAMMING_ROW_LOOKUP.get(normalized)
+        discovered_rows, _raw_labels = self.discover_programming_parameter_rows()
+        row = discovered_rows.get(normalized)
+        if row is None:
+            row = self._PROGRAMMING_ROW_LOOKUP.get(normalized)
         if row is not None:
             return row
         raise ValueError(f"Unsupported programming parameter '{parameter_name}' (normalized: '{normalized}').")
@@ -184,7 +227,7 @@ class IpqcExcelAdapter:
         sheet = self._require_base_sheet()
         discovered_rows: dict[str, int] = {}
         raw_labels: list[str] = []
-        for row in range(3, 16):
+        for row in range(3, sheet.max_row + 1):
             label = self._read_cell_text(sheet, f"A{row}")
             if not label:
                 continue
@@ -315,6 +358,20 @@ class IpqcExcelAdapter:
     @staticmethod
     def _normalize_programming_label(value: str) -> str:
         return " ".join(str(value).strip().casefold().split())
+
+    def _read_programming_label_value(self, sheet: Worksheet, label: str) -> str:
+        row = self._find_programming_label_row(sheet, label)
+        if row is None:
+            return ""
+        return self._read_cell_text(sheet, f"B{row}")
+
+    def _find_programming_label_row(self, sheet: Worksheet, label: str) -> int | None:
+        normalized_label = self._normalize_programming_label(label)
+        for row in range(3, sheet.max_row + 1):
+            cell_label = self._read_cell_text(sheet, f"A{row}")
+            if self._normalize_programming_label(cell_label) == normalized_label:
+                return row
+        return None
 
     def suggest_completed_output_path(self) -> Path:
         template_path = self._require_template_path()

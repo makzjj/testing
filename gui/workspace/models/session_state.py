@@ -15,3 +15,6 @@ class SessionState:
     active_page: str
     alerts_text: str = ""
     has_live_runtime: bool = False
+    operator_name: str = "Missing"
+    assembler_name: str = "Missing"
+    metadata_edit_enabled: bool = False

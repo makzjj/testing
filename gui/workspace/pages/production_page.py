@@ -10,6 +10,7 @@ from pathlib import Path
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QComboBox,
+    QDialog,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -25,7 +26,9 @@ from PyQt6.QtWidgets import (
 )
 
 from ..bridges import WorkspaceRuntimeBridge
+from ..dialogs import ProductionMetadataDialog
 from ..dialogs.sampling_test_popup import SamplingTestPopup
+from ..models import SessionState
 from ..widgets import DetailListWidget, LabeledControl, PanelFrame, SimpleTableWidget
 from ..controllers.sampling_test_controller import SamplingTestConfig, SamplingTestController
 from .single_axis_functional_popup import SingleAxisFunctionalPopup
@@ -98,6 +101,7 @@ class ProductionPage(BaseWorkspacePage):
     """Operator-focused Production page for runtime-backed node testing."""
 
     console_message = pyqtSignal(str)
+    session_state_changed = pyqtSignal(object)
 
     def __init__(self, bridge: WorkspaceRuntimeBridge) -> None:
         super().__init__("Production", "Simple node-based quality control testing.")
@@ -203,15 +207,96 @@ class ProductionPage(BaseWorkspacePage):
         self._reset_result_only()
         self._refresh_runtime_panels()
         self._refresh_workbook_action_states()
+        self._emit_session_state_changed()
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
         self._refresh_runtime_panels()
 
+    def build_session_state(self) -> SessionState:
+        workbook_loaded = self._ipqc_excel_adapter.has_loaded_workbook()
+        if workbook_loaded:
+            metadata = self._ipqc_excel_adapter.read_production_metadata()
+            operator_name = metadata.operator_name.strip() or "Missing"
+            assembler_name = metadata.assembler_name.strip() or "Missing"
+        else:
+            operator_name = "Missing"
+            assembler_name = "Missing"
+        session_text = "Metadata ready" if operator_name != "Missing" and assembler_name != "Missing" else "Metadata missing"
+        connection_text = "Workbook loaded" if workbook_loaded else "Workbook not loaded"
+        project_definition = getattr(self._bridge, "project_definition", None)
+        project_name = getattr(project_definition, "display_name", "Production")
+        return SessionState(
+            project_name=project_name,
+            connection_text=connection_text,
+            session_text=session_text,
+            active_page="Production",
+            alerts_text="",
+            has_live_runtime=bool(self._bridge.get_runtime_communication_model(create_if_missing=False).get("connected", False)),
+            operator_name=operator_name,
+            assembler_name=assembler_name,
+            metadata_edit_enabled=workbook_loaded,
+        )
+
+    def handle_session_metadata_edit_requested(self) -> bool:
+        if not self._ipqc_excel_adapter.has_loaded_workbook():
+            self.console_message.emit("[Production] Load an IPQC workbook before editing operator information.")
+            return False
+        saved = self._prompt_for_production_metadata()
+        if saved:
+            self._emit_session_state_changed()
+        return saved
+
     def refresh(self) -> None:
         """Refresh lightweight status without resetting operator state."""
         self._refresh_runtime_panels()
         self.progress_section.append_step("Refreshed Production status view")
+
+    def _emit_session_state_changed(self) -> None:
+        self.session_state_changed.emit(self.build_session_state())
+
+    def _prompt_for_production_metadata(self) -> bool:
+        if not self._ipqc_excel_adapter.has_loaded_workbook():
+            return False
+        existing_metadata = self._ipqc_excel_adapter.read_production_metadata()
+        dialog = ProductionMetadataDialog(
+            self,
+            operator_name=existing_metadata.operator_name,
+            assembler_name=existing_metadata.assembler_name,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return False
+        operator_name, assembler_name = dialog.metadata_values()
+        try:
+            self._ipqc_excel_adapter.write_production_metadata(operator_name, assembler_name)
+        except Exception as exc:
+            self.console_message.emit(f"[Production] Failed to save operator/assembler information: {exc}")
+            self.progress_section.append_step("Operator information save failed", level="error")
+            return False
+        self.console_message.emit("[Production] Operator information saved")
+        self.progress_section.append_step("Operator information saved")
+        self._refresh_ipqc_expected_preview()
+        self._refresh_workbook_action_states()
+        return True
+
+    def _ensure_production_metadata_for_test_start(self) -> bool:
+        if not self._ipqc_excel_adapter.has_loaded_workbook():
+            return True
+        if self._has_complete_production_metadata():
+            return True
+        if self._prompt_for_production_metadata():
+            self._emit_session_state_changed()
+            return True
+        self.console_message.emit("[Production] Operator information missing")
+        self.progress_section.append_step("Operator information missing", level="error")
+        self._set_status_result("FAIL", "Operator information missing")
+        return False
+
+    def _has_complete_production_metadata(self) -> bool:
+        if not self._ipqc_excel_adapter.has_loaded_workbook():
+            return False
+        metadata = self._ipqc_excel_adapter.read_production_metadata()
+        return bool(metadata.operator_name.strip() and metadata.assembler_name.strip())
 
     def _refresh_runtime_panels(self) -> None:
         self._refresh_connection_status()
@@ -328,6 +413,8 @@ class ProductionPage(BaseWorkspacePage):
             self._set_status_result("READY", str(exc))
             self.console_message.emit(f"[Production] {exc}")
             return
+        if not self._ensure_production_metadata_for_test_start():
+            return
         expected_uuid = None
         expected_uuid_text = self._get_workbook_expected_uuid_text()
         if expected_uuid_text:
@@ -347,6 +434,8 @@ class ProductionPage(BaseWorkspacePage):
         self._refresh_connection_status()
 
     def _handle_single_axis_test_requested(self) -> None:
+        if not self._ensure_production_metadata_for_test_start():
+            return
         if self._single_axis_popup is None:
             # Pass the workspace bridge so the popup can discover the already-connected backend
             self._single_axis_popup = SingleAxisFunctionalPopup(
@@ -394,6 +483,8 @@ class ProductionPage(BaseWorkspacePage):
         self.progress_section.append_step("Performance Test UI is present but command flow is not enabled yet")
 
     def _handle_start_sampling_requested(self) -> None:
+        if not self._ensure_production_metadata_for_test_start():
+            return
         popup = self._ensure_sampling_popup()
         self._refresh_sampling_popup_state()
         popup.show()
@@ -853,6 +944,9 @@ class ProductionPage(BaseWorkspacePage):
         self.console_message.emit(f"[Production] Loaded IPQC workbook: {path}")
         self.progress_section.append_step(f"Loaded IPQC workbook with {len(groups)} sheet group(s)", level="success")
         self._set_status_result("READY", "Workbook loaded; no write performed yet")
+        if not self._has_complete_production_metadata():
+            self._prompt_for_production_metadata()
+        self._emit_session_state_changed()
         self._refresh_workbook_action_states()
 
     def _handle_ipqc_sheet_group_changed(self, base_group: str) -> None:
