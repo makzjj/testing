@@ -328,14 +328,14 @@ class IpqcExcelAdapterTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "overwrite"):
                 adapter.save_completed_workbook(template_path)
 
-    def test_suggest_completed_output_path_is_in_template_directory(self) -> None:
+    def test_suggest_completed_output_path_is_in_runtime_exports_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             template_path = self._create_ipqc_template(tmpdir, filename="line_a.xlsx")
             adapter = IpqcExcelAdapter()
             adapter.load_template(template_path)
             suggested = adapter.suggest_completed_output_path()
 
-        self.assertEqual(suggested.parent, template_path.parent)
+        self.assertEqual(suggested.parent, Path.cwd() / "data" / "exports")
         self.assertTrue(suggested.name.startswith("line_a_3X_completed_"))
         self.assertEqual(suggested.suffix, ".xlsx")
 

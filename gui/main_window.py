@@ -34,6 +34,7 @@ from services import (
     ensure_node_status,
     reset_node_status,
 )
+from utils.deployment_paths import get_bundle_resource_path, get_runtime_exports_dir
 from gui.test_all_dialog import TestAllDialog
 from gui.comm_monitor import CommMonitorDialog
 from gui.motor_animation_module import MotorAnimationModule
@@ -52,12 +53,6 @@ UUID_RETRY_CHECK_DELAY = 200          # Delay before checking UUID retry
 NODE_CMD_DELAY_1 = 150                # First command delay
 NODE_CMD_DELAY_2 = 300                # Second command delay
 NODE_CMD_DELAY_3 = 450                # Third command delay
-
-def resource_path(relative_path):
-    """Get absolute path to resource, works for dev and for PyInstaller."""
-    if hasattr(sys, "_MEIPASS"):
-        return os.path.join(sys._MEIPASS, relative_path)
-    return os.path.join(os.path.abspath("."), relative_path)
 
 def get_timestamp():
     return QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss.zzz")
@@ -212,7 +207,7 @@ class MainWindow(QMainWindow):
 
 
     def setup_ui(self):
-        title_logo_path  = resource_path("resources/biobot_logo.png")
+        title_logo_path = str(get_bundle_resource_path("resources", "biobot_logo.png"))
         self.setWindowIcon(QIcon(title_logo_path))
         self.setWindowTitle(f"BioBot Robot Arm Tester Version: {VERSION}")
         self.resize(1386, 900) # Increased width by 5% (1320 * 1.05)
@@ -351,7 +346,7 @@ class MainWindow(QMainWindow):
 
     def create_logo_panel(self):
         logo_label = QLabel()
-        pixmap = QPixmap(resource_path("resources/biobot_logo.png"))
+        pixmap = QPixmap(str(get_bundle_resource_path("resources", "biobot_logo.png")))
         logo_label.setPixmap(pixmap.scaledToHeight(44, Qt.TransformationMode.SmoothTransformation))
         logo_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         # Remove setFixedWidth to allow responsive sizing
@@ -413,7 +408,7 @@ class MainWindow(QMainWindow):
 
         logo_label = QLabel()
         # pixmap = QPixmap("resources/biobot_logo.png")  # Adjust path as needed
-        pixmap = QPixmap(resource_path("resources/biobot_logo.png"))
+        pixmap = QPixmap(str(get_bundle_resource_path("resources", "biobot_logo.png")))
 
         logo_label.setPixmap(pixmap.scaledToHeight(50))
         # logo_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
@@ -838,7 +833,7 @@ class MainWindow(QMainWindow):
         selected_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Runtime Console Log",
-            default_name,
+            str(get_runtime_exports_dir() / default_name),
             "Log Files (*.log);;Text Files (*.txt);;All Files (*.*)",
         )
         
@@ -863,7 +858,7 @@ class MainWindow(QMainWindow):
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "Export Sequence Logs as CSV",
-            default_filename,
+            str(get_runtime_exports_dir() / default_filename),
             "CSV Files (*.csv);;All Files (*)"
         )
 
@@ -2539,10 +2534,10 @@ class MainWindow(QMainWindow):
 
     def setup_logging(self):
         """Create a logs directory and initialize the daily log file."""
-        project_root = Path(__file__).resolve().parents[1]
-        self.rx_log_writer = RxLogWriter.create(project_root)
+        self.rx_log_writer = RxLogWriter.create()
         
         self.log_file_path = str(self.rx_log_writer.log_file_path)
+        self.log(f"BioBot Robot Arm Tester Version: {VERSION}")
         self.log(f"📝 Logging Rx data to {self.log_file_path}")
 
     def log_rx_data(self, data: bytes):

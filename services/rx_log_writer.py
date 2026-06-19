@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+from utils.deployment_paths import get_runtime_logs_dir
+
 
 class RxLogWriter:
     """Writes raw RX bytes to a timestamped log file."""
@@ -13,9 +15,9 @@ class RxLogWriter:
         self.log_file_path = log_file_path
 
     @classmethod
-    def create(cls, project_root: Path) -> "RxLogWriter":
-        log_dir = project_root / "logs"
-        log_dir.mkdir(exist_ok=True)
+    def create(cls, project_root: Path | None = None) -> "RxLogWriter":
+        log_dir = (Path(project_root) / "logs") if project_root is not None else get_runtime_logs_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         return cls(log_dir / f"rx_data_log_{timestamp}.txt")
 

@@ -15,11 +15,17 @@ from myconfig.project_models import (
     ValidationIssue,
 )
 from myconfig.yaml_repair_service import YamlRepairService
+from utils.deployment_paths import (
+    get_bundled_project_configs_dir,
+    get_runtime_project_configs_dir,
+    is_frozen,
+    seed_directory_if_empty,
+)
 
 
 logger = logging.getLogger("myconfig.project_loader")
 
-PROJECT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "project_configs"
+PROJECT_CONFIG_DIR = get_runtime_project_configs_dir() if is_frozen() else Path(__file__).resolve().parents[1] / "project_configs"
 SUPPORTED_PROJECT_SUFFIXES = (".yaml", ".yml")
 _YAML_REPAIR_SERVICE = YamlRepairService()
 _SCHEMA_ADAPTER = ConfigSchemaAdapter()
@@ -28,7 +34,9 @@ _SCHEMA_ADAPTER = ConfigSchemaAdapter()
 def ensure_project_config_dir() -> Path:
     """Ensure the project config directory exists before discovery begins."""
     logger.debug("Ensuring project config directory exists, path=%s", PROJECT_CONFIG_DIR)
-    PROJECT_CONFIG_DIR.mkdir(exist_ok=True)
+    PROJECT_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if is_frozen():
+        seed_directory_if_empty(get_bundled_project_configs_dir(), PROJECT_CONFIG_DIR)
     return PROJECT_CONFIG_DIR
 
 

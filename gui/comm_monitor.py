@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, QDateTime
 from myconfig.constants import BCMD_COMM_TEST_START, NODE_ID_MAPPING
 from myconfig.version import VERSION
+from utils.deployment_paths import get_runtime_exports_dir
 
 class CommMonitorDialog(QDialog):
     def __init__(self, parent=None):
@@ -459,7 +460,7 @@ class CommMonitorDialog(QDialog):
             
             file_name, _ = QFileDialog.getSaveFileName(
                 self, "Save Test Report", 
-                f"CommTestReport_{QDateTime.currentDateTime().toString('yyyyMMdd_HHmmss')}.txt",
+                str(get_runtime_exports_dir() / f"CommTestReport_{QDateTime.currentDateTime().toString('yyyyMMdd_HHmmss')}.txt"),
                 "Text Files (*.txt);;Log Files (*.log)"
             )
             

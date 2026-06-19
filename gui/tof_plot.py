@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from myconfig.constants import COMMANDS
 from serial_conn.commands import CommandBuilder
+from utils.deployment_paths import get_runtime_exports_dir
 
 
 class ToFPlotWindow(QMainWindow):
@@ -302,7 +303,7 @@ class ToFPlotWindow(QMainWindow):
         filepath, _ = QFileDialog.getSaveFileName(
             self,
             "Save ToF Log Data",
-            "",
+            str(get_runtime_exports_dir() / "tof_log_data.csv"),
             "CSV Excel Files (*.csv);;All Files (*)"
         )
         

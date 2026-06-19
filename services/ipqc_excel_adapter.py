@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from utils.deployment_paths import get_runtime_exports_dir
+
 try:
     from openpyxl.utils import get_column_letter
     from openpyxl import load_workbook
@@ -384,10 +386,10 @@ class IpqcExcelAdapter:
         active_group = self._require_active_group()
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "Z"
         base_name = f"{template_path.stem}_{active_group}_completed_{stamp}"
-        candidate = template_path.parent / f"{base_name}{template_path.suffix}"
+        candidate = get_runtime_exports_dir() / f"{base_name}{template_path.suffix}"
         index = 1
         while candidate.exists():
-            candidate = template_path.parent / f"{base_name}_{index}{template_path.suffix}"
+            candidate = get_runtime_exports_dir() / f"{base_name}_{index}{template_path.suffix}"
             index += 1
         return candidate
 

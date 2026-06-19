@@ -6,6 +6,7 @@ from PyQt6.QtCore import QDateTime
 from PyQt6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
 
 from .effects import apply_card_shadow
+from utils.deployment_paths import get_runtime_exports_dir
 
 
 class ConsolePanel(QWidget):
@@ -69,7 +70,7 @@ class ConsolePanel(QWidget):
         selected_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Workspace Log",
-            default_name,
+            str(get_runtime_exports_dir() / default_name),
             "Log Files (*.log);;Text Files (*.txt);;All Files (*.*)",
         )
         if not selected_path:
