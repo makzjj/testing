@@ -95,6 +95,7 @@ class IpqcExcelAdapter:
         self._base_groups: list[str] = []
         self._active_group: str | None = None
         self._last_output_path: Path | None = None
+        self._workbook_session_id = 0
 
     @property
     def template_path(self) -> Path | None:
@@ -103,6 +104,10 @@ class IpqcExcelAdapter:
     @property
     def last_output_path(self) -> Path | None:
         return self._last_output_path
+
+    @property
+    def workbook_session_id(self) -> int:
+        return int(self._workbook_session_id)
 
     @property
     def available_base_sheet_groups(self) -> list[str]:
@@ -128,6 +133,7 @@ class IpqcExcelAdapter:
         self._base_groups = base_groups
         self._active_group = base_groups[0]
         self._last_output_path = None
+        self._workbook_session_id += 1
         return list(base_groups)
 
     def select_sheet_group(self, base_group: str) -> None:

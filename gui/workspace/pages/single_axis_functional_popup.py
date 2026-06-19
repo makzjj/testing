@@ -306,6 +306,7 @@ class SingleAxisFunctionalPopup(QDialog):
         # Start controller with real transport if available
         self._ensure_controller()
         assert self.controller is not None
+        self.controller.cfg.zero_tolerance = int(tolerance)
         self.controller.cfg.movement_tolerance = int(tolerance)
         self.controller.cfg.range_tolerance = int(tolerance)
         self.controller.cfg.middle_position_tolerance = int(tolerance)

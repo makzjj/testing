@@ -109,6 +109,51 @@ class FunctionalControllerTests(unittest.TestCase):
         returned_be = list((returned_home_pos).to_bytes(4, 'big', signed=True))
         ctrl.handle_runtime_packet(pkt(0x82, *returned_be))
 
+    def _drive_to_zero_verification(self, ctrl: Recorder, home_position: int) -> None:
+        ctrl.start(3)
+        self.assertEqual(ctrl.commands[-1], [0xC4, 0x3F])
+        ctrl.handle_runtime_packet(pkt(0xC4, 0x3A, 0x03))
+        self.assertEqual(ctrl.commands[-1], build_hunting_timeout(10000))
+        ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
+        ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
+        ctrl.handle_runtime_packet(pkt(0x82, *list(int(home_position).to_bytes(4, "big", signed=True))))
+
+    def test_selected_zero_tolerance_boundary_values_pass_and_fail_correctly(self):
+        cases = [(-2, True), (2, True), (6, True), (2048, True), (-2048, True), (2049, False), (-2049, False)]
+        for home_position, should_pass in cases:
+            with self.subTest(home_position=home_position):
+                ctrl = Recorder(
+                    FunctionalTestConfig(
+                        hunt_timeout_ms=10_000,
+                        velocity_left_to_right=190,
+                        velocity_right_to_left=-190,
+                        zero_tolerance=2048,
+                        movement_tolerance=512,
+                    )
+                )
+                self._drive_to_zero_verification(ctrl, home_position)
+                if should_pass:
+                    self.assertNotEqual(ctrl.commands[-1], build_stopmotor())
+                    self.assertFalse(ctrl.failed)
+                else:
+                    self.assertTrue(ctrl.failed)
+                    self.assertEqual(ctrl.commands[-1], build_stopmotor())
+
+    def test_zero_verification_uses_selected_ui_tolerance_value(self):
+        ctrl = Recorder(
+            FunctionalTestConfig(
+                hunt_timeout_ms=10_000,
+                velocity_left_to_right=190,
+                velocity_right_to_left=-190,
+                zero_tolerance=2048,
+                movement_tolerance=512,
+            )
+        )
+        self._drive_to_zero_verification(ctrl, 6)
+        self.assertFalse(ctrl.failed)
+        self.assertIn(build_lflag_query_payload(), ctrl.commands)
+
     def test_abort_by_user_sends_dd_and_ignores_late_packets(self):
         self.ctrl.abort_by_user()
         self.assertTrue(self.ctrl.aborted)

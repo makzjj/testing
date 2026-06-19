@@ -78,6 +78,7 @@ class SamplingTestPopup(QDialog):
         self.sampling_sheet_value = self._make_value_label("-")
         self.status_value = self._make_value_label("Idle")
         self.reason_value = self._make_value_label("-")
+        self.failure_context_value = self._make_value_label("-")
         self.resume_hint_value = self._make_value_label("Resume unavailable: Sampling has not started.")
         self.range_mode_combo = QComboBox()
         self.range_mode_combo.addItems(["Full Range", "Half Range", "Quarter Range"])
@@ -98,14 +99,16 @@ class SamplingTestPopup(QDialog):
         middle_summary_layout.addWidget(self.status_value, 1, 1)
         middle_summary_layout.addWidget(QLabel("Reason"), 2, 0)
         middle_summary_layout.addWidget(self.reason_value, 2, 1)
-        middle_summary_layout.addWidget(QLabel("Resume"), 3, 0)
-        middle_summary_layout.addWidget(self.resume_hint_value, 3, 1)
-        middle_summary_layout.addWidget(QLabel("Range Mode"), 4, 0)
-        middle_summary_layout.addWidget(self.range_mode_combo, 4, 1)
-        middle_summary_layout.addWidget(QLabel("Samples per PWM"), 5, 0)
-        middle_summary_layout.addWidget(self.samples_per_pwm_combo, 5, 1)
-        middle_summary_layout.addWidget(QLabel("PWM Selection"), 6, 0)
-        middle_summary_layout.addWidget(self.pwm_selection_combo, 6, 1)
+        middle_summary_layout.addWidget(QLabel("Failure Context"), 3, 0)
+        middle_summary_layout.addWidget(self.failure_context_value, 3, 1)
+        middle_summary_layout.addWidget(QLabel("Resume"), 4, 0)
+        middle_summary_layout.addWidget(self.resume_hint_value, 4, 1)
+        middle_summary_layout.addWidget(QLabel("Range Mode"), 5, 0)
+        middle_summary_layout.addWidget(self.range_mode_combo, 5, 1)
+        middle_summary_layout.addWidget(QLabel("Samples per PWM"), 6, 0)
+        middle_summary_layout.addWidget(self.samples_per_pwm_combo, 6, 1)
+        middle_summary_layout.addWidget(QLabel("PWM Selection"), 7, 0)
+        middle_summary_layout.addWidget(self.pwm_selection_combo, 7, 1)
         middle_summary_layout.setColumnStretch(1, 1)
 
         button_column = QVBoxLayout()
@@ -279,6 +282,8 @@ class SamplingTestPopup(QDialog):
         self.set_status_text("Idle")
         self.set_final_status("IDLE")
         self.set_reason_text("-", tone="neutral")
+        self.set_failure_context_text("-")
+        self.set_resume_hint("Resume unavailable: Sampling has not started.")
         self.set_current_pwm("-")
         self.set_current_direction("Setup")
         self.set_current_sample("Setup")
@@ -289,6 +294,46 @@ class SamplingTestPopup(QDialog):
         self.set_resume_available(False, "Resume unavailable: Sampling is already running.")
         self.set_stop_available(True)
         self.set_sampling_configuration_enabled(False)
+
+    def begin_active_run(self, state_text: str = "HOME_WAIT_VEL_ACK") -> None:
+        self.set_state_text(state_text)
+        self.set_status_text("Sampling started")
+        self.set_final_status("RUNNING")
+        self.set_reason_text("-", tone="neutral")
+        self.set_failure_context_text("-")
+        self.set_resume_hint("Sampling is running.")
+        self.set_start_available(False, "Sampling is already running.")
+        self.set_resume_available(False, "Resume unavailable: Sampling is running.")
+        self.set_stop_available(True)
+        self.set_sampling_configuration_enabled(False)
+
+    def apply_terminal_result(self, result: object) -> None:
+        final_status = str(getattr(result, "final_status", "FAILED"))
+        status_text = str(getattr(result, "status_text", final_status))
+        reason = str(getattr(result, "reason", "-"))
+        failure_context = str(getattr(result, "failure_context", "-"))
+        resume_text = str(getattr(result, "resume_text", "-"))
+        if final_status == "COMPLETED":
+            self.set_state_text("COMPLETED")
+            self.set_status_text(status_text)
+            self.set_final_status(final_status)
+            self.set_reason_text(reason, tone="neutral")
+            self.set_failure_context_text(failure_context)
+            self.set_resume_hint(resume_text)
+            self.set_resume_available(False, "Resume unavailable: Sampling completed.")
+            self.set_stop_available(False)
+            self.set_sampling_configuration_enabled(True)
+            return
+        tone = "orange" if final_status == "ABORTED" else "red"
+        self.set_state_text(final_status)
+        self.set_status_text(status_text)
+        self.set_final_status(final_status)
+        self.set_reason_text(reason, tone=tone)
+        self.set_failure_context_text(failure_context)
+        self.set_resume_hint(resume_text)
+        self.set_resume_available(False, "Resume unavailable: Sampling requires a fresh start.")
+        self.set_stop_available(False)
+        self.set_sampling_configuration_enabled(True)
 
     def set_state_text(self, text: str) -> None:
         self.state_value.setText(str(text))
@@ -304,6 +349,10 @@ class SamplingTestPopup(QDialog):
     def set_reason_text(self, text: str, *, tone: str = "neutral") -> None:
         self.reason_value.setText(text or "-")
         self._apply_tone_style(self.reason_value, tone)
+
+    def set_failure_context_text(self, text: str) -> None:
+        self.failure_context_value.setText(text or "-")
+        self._apply_tone_style(self.failure_context_value, "neutral")
 
     def set_current_pwm(self, pwm: object) -> None:
         self.current_pwm_value.setText(str(pwm))
@@ -359,8 +408,9 @@ class SamplingTestPopup(QDialog):
         completed_count: int,
         total_count: int,
     ) -> None:
-        _ = (pwm, direction, sample_index, completed_count, total_count)
+        _ = (completed_count, total_count)
         self.set_reason_text(reason, tone="red")
+        self.set_failure_context_text(f"PWM {pwm} | Direction {direction} | Sample {sample_index}")
         self.set_final_status("FAILED")
 
     def set_aborted_details(
@@ -373,12 +423,14 @@ class SamplingTestPopup(QDialog):
         completed_count: int,
         total_count: int,
     ) -> None:
-        _ = (pwm, direction, sample_index, completed_count, total_count)
+        _ = (completed_count, total_count)
         self.set_reason_text(reason, tone="orange")
+        self.set_failure_context_text(f"PWM {pwm} | Direction {direction} | Sample {sample_index}")
         self.set_final_status("ABORTED")
 
     def clear_failure_details(self) -> None:
         self.set_reason_text("-", tone="neutral")
+        self.set_failure_context_text("-")
 
     def clear_logs(self) -> None:
         self.log_output.clear()

@@ -280,6 +280,9 @@ class ProductionPageWorkflowTests(unittest.TestCase):
         ws.title = "3X"
         sampling_3x = wb.create_sheet("3X_D")
         wb.create_sheet("3X_A")
+        ws_4y = wb.create_sheet("4Y")
+        sampling_4y = wb.create_sheet("4Y_D")
+        wb.create_sheet("4Y_A")
         ws["A1"] = "Programming"
         ws["B2"] = "Source"
         ws["C2"] = "Programmed"
@@ -316,6 +319,42 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             ws["C3"] = "N/A"
             ws["D3"] = "N/A"
         ProductionPageWorkflowTests._populate_sampling_sheet(sampling_3x)
+        ws_4y["A1"] = "Programming"
+        ws_4y["B2"] = "Source"
+        ws_4y["C2"] = "Programmed"
+        ws_4y["D2"] = "Check"
+        ws_4y["A3"] = "Operator"
+        ws_4y["A4"] = "Assembler"
+        ws_4y["A5"] = "UUID"
+        ws_4y["A6"] = "PWM"
+        ws_4y["A7"] = "Proportionate (P)"
+        ws_4y["A8"] = "Integral (I)"
+        ws_4y["A9"] = "Derivative (D)"
+        ws_4y["A10"] = "PID_SlewRate"
+        ws_4y["A11"] = "RampDown_Slope"
+        ws_4y["A12"] = "RampDown_Step"
+        ws_4y["A13"] = "RampDown_MinVel"
+        ws_4y["A14"] = "RampDown_TargetOffset"
+        ws_4y["A15"] = "RampDown_Region"
+        ws_4y["A16"] = "Acceptable_Error"
+        ws_4y["B3"] = "operator-a"
+        ws_4y["B4"] = "assembler-a"
+        ws_4y["B5"] = "1223303010"
+        ws_4y["B6"] = "100"
+        if with_optional_fields:
+            ws_4y["B7"] = "0.125"
+            ws_4y["B8"] = "0.025"
+            ws_4y["B9"] = "0.010"
+            ws_4y["B10"] = "1500"
+            ws_4y["B11"] = "-25"
+            ws_4y["B12"] = "4"
+            ws_4y["B13"] = "8"
+            ws_4y["B14"] = "-12"
+            ws_4y["B15"] = "75"
+            ws_4y["B16"] = "30"
+            ws_4y["C3"] = "N/A"
+            ws_4y["D3"] = "N/A"
+        ProductionPageWorkflowTests._populate_sampling_sheet(sampling_4y)
         wb.save(path)
 
     @staticmethod
@@ -414,6 +453,115 @@ class ProductionPageWorkflowTests(unittest.TestCase):
 
         self.assertEqual(page.result_summary_section._status_label.text(), "PASS")
         self.assertIn("All profile steps passed", page.result_summary_section._reason_label.text())
+
+    def test_selected_node_changes_invalidate_verification_cache_and_stage_results(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            self._create_ipqc_workbook(workbook_path)
+            with patch(
+                "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
+                return_value=(str(workbook_path), "Excel Files (*.xlsx)"),
+            ):
+                page._handle_load_ipqc_workbook()
+            self._app.processEvents()
+            with patch(
+                "gui.workspace.pages.single_axis_functional_popup.SingleAxisFunctionalPopup.ask_start_sampling",
+                return_value=False,
+            ):
+                page._handle_single_axis_test_requested()
+                assert page._single_axis_popup is not None
+                page._single_axis_popup.node_combo.setCurrentIndex(1)
+                page._single_axis_popup.mark_passed()
+            self._app.processEvents()
+            self._select_node(page, "Node 6 - H")
+
+            definitions = {definition.name: definition for definition in default_workbook_parameter_definitions()}
+
+            def seed_verified_context(node_id: int, node_name: str, base_group: str) -> None:
+                sheet_name = page._ipqc_excel_adapter.resolve_sampling_sheet_name(base_group)
+                page._last_parameter_verification_results_by_name = {
+                    "UUID": ParameterVerificationResult(definitions["UUID"], "1223306010", "1223306010", True, ""),
+                    "PWM": ParameterVerificationResult(definitions["PWM"], "100", "100", True, ""),
+                }
+                page._parameter_verification_context_key = page._current_production_context_key()
+                page._workbook_verification_passed = True
+                page._single_axis_passed = True
+                page.stage_section.set_stage_status("single_axis", "pass")
+                page.stage_section.set_stage_status("sampling", "pass")
+                page._sampling_controller._resume_context = SamplingResumeContext(
+                    node_id=node_id,
+                    node_name=node_name,
+                    base_group=base_group,
+                    sheet_name=sheet_name,
+                    pwm_values=(100,),
+                    samples_per_direction=1,
+                    current_pwm_index=0,
+                    current_pwm=100,
+                    current_sample_index=1,
+                    current_direction="+",
+                    completed_measurements=1,
+                    total_measurements=2,
+                    terminal_state=SamplingTestController.S_SAMPLE_WAIT_SENSOR,
+                    reason="cached",
+                    resumable=True,
+                    sample_incomplete=True,
+                    home_sensor="L",
+                    middle_target=None,
+                )
+
+            current_group = page._ipqc_excel_adapter.active_sheet_group or "3X"
+            seed_verified_context(6, "H", current_group)
+            requests = page._build_workbook_parameter_requests(6, "H")
+            filtered_requests, skipped_labels = page._filter_verify_requests_by_previous_verification(requests or [])
+            self.assertTrue(skipped_labels)
+            self.assertLess(len(filtered_requests), len(requests or []))
+
+            self._select_node(page, "Node 8 - RZ")
+            self._app.processEvents()
+            page._handle_test_control_node_selected()
+            self.assertFalse(page._single_axis_passed)
+            self.assertFalse(page.stage_section.stage_enabled("sampling"))
+            self.assertTrue(page.stage_section.stage_enabled("single_axis"))
+            self.assertFalse(page._workbook_verification_passed)
+            self.assertEqual(page._last_parameter_verification_results_by_name, {})
+            self.assertIsNone(page._sampling_controller.resume_context)
+            self.assertFalse(page._sampling_controller.can_resume)
+            new_requests = page._build_workbook_parameter_requests(8, "RZ") or []
+            filtered_new_requests, skipped_new_labels = page._filter_verify_requests_by_previous_verification(new_requests)
+            self.assertEqual(skipped_new_labels, [])
+            self.assertEqual(len(filtered_new_requests), len(new_requests))
+
+            seed_verified_context(8, "RZ", current_group)
+            available_groups = page._ipqc_excel_adapter.available_base_sheet_groups
+            alternate_group = next((group for group in available_groups if group != current_group), None)
+            self.assertIsNotNone(alternate_group)
+            assert alternate_group is not None
+            page._handle_ipqc_sheet_group_changed(alternate_group)
+            self._app.processEvents()
+            self.assertEqual(page._last_parameter_verification_results_by_name, {})
+            self.assertIsNone(page._sampling_controller.resume_context)
+            self.assertFalse(page._sampling_controller.can_resume)
+
+            current_group = page._ipqc_excel_adapter.active_sheet_group or alternate_group
+            seed_verified_context(8, "RZ", current_group)
+            workbook_path_2 = Path(tmpdir) / "ipqc_reload.xlsx"
+            self._create_ipqc_workbook(workbook_path_2)
+            with patch(
+                "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
+                return_value=(str(workbook_path_2), "Excel Files (*.xlsx)"),
+            ):
+                page._handle_load_ipqc_workbook()
+            self._app.processEvents()
+            page._handle_test_control_node_selected()
+            self.assertFalse(page._single_axis_passed)
+            self.assertFalse(page.stage_section.stage_enabled("sampling"))
+            self.assertEqual(page._last_parameter_verification_results_by_name, {})
+            self.assertIsNone(page._sampling_controller.resume_context)
+            self.assertFalse(page._sampling_controller.can_resume)
         self.assertIn("#b0b7c3", page.stage_section._rows["single_axis"][0].styleSheet().lower())
 
     def test_profile_step_results_keep_workbook_flow_only(self) -> None:
@@ -2714,6 +2862,12 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             page._refresh_sampling_action_states()
             self.assertTrue(popup.resume_button.isEnabled())
 
+            popup.set_state_text("FAILED")
+            popup.set_status_text("Unexpected encoder reset during sampling.")
+            popup.set_final_status("FAILED")
+            popup.set_reason_text("Unexpected encoder reset during sampling.", tone="red")
+            popup.set_failure_context_text("PWM 100 | Direction + | Sample 1")
+            popup.set_resume_hint("Resume unavailable: old state")
             with patch.object(page._sampling_controller, "resume", wraps=page._sampling_controller.resume) as resume_mock:
                 popup.resume_button.click()
                 self._app.processEvents()
@@ -2721,6 +2875,10 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             self.assertEqual(resume_mock.call_count, 1)
             self.assertEqual(runtime_window.backend_client.sent_commands[0], (selected_node_id, [0x84, 0x00, 0x50]))
             self.assertTrue(page._sampling_controller.is_active())
+            self.assertEqual(popup.final_status_value.text(), "RUNNING")
+            self.assertEqual(popup.reason_value.text(), "-")
+            self.assertEqual(popup.failure_context_value.text(), "-")
+            self.assertEqual(popup.resume_hint_value.text(), "Sampling is running.")
 
     def test_sampling_popup_uses_compact_three_row_layout(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -2829,15 +2987,36 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         assert page._sampling_popup is not None
         popup = page._sampling_popup
 
+        page._sampling_controller._latest_terminal_result = types.SimpleNamespace(
+            final_status="FAILED",
+            status_text="FAILED",
+            reason="Unexpected encoder reset during sampling.",
+            failure_context="PWM 100 | Direction + | Sample 1",
+            resume_text="Unavailable - encoder reset requires a fresh start.",
+        )
         page._handle_sampling_failed("Sensor timeout")
         self._app.processEvents()
-        self.assertEqual(popup.reason_value.text(), "Sensor timeout")
+        self.assertEqual(popup.status_value.text(), "FAILED")
+        self.assertEqual(popup.final_status_value.text(), "FAILED")
+        self.assertEqual(popup.reason_value.text(), "Unexpected encoder reset during sampling.")
+        self.assertEqual(popup.failure_context_value.text(), "PWM 100 | Direction + | Sample 1")
+        self.assertEqual(popup.resume_hint_value.text(), "Unavailable - encoder reset requires a fresh start.")
         self.assertEqual(popup.final_status_value.text(), "FAILED")
         self.assertIn("#dc2626", popup.reason_value.styleSheet())
 
+        page._sampling_controller._latest_terminal_result = types.SimpleNamespace(
+            final_status="ABORTED",
+            status_text="ABORTED",
+            reason="Sampling aborted by user.",
+            failure_context="PWM 100 | Direction + | Sample 1",
+            resume_text="Unavailable - sampling was aborted.",
+        )
         page._handle_sampling_aborted("Operator stop")
         self._app.processEvents()
-        self.assertEqual(popup.reason_value.text(), "Operator stop")
+        self.assertEqual(popup.status_value.text(), "ABORTED")
+        self.assertEqual(popup.reason_value.text(), "Sampling aborted by user.")
+        self.assertEqual(popup.failure_context_value.text(), "PWM 100 | Direction + | Sample 1")
+        self.assertEqual(popup.resume_hint_value.text(), "Unavailable - sampling was aborted.")
         self.assertEqual(popup.final_status_value.text(), "ABORTED")
         self.assertIn("#d97706", popup.reason_value.styleSheet())
 
@@ -2857,6 +3036,12 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             self._app.processEvents()
             assert page._sampling_popup is not None
             popup = page._sampling_popup
+            popup.set_state_text("ABORTED")
+            popup.set_status_text("Sensor timeout")
+            popup.set_final_status("ABORTED")
+            popup.set_reason_text("Sensor timeout", tone="red")
+            popup.set_failure_context_text("PWM 100 | Direction + | Sample 1")
+            popup.set_resume_hint("Resume unavailable: old state")
             self.assertTrue(popup.start_button.isEnabled())
             self.assertTrue(popup.samples_per_pwm_combo.isEnabled())
             self.assertTrue(popup.pwm_selection_combo.isEnabled())
@@ -2869,6 +3054,9 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         self.assertTrue(popup.stop_button.isEnabled())
         self.assertEqual(popup.final_status_value.text(), "RUNNING")
         self.assertEqual(popup.state_value.text(), "HOME_WAIT_VEL_ACK")
+        self.assertEqual(popup.reason_value.text(), "-")
+        self.assertEqual(popup.failure_context_value.text(), "-")
+        self.assertEqual(popup.resume_hint_value.text(), "Sampling is running.")
         self.assertEqual(popup.status_value.text(), "Setting home velocity")
 
     def test_popup_selected_configuration_drives_pwm_90_debug_run(self) -> None:
@@ -2905,7 +3093,7 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             runtime_window.packet_received.emit([0x82, 0x00, 0x00, 0x00, 10])
             self._app.processEvents()
 
-            self.assertEqual(runtime_window.backend_client.sent_commands[3][1], build_run(90))
+            self.assertEqual(runtime_window.backend_client.sent_commands[3][1], build_run(-90))
             self.assertEqual(popup.current_pwm_value.text(), "90")
             self.assertEqual(popup.current_sample_value.text(), "Sample 1 / 4")
 
@@ -3072,11 +3260,22 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         self.assertTrue(popup.stop_button.isEnabled())
 
         page._sampling_controller._running = False
+        page._sampling_controller._latest_terminal_result = types.SimpleNamespace(
+            final_status="COMPLETED",
+            status_text="Sampling completed",
+            reason="-",
+            failure_context="-",
+            resume_text="-",
+        )
         page._handle_sampling_completed()
         self._app.processEvents()
         self.assertTrue(self._sampling_stage_button(page).isEnabled())
         self.assertTrue(popup.start_button.isEnabled())
         self.assertFalse(popup.stop_button.isEnabled())
+        self.assertEqual(popup.status_value.text(), "Sampling completed")
+        self.assertEqual(popup.reason_value.text(), "-")
+        self.assertEqual(popup.failure_context_value.text(), "-")
+        self.assertEqual(popup.resume_hint_value.text(), "-")
 
         with patch.object(
             SamplingTestController,
@@ -3093,11 +3292,22 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         assert page._sampling_popup is not None
         popup = page._sampling_popup
         page._sampling_controller._running = False
+        page._sampling_controller._latest_terminal_result = types.SimpleNamespace(
+            final_status="FAILED",
+            status_text="FAILED",
+            reason="Sensor timeout.",
+            failure_context="PWM 100 | Direction + | Sample 1",
+            resume_text="Unavailable - sampling requires a fresh start.",
+        )
         page._handle_sampling_failed("boom")
         self._app.processEvents()
         self.assertTrue(self._sampling_stage_button(page).isEnabled())
         self.assertTrue(popup.start_button.isEnabled())
         self.assertFalse(popup.stop_button.isEnabled())
+        self.assertEqual(popup.status_value.text(), "FAILED")
+        self.assertEqual(popup.reason_value.text(), "Sensor timeout.")
+        self.assertEqual(popup.failure_context_value.text(), "PWM 100 | Direction + | Sample 1")
+        self.assertEqual(popup.resume_hint_value.text(), "Unavailable - sampling requires a fresh start.")
 
         with patch.object(
             SamplingTestController,
@@ -3114,11 +3324,22 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         assert page._sampling_popup is not None
         popup = page._sampling_popup
         page._sampling_controller._running = False
+        page._sampling_controller._latest_terminal_result = types.SimpleNamespace(
+            final_status="ABORTED",
+            status_text="ABORTED",
+            reason="Sampling aborted by user.",
+            failure_context="PWM 100 | Direction + | Sample 1",
+            resume_text="Unavailable - sampling was aborted.",
+        )
         page._handle_sampling_aborted("stop")
         self._app.processEvents()
         self.assertTrue(self._sampling_stage_button(page).isEnabled())
         self.assertTrue(popup.start_button.isEnabled())
         self.assertFalse(popup.stop_button.isEnabled())
+        self.assertEqual(popup.status_value.text(), "ABORTED")
+        self.assertEqual(popup.reason_value.text(), "Sampling aborted by user.")
+        self.assertEqual(popup.failure_context_value.text(), "PWM 100 | Direction + | Sample 1")
+        self.assertEqual(popup.resume_hint_value.text(), "Unavailable - sampling was aborted.")
 
     def test_sampling_popup_stop_requests_abort_once(self) -> None:
         runtime_window = _FakeRuntimeWindow()

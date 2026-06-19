@@ -82,6 +82,13 @@ class _SamplingSession:
     runtime_window: object
 
 
+@dataclass(frozen=True)
+class _ProductionContextKey:
+    workbook_session_id: int
+    base_group: str
+    node_id: int
+
+
 def get_ml20_node_name(node_id: int) -> str:
     """Return the ML 2.0 display name for one node id."""
     return ML20_NODE_MAP.get(node_id, f"Node {node_id}")
@@ -124,6 +131,7 @@ class ProductionPage(BaseWorkspacePage):
         self._sampling_popup: SamplingTestPopup | None = None
         self._single_axis_passed = False
         self._sampling_controller = SamplingTestController(self._ipqc_excel_adapter, SamplingTestConfig())
+        self._sampling_home_sensor = "L"
         self._sampling_session: _SamplingSession | None = None
 
         self.stage_section.configuration_requested.connect(self._handle_run_test)
@@ -176,6 +184,8 @@ class ProductionPage(BaseWorkspacePage):
         self._pending_persistent_parameter_requests: list[ParameterRequest] = []
         self._pending_runtime_parameter_requests: list[ParameterRequest] = []
         self._last_parameter_verification_results_by_name: dict[str, ParameterVerificationResult] = {}
+        self._parameter_verification_context_key: _ProductionContextKey | None = None
+        self._production_context_key: _ProductionContextKey | None = None
         self._workbook_loaded = False
         self._workbook_write_completed = False
         self._workbook_verification_passed = False
@@ -453,6 +463,7 @@ class ProductionPage(BaseWorkspacePage):
 
     def _handle_single_axis_passed(self, node_id: int, node_name: str) -> None:
         self._single_axis_passed = True
+        self._refresh_sampling_home_sensor_from_single_axis()
         self.console_message.emit(f"[Production] Single Axis Functional Test PASSED for Node {node_id} {node_name}")
         self.progress_section.append_step(f"Single Axis PASSED for Node {node_id} {node_name}", level="success")
         self.stage_section.set_stage_status("single_axis", "pass")
@@ -471,6 +482,18 @@ class ProductionPage(BaseWorkspacePage):
         self.progress_section.append_step(f"Single Axis ABORTED for Node {node_id} {node_name}", level="warning")
         self.stage_section.set_stage_status("single_axis", "fail")
         self._refresh_sampling_action_states()
+
+    def _refresh_sampling_home_sensor_from_single_axis(self) -> None:
+        home_sensor = "L"
+        popup = self._single_axis_popup
+        if popup is not None:
+            controller = getattr(popup, "controller", None)
+            cfg = getattr(controller, "cfg", None)
+            candidate = getattr(cfg, "reference_sensor", getattr(cfg, "home_sensor", None))
+            if str(candidate).strip().upper() == "R":
+                home_sensor = "R"
+        self._sampling_home_sensor = home_sensor
+        self._sampling_controller.set_home_sensor(home_sensor)
 
     # Minimal passthrough to allow popups to query the runtime window via parent
     def get_runtime_window(self, *, create_if_missing: bool = False):  # pragma: no cover - thin delegate
@@ -524,6 +547,7 @@ class ProductionPage(BaseWorkspacePage):
         if self._sampling_controller.is_active():
             self._refresh_sampling_action_states()
             return
+        self._sampling_controller.set_home_sensor(self._sampling_home_sensor)
         try:
             node_id, node_name = self.test_control_section.selected_node()
         except RuntimeError:
@@ -543,6 +567,8 @@ class ProductionPage(BaseWorkspacePage):
             return
         if self._sampling_session is not None:
             self._attach_sampling_runtime_window(self._sampling_session.runtime_window)
+        self._sampling_controller.set_home_sensor(self._sampling_home_sensor)
+        popup.begin_active_run("HOME_WAIT_VEL_ACK")
         resumed = self._sampling_controller.resume(node_id=node_id, node_name=node_name, base_group=active_group)
         if not resumed:
             self._refresh_sampling_action_states()
@@ -628,6 +654,7 @@ class ProductionPage(BaseWorkspacePage):
 
         popup = self._ensure_sampling_popup()
         self._sampling_session = _SamplingSession(node_id=node_id, node_name=node_name, runtime_window=runtime_window)
+        self._sampling_controller.set_home_sensor(self._sampling_home_sensor)
         popup.set_context(node_id, node_name, layout.sheet_name)
         selected_pwm_values = popup.selected_pwm_values()
         selected_samples_per_pwm = popup.selected_samples_per_pwm()
@@ -635,6 +662,7 @@ class ProductionPage(BaseWorkspacePage):
             total_samples=selected_samples_per_pwm,
             total_measurements=len(selected_pwm_values) * selected_samples_per_pwm * 2,
         )
+        popup.begin_active_run("HOME_WAIT_VEL_ACK")
         popup.show()
         popup.raise_()
         popup.activateWindow()
@@ -722,6 +750,7 @@ class ProductionPage(BaseWorkspacePage):
         if self._sampling_controller.is_active():
             popup.set_resume_available(False, "Resume unavailable: Sampling is already running.")
             popup.set_resume_hint("Resume unavailable: Sampling is already running.")
+            popup.set_final_status("RUNNING")
             popup.set_stop_available(True)
         else:
             try:
@@ -842,11 +871,16 @@ class ProductionPage(BaseWorkspacePage):
         self._set_status_result("PASS", f"Sampling PASSED for {self._sampling_node_label()}")
         self.stage_section.set_stage_status("sampling", "pass")
         if self._sampling_popup is not None:
-            self._sampling_popup.set_state_text("COMPLETED")
-            self._sampling_popup.set_status_text("Sampling completed")
-            self._sampling_popup.set_final_status("COMPLETED")
-            self._sampling_popup.set_stop_available(False)
-            self._sampling_popup.set_sampling_configuration_enabled(True)
+            result = self._sampling_controller.last_terminal_result
+            if result is not None:
+                self._sampling_popup.apply_terminal_result(result)
+            else:
+                self._sampling_popup.set_state_text("COMPLETED")
+                self._sampling_popup.set_status_text("Sampling completed")
+                self._sampling_popup.clear_failure_details()
+                self._sampling_popup.set_final_status("COMPLETED")
+                self._sampling_popup.set_stop_available(False)
+                self._sampling_popup.set_sampling_configuration_enabled(True)
         self._refresh_sampling_action_states()
 
     def _handle_sampling_failed(self, reason: str) -> None:
@@ -854,18 +888,22 @@ class ProductionPage(BaseWorkspacePage):
         self._set_status_result("FAIL", f"Sampling FAILED for {self._sampling_node_label()}: {reason}")
         self.stage_section.set_stage_status("sampling", "fail")
         if self._sampling_popup is not None:
-            self._sampling_popup.set_state_text("FAILED")
-            self._sampling_popup.set_status_text(reason)
-            self._sampling_popup.set_failure_details(
-                pwm=self._sampling_controller.current_pwm,
-                direction=self._sampling_controller.current_direction,
-                sample_index=self._sampling_controller.current_sample_index,
-                reason=reason,
-                completed_count=self._sampling_controller.completed_measurements,
-                total_count=self._sampling_controller.total_measurements,
-            )
-            self._sampling_popup.set_stop_available(False)
-            self._sampling_popup.set_sampling_configuration_enabled(True)
+            result = self._sampling_controller.last_terminal_result
+            if result is not None:
+                self._sampling_popup.apply_terminal_result(result)
+            else:
+                self._sampling_popup.set_state_text("FAILED")
+                self._sampling_popup.set_status_text("FAILED")
+                self._sampling_popup.set_failure_details(
+                    pwm=self._sampling_controller.current_pwm,
+                    direction=self._sampling_controller.current_direction,
+                    sample_index=self._sampling_controller.current_sample_index,
+                    reason=reason,
+                    completed_count=self._sampling_controller.completed_measurements,
+                    total_count=self._sampling_controller.total_measurements,
+                )
+                self._sampling_popup.set_stop_available(False)
+                self._sampling_popup.set_sampling_configuration_enabled(True)
         self._refresh_sampling_action_states()
 
     def _handle_sampling_aborted(self, reason: str) -> None:
@@ -873,18 +911,22 @@ class ProductionPage(BaseWorkspacePage):
         self._set_status_result("FAIL", f"Sampling ABORTED for {self._sampling_node_label()}")
         self.stage_section.set_stage_status("sampling", "fail")
         if self._sampling_popup is not None:
-            self._sampling_popup.set_state_text("ABORTED")
-            self._sampling_popup.set_status_text(reason)
-            self._sampling_popup.set_aborted_details(
-                pwm=self._sampling_controller.current_pwm,
-                direction=self._sampling_controller.current_direction,
-                sample_index=self._sampling_controller.current_sample_index,
-                reason=reason,
-                completed_count=self._sampling_controller.completed_measurements,
-                total_count=self._sampling_controller.total_measurements,
-            )
-            self._sampling_popup.set_stop_available(False)
-            self._sampling_popup.set_sampling_configuration_enabled(True)
+            result = self._sampling_controller.last_terminal_result
+            if result is not None:
+                self._sampling_popup.apply_terminal_result(result)
+            else:
+                self._sampling_popup.set_state_text("ABORTED")
+                self._sampling_popup.set_status_text("ABORTED")
+                self._sampling_popup.set_aborted_details(
+                    pwm=self._sampling_controller.current_pwm,
+                    direction=self._sampling_controller.current_direction,
+                    sample_index=self._sampling_controller.current_sample_index,
+                    reason=reason,
+                    completed_count=self._sampling_controller.completed_measurements,
+                    total_count=self._sampling_controller.total_measurements,
+                )
+                self._sampling_popup.set_stop_available(False)
+                self._sampling_popup.set_sampling_configuration_enabled(True)
         self._refresh_sampling_action_states()
 
     def _handle_clear_result(self) -> None:
@@ -899,7 +941,7 @@ class ProductionPage(BaseWorkspacePage):
         self.progress_section.clear_log()
 
     def _handle_test_control_node_selected(self) -> None:
-        self._clear_parameter_verification_cache()
+        self._sync_production_context(log_reason="Selected node changed. Previous verification and test results were invalidated.")
         self._refresh_workbook_action_states()
 
     def _handle_load_ipqc_workbook(self) -> None:
@@ -946,6 +988,7 @@ class ProductionPage(BaseWorkspacePage):
         self._set_status_result("READY", "Workbook loaded; no write performed yet")
         if not self._has_complete_production_metadata():
             self._prompt_for_production_metadata()
+        self._sync_production_context()
         self._emit_session_state_changed()
         self._refresh_workbook_action_states()
 
@@ -954,8 +997,9 @@ class ProductionPage(BaseWorkspacePage):
             return
         try:
             self._ipqc_excel_adapter.select_sheet_group(base_group)
-            self._clear_parameter_verification_cache()
+            self._sync_production_context()
             self._refresh_ipqc_expected_preview()
+            self._refresh_workbook_action_states()
         except Exception as exc:
             self.console_message.emit(f"[Production] Failed to select IPQC sheet group '{base_group}': {exc}")
             self.uuid_section.set_workbook_validation_ready()
@@ -1212,6 +1256,7 @@ class ProductionPage(BaseWorkspacePage):
     ) -> None:
         results = [result for result in results_object if isinstance(result, ParameterVerificationResult)]
         self._cache_parameter_verification_results(results)
+        self._parameter_verification_context_key = self._current_production_context_key()
         uuid_result = self._last_parameter_verification_results_by_name.get("UUID")
         pwm_result = self._last_parameter_verification_results_by_name.get("PWM")
         uuid_actual = uuid_result.actual_text if uuid_result and uuid_result.actual_text else "-"
@@ -1260,11 +1305,15 @@ class ProductionPage(BaseWorkspacePage):
 
     def _clear_parameter_verification_cache(self) -> None:
         self._last_parameter_verification_results_by_name = {}
+        self._parameter_verification_context_key = self._current_production_context_key()
         self._workbook_verification_passed = False
         if self._ipqc_excel_adapter.has_loaded_workbook():
             self.uuid_section.set_workbook_validation_ready()
 
     def _invalidate_parameter_verification_cache_for_requests(self, requests: list[ParameterRequest]) -> None:
+        if self._parameter_verification_context_key != self._current_production_context_key():
+            self._clear_parameter_verification_cache()
+            return
         invalidated = False
         for request in requests:
             if request.definition.name in self._last_parameter_verification_results_by_name:
@@ -1281,6 +1330,9 @@ class ProductionPage(BaseWorkspacePage):
     ) -> tuple[list[ParameterRequest], list[str]]:
         if not self._last_parameter_verification_results_by_name:
             return list(requests), []
+        if self._parameter_verification_context_key != self._current_production_context_key():
+            self._clear_parameter_verification_cache()
+            return list(requests), []
 
         selected_requests: list[ParameterRequest] = []
         skipped_labels: list[str] = []
@@ -1293,6 +1345,8 @@ class ProductionPage(BaseWorkspacePage):
         return selected_requests, skipped_labels
 
     def _get_cached_parameter_verification_results(self) -> list[ParameterVerificationResult]:
+        if self._parameter_verification_context_key != self._current_production_context_key():
+            return []
         supported_definitions, validation_error = self._get_supported_workbook_parameter_definitions()
         if validation_error is not None:
             return list(self._last_parameter_verification_results_by_name.values())
@@ -1302,6 +1356,7 @@ class ProductionPage(BaseWorkspacePage):
             if result is not None:
                 results.append(result)
         return results
+        
 
     def _all_supported_workbook_parameters_passed(self) -> bool:
         supported_definitions, validation_error = self._get_supported_workbook_parameter_definitions()
@@ -1411,6 +1466,62 @@ class ProductionPage(BaseWorkspacePage):
             ]
         )
         self.stage_section.reset_stage_states()
+
+    def _current_production_context_key(self) -> _ProductionContextKey | None:
+        if not self._ipqc_excel_adapter.has_loaded_workbook():
+            return None
+        active_group = self._ipqc_excel_adapter.active_sheet_group
+        if not active_group:
+            return None
+        try:
+            node_id, _node_name = self.test_control_section.selected_node()
+        except RuntimeError:
+            return None
+        return _ProductionContextKey(
+            workbook_session_id=self._ipqc_excel_adapter.workbook_session_id,
+            base_group=str(active_group),
+            node_id=int(node_id),
+        )
+
+    def _clear_sampling_context_for_selected_node_change(self) -> None:
+        self._single_axis_passed = False
+        self._sampling_controller.clear_resume_context()
+        self._sampling_session = None
+        self._sampling_home_sensor = "L"
+        self.stage_section.reset_stage_states()
+        self._set_status_result("READY", "No test has been run yet.", append_to_log=False)
+        self._workbook_verification_passed = False
+        self._pending_parameter_requests = []
+        self._pending_persistent_parameter_requests = []
+        self._pending_runtime_parameter_requests = []
+        self._parameter_controller.reset_workbook_parameter_workflow()
+        self._clear_parameter_verification_cache()
+        self.uuid_section.set_workbook_validation_ready()
+        self.uuid_section.set_programmed_values("-", self._current_programmed_pwm_value, "-")
+        if self._sampling_popup is not None and not self._sampling_controller.is_active():
+            self._sampling_popup.set_state_text("IDLE")
+            self._sampling_popup.set_status_text("Idle")
+            self._sampling_popup.set_final_status("IDLE")
+            self._sampling_popup.clear_failure_details()
+            self._sampling_popup.set_resume_available(False, "Resume unavailable: Sampling has not started.")
+            self._sampling_popup.set_resume_hint("Resume unavailable: Sampling has not started.")
+            self._sampling_popup.set_stop_available(False)
+            self._sampling_popup.set_sampling_configuration_enabled(True)
+        self._refresh_sampling_action_states()
+
+    def _sync_production_context(self, *, log_reason: str | None = None) -> None:
+        current_key = self._current_production_context_key()
+        previous_key = self._production_context_key
+        if current_key == previous_key:
+            return
+        self._production_context_key = current_key
+        self._parameter_verification_context_key = current_key
+        if previous_key is None:
+            return
+        self._clear_sampling_context_for_selected_node_change()
+        if log_reason is not None:
+            self.console_message.emit(f"[INFO] {log_reason}")
+            self.progress_section.append_step(log_reason, level="warning")
 
     def _handle_test_started(self, node_id: int, node_name: str) -> None:
         self.stage_section.set_stage_status("configuration", "testing")
@@ -1660,16 +1771,19 @@ class ProductionPage(BaseWorkspacePage):
                 node_name = self._sampling_session.node_name if self._sampling_session is not None else None
             self._sampling_popup.set_context(node_id, node_name, sheet_name)
             if self._sampling_controller.is_active():
-                self._sampling_popup.set_resume_available(False, "Resume unavailable: Sampling is already running.")
-                self._sampling_popup.set_resume_hint("Resume unavailable: Sampling is already running.")
+                self._sampling_popup.set_resume_available(False, "Sampling is running.")
+                self._sampling_popup.set_resume_hint("Sampling is running.")
             else:
                 resume_enabled, resume_reason = self._sampling_controller.resume_availability(
                     node_id=node_id,
                     node_name=node_name,
                     base_group=active_group,
                 )
-                self._sampling_popup.set_resume_available(resume_enabled, resume_reason)
-                self._sampling_popup.set_resume_hint(resume_reason)
+                last_result = self._sampling_controller.last_terminal_result
+                resume_text = getattr(last_result, "resume_text", None) if last_result is not None else None
+                display_resume = str(resume_text) if resume_text not in (None, "") else resume_reason
+                self._sampling_popup.set_resume_available(resume_enabled, display_resume)
+                self._sampling_popup.set_resume_hint(display_resume)
 
     def _get_supported_workbook_parameter_definitions(self) -> tuple[list[ParameterDefinition], str | None]:
         if not self._ipqc_excel_adapter.has_loaded_workbook():

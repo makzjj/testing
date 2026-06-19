@@ -46,6 +46,7 @@ def test_run_with_selected_node_starts_controller(monkeypatch):
     # Controller should request NODECONFIG query first via safe handler
     assert popup._tx_log[-1] == build_nodeconfig_query_payload()
     assert popup.controller is not None
+    assert popup.controller.cfg.zero_tolerance == 512
     assert popup.controller.cfg.movement_tolerance == 512
     assert popup.controller.cfg.range_tolerance == 512
     assert popup.controller.cfg.middle_position_tolerance == 512
@@ -190,6 +191,7 @@ def test_tolerance_dropdown_defaults_and_selection_propagates(monkeypatch):
     popup.node_combo.setCurrentIndex(1)
     popup._handle_run_clicked()
     assert popup.controller is not None
+    assert popup.controller.cfg.zero_tolerance == 2048
     assert popup.controller.cfg.movement_tolerance == 2048
     assert not popup.tolerance_combo.isEnabled()
 

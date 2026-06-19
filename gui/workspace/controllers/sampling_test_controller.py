@@ -14,6 +14,7 @@ from services.ipqc_excel_adapter import IpqcExcelAdapter, SamplingWorkbookLayout
 @dataclass(frozen=True)
 class SamplingTestConfig:
     home_velocity: int = -190
+    home_sensor: str = "L"
     pwm_values: tuple[int, ...] = (100, 90, 80, 70, 60)
     samples_per_direction: int = 32
 
@@ -51,7 +52,24 @@ class SamplingResumeContext:
     reason: str
     resumable: bool
     sample_incomplete: bool
+    home_sensor: str = "L"
     middle_target: int | None = None
+
+
+@dataclass(frozen=True)
+class SamplingTerminalResult:
+    terminal_state: str
+    final_status: str
+    status_text: str
+    reason: str
+    failure_context: str
+    resume_text: str
+    pwm: int | None
+    direction: str | None
+    sample_index: int | None
+    completed_count: int
+    total_count: int
+    resumable: bool
 
 
 class SamplingTestController:
@@ -79,6 +97,7 @@ class SamplingTestController:
         self._adapter = workbook_adapter
         self._config = config or SamplingTestConfig()
         self._clock = clock or time.monotonic
+        self._home_sensor = self._normalize_home_sensor(self._config.home_sensor)
         self._node_id: int | None = None
         self._node_name: str | None = None
         self._base_group: str | None = None
@@ -95,12 +114,16 @@ class SamplingTestController:
         self._current_direction = ""
         self._completed_measurements = 0
         self._total_measurements = len(self._run_pwm_values) * self._run_samples_per_pwm * 2
+        self._home_position: int | None = None
+        self._opposite_position: int | None = None
         self._start_l_pos: int | None = None
         self._current_r_pos: int | None = None
         self._current_l_pos: int | None = None
         self._pending_ack_velocity: int | None = None
         self._pending_ack_time: float | None = None
         self._pending_sensor_time: float | None = None
+        self._pending_departure_sensor: str | None = None
+        self._allow_departure_duplicate: bool = False
         self._pending_getpos_after_sensor: str | None = None
         self._middle_target: int | None = None
         self._latest_result: SamplingMeasurementResult | None = None
@@ -108,10 +131,15 @@ class SamplingTestController:
         self._resume_context: SamplingResumeContext | None = None
         self._resume_middle_after_home = False
         self._resume_middle_target: int | None = None
+        self._latest_terminal_result: SamplingTerminalResult | None = None
 
     @property
     def last_result(self) -> SamplingMeasurementResult | None:
         return self._latest_result
+
+    @property
+    def last_terminal_result(self) -> SamplingTerminalResult | None:
+        return self._latest_terminal_result
 
     def is_active(self) -> bool:
         return self._running
@@ -169,12 +197,22 @@ class SamplingTestController:
         return int(self._run_samples_per_pwm)
 
     @property
+    def home_sensor(self) -> str:
+        return self._home_sensor
+
+    def set_home_sensor(self, home_sensor: str) -> None:
+        self._home_sensor = self._normalize_home_sensor(home_sensor)
+
+    @property
     def can_resume(self) -> bool:
         return bool(self._resume_context is not None and self._resume_context.resumable)
 
     @property
     def resume_context(self) -> SamplingResumeContext | None:
         return self._resume_context
+
+    def clear_resume_context(self) -> None:
+        self._clear_resume_context()
 
     @property
     def resume_summary(self) -> str:
@@ -279,11 +317,29 @@ class SamplingTestController:
         if not single_axis_passed:
             reason = "Sampling requires the Single Axis Functional Test to pass first."
             self.log_message(f"[Sampling] {reason}")
+            self._latest_terminal_result = self._build_terminal_result(
+                terminal_state=self.S_FAILED,
+                final_status="FAILED",
+                status_text="FAILED",
+                reason=reason,
+                failure_context="-",
+                resume_text="Unavailable - sampling requires a fresh start.",
+                resumable=False,
+            )
             self.sampling_failed(reason)
             return False
         if not self._adapter.has_loaded_workbook():
             reason = "No IPQC workbook is loaded."
             self.log_message(f"[Sampling] {reason}")
+            self._latest_terminal_result = self._build_terminal_result(
+                terminal_state=self.S_FAILED,
+                final_status="FAILED",
+                status_text="FAILED",
+                reason=reason,
+                failure_context="-",
+                resume_text="Unavailable - sampling requires a fresh start.",
+                resumable=False,
+            )
             self.sampling_failed(reason)
             return False
 
@@ -293,6 +349,15 @@ class SamplingTestController:
         if not self._base_group:
             reason = "No active IPQC workbook sheet group is selected."
             self.log_message(f"[Sampling] {reason}")
+            self._latest_terminal_result = self._build_terminal_result(
+                terminal_state=self.S_FAILED,
+                final_status="FAILED",
+                status_text="FAILED",
+                reason=reason,
+                failure_context="-",
+                resume_text="Unavailable - sampling requires a fresh start.",
+                resumable=False,
+            )
             self.sampling_failed(reason)
             return False
 
@@ -301,6 +366,15 @@ class SamplingTestController:
         except Exception as exc:
             reason = f"Sampling workbook layout is invalid: {exc}"
             self.log_message(f"[Sampling] {reason}")
+            self._latest_terminal_result = self._build_terminal_result(
+                terminal_state=self.S_FAILED,
+                final_status="FAILED",
+                status_text="FAILED",
+                reason=reason,
+                failure_context="-",
+                resume_text="Unavailable - sampling requires a fresh start.",
+                resumable=False,
+            )
             self.sampling_failed(reason)
             return False
 
@@ -308,6 +382,15 @@ class SamplingTestController:
         if not run_pwm_values:
             reason = "No PWM values are configured for Sampling."
             self.log_message(f"[Sampling] {reason}")
+            self._latest_terminal_result = self._build_terminal_result(
+                terminal_state=self.S_FAILED,
+                final_status="FAILED",
+                status_text="FAILED",
+                reason=reason,
+                failure_context="-",
+                resume_text="Unavailable - sampling requires a fresh start.",
+                resumable=False,
+            )
             self.sampling_failed(reason)
             return False
 
@@ -315,10 +398,20 @@ class SamplingTestController:
         if run_samples_per_pwm <= 0:
             reason = "Sampling requires at least one sample per PWM."
             self.log_message(f"[Sampling] {reason}")
+            self._latest_terminal_result = self._build_terminal_result(
+                terminal_state=self.S_FAILED,
+                final_status="FAILED",
+                status_text="FAILED",
+                reason=reason,
+                failure_context="-",
+                resume_text="Unavailable - sampling requires a fresh start.",
+                resumable=False,
+            )
             self.sampling_failed(reason)
             return False
 
         self._clear_resume_context()
+        self._latest_terminal_result = None
         self._run_pwm_values = run_pwm_values
         self._run_samples_per_pwm = run_samples_per_pwm
         self._begin_sampling_run(
@@ -363,11 +456,20 @@ class SamplingTestController:
         self._capture_resume_context(reason, resumable=True, terminal_state=self.S_ABORTED)
         self._send_stopmotor()
         self._running = False
-        self._wait_for = None
+        self._clear_pending_runtime_state()
         self._state = self.S_ABORTED
         self.state_changed(self._state)
         self.status_changed(reason)
         self.log_message("Sampling aborted")
+        self._latest_terminal_result = self._build_terminal_result(
+            terminal_state=self.S_ABORTED,
+            final_status="ABORTED",
+            status_text="ABORTED",
+            reason=reason,
+            failure_context=self._format_failure_context(),
+            resume_text="Unavailable - sampling was aborted.",
+            resumable=True,
+        )
         self.sampling_aborted(reason)
         return True
 
@@ -440,17 +542,49 @@ class SamplingTestController:
         self._current_sample_index = 0
         self._current_direction = ""
         self._completed_measurements = 0
+        self._home_position = None
+        self._opposite_position = None
         self._start_l_pos = None
         self._current_r_pos = None
         self._current_l_pos = None
         self._pending_ack_velocity = None
         self._pending_ack_time = None
         self._pending_sensor_time = None
+        self._pending_departure_sensor = None
+        self._allow_departure_duplicate = False
         self._pending_getpos_after_sensor = None
         self._middle_target = None
         self._latest_result = None
         self._total_measurements = len(self._run_pwm_values) * self._run_samples_per_pwm * 2
         self._stop_command_sent = False
+        self._latest_terminal_result = None
+
+    @staticmethod
+    def _normalize_home_sensor(value: object) -> str:
+        return "R" if str(value).strip().upper() == "R" else "L"
+
+    @property
+    def _opposite_sensor(self) -> str:
+        return "L" if self._home_sensor == "R" else "R"
+
+    @property
+    def _outward_direction(self) -> str:
+        return "-" if self._home_sensor == "R" else "+"
+
+    @property
+    def _return_direction(self) -> str:
+        return "+" if self._outward_direction == "-" else "-"
+
+    def _velocity_for_direction(self, direction: str, pwm: int) -> int:
+        if self._home_sensor == "L":
+            return int(pwm) if direction == "+" else -int(pwm)
+        return -int(pwm) if direction == "-" else int(pwm)
+
+    def _expected_sensor_for_direction(self, direction: str) -> str:
+        return self._opposite_sensor if direction == self._outward_direction else self._home_sensor
+
+    def _departure_sensor_for_direction(self, direction: str) -> str:
+        return self._home_sensor if direction == self._outward_direction else self._opposite_sensor
 
     def _clear_resume_context(self) -> None:
         self._resume_context = None
@@ -469,6 +603,7 @@ class SamplingTestController:
         self._node_name = node_name
         self._base_group = base_group
         if resume_context is not None:
+            self._home_sensor = self._normalize_home_sensor(resume_context.home_sensor)
             self._run_pwm_values = tuple(resume_context.pwm_values)
             self._run_samples_per_pwm = int(resume_context.samples_per_direction)
         self._reset_runtime_state()
@@ -538,31 +673,39 @@ class SamplingTestController:
         if self._current_pwm_index < 0 and not self._next_pwm():
             self._complete()
             return
-        self._current_direction = "+"
+        self._current_direction = self._outward_direction
         self.current_direction_changed(self._current_direction)
-        self._pending_ack_velocity = int(self._current_pwm)
-        self._expected_response_description = self._format_run_ack_description(self._current_pwm)
+        self._pending_ack_velocity = self._velocity_for_direction(self._current_direction, self._current_pwm)
+        self._expected_response_description = self._format_run_ack_description(self._pending_ack_velocity)
         self._set_state(self.S_SAMPLE_WAIT_ACK)
         self._wait_for = "run_started"
-        self.command_requested(build_run(self._current_pwm))
+        self.command_requested(build_run(self._pending_ack_velocity))
 
     def _start_negative_leg(self) -> None:
-        self._current_direction = "-"
+        self._current_direction = self._return_direction
         self.current_direction_changed(self._current_direction)
-        self._pending_ack_velocity = -int(self._current_pwm)
-        self._expected_response_description = self._format_run_ack_description(-self._current_pwm)
+        self._pending_ack_velocity = self._velocity_for_direction(self._current_direction, self._current_pwm)
+        self._expected_response_description = self._format_run_ack_description(self._pending_ack_velocity)
         self._set_state(self.S_SAMPLE_WAIT_ACK)
         self._wait_for = "run_started"
-        self.command_requested(build_run(-self._current_pwm))
+        self.command_requested(build_run(self._pending_ack_velocity))
 
     def _complete(self) -> None:
         self._clear_resume_context()
+        self._clear_pending_runtime_state()
         self._running = False
-        self._wait_for = None
-        self._pending_getpos_after_sensor = None
         self._set_state(self.S_COMPLETED)
         self.status_changed("Sampling completed")
         self.log_message("Sampling completed")
+        self._latest_terminal_result = self._build_terminal_result(
+            terminal_state=self.S_COMPLETED,
+            final_status="COMPLETED",
+            status_text="Sampling completed",
+            reason="-",
+            failure_context="-",
+            resume_text="-",
+            resumable=False,
+        )
         self.sampling_completed()
 
     def _capture_resume_context(self, reason: str, *, resumable: bool, terminal_state: str) -> None:
@@ -591,6 +734,7 @@ class SamplingTestController:
             reason=reason,
             resumable=bool(resumable),
             sample_incomplete=sample_incomplete,
+            home_sensor=self._home_sensor,
             middle_target=int(self._middle_target) if self._middle_target is not None else None,
         )
         self._resume_context = context
@@ -607,10 +751,19 @@ class SamplingTestController:
         self._capture_resume_context(reason, resumable=resumable, terminal_state=self.S_FAILED)
         self._send_stopmotor()
         self._running = False
-        self._wait_for = None
+        self._clear_pending_runtime_state()
         self._set_state(self.S_FAILED)
         self.status_changed(reason)
         self.log_message(f"Sampling failed: {reason}")
+        self._latest_terminal_result = self._build_terminal_result(
+            terminal_state=self.S_FAILED,
+            final_status="FAILED",
+            status_text="FAILED",
+            reason=self._summarize_failure_reason(reason),
+            failure_context=self._format_failure_context(),
+            resume_text=self._build_resume_text(reason, resumable=resumable),
+            resumable=resumable,
+        )
         self.sampling_failed(reason)
 
     def _handle_run_started(self, value: object) -> None:
@@ -641,7 +794,9 @@ class SamplingTestController:
         self._pending_ack_time = self._clock()
         self._set_state(self.S_SAMPLE_WAIT_SENSOR)
         self._wait_for = "tpos_status"
-        expected_sensor = "R" if self._current_direction == "+" else "L"
+        expected_sensor = self._expected_sensor_for_direction(self._current_direction)
+        self._pending_departure_sensor = self._departure_sensor_for_direction(self._current_direction)
+        self._allow_departure_duplicate = True
         self._expected_response_description = f"{expected_sensor} sensor event for PWM {self._current_pwm} sample {self._current_sample_index}"
         self.status_changed(
             f"Waiting for {expected_sensor} sensor event: PWM {self._current_pwm}, sample {self._current_sample_index}, direction {self._current_direction}"
@@ -703,20 +858,23 @@ class SamplingTestController:
                 self.status_changed("Waiting for TPOS home completion")
                 return
             if event in ("reached", "no_move"):
+                self._pending_getpos_after_sensor = self._home_sensor
                 self._wait_for = "getpos"
                 self._set_state(self.S_HOME_WAIT_GETPOS)
                 self._expected_response_description = "GETPOS response for home position"
                 self.status_changed("Reading home position")
                 self.command_requested(build_getpos())
                 return
-            if event == "L":
+            if event == self._home_sensor:
+                self._pending_getpos_after_sensor = self._home_sensor
                 self._wait_for = "getpos"
                 self._set_state(self.S_HOME_WAIT_GETPOS)
                 self._expected_response_description = "GETPOS response for home position"
                 self.status_changed("Home sensor reached; reading home position")
                 self.command_requested(build_getpos())
                 return
-            if event == "Z" and value.get("by") == "L":
+            if event == "Z" and value.get("by") == self._home_sensor:
+                self._pending_getpos_after_sensor = self._home_sensor
                 self._wait_for = "getpos"
                 self._set_state(self.S_HOME_WAIT_GETPOS)
                 self._expected_response_description = "GETPOS response for home position"
@@ -746,13 +904,19 @@ class SamplingTestController:
             )
             return
 
-        if (
-            self._state == self.S_SAMPLE_WAIT_GETPOS
-            and self._wait_for == "getpos"
-            and self._pending_getpos_after_sensor in ("L", "R")
-        ):
+        if self._wait_for == "getpos" and self._pending_getpos_after_sensor in ("L", "R"):
             expected_sensor = self._pending_getpos_after_sensor
             if event == expected_sensor or (event == "Z" and value.get("by") == expected_sensor):
+                return
+
+        if self._state == self.S_SAMPLE_WAIT_SENSOR and self._wait_for == "tpos_status":
+            expected_departure_sensor = self._pending_departure_sensor
+            if (
+                self._allow_departure_duplicate
+                and expected_departure_sensor in ("L", "R")
+                and (event == expected_departure_sensor or (event == "Z" and value.get("by") == expected_departure_sensor))
+            ):
+                self._allow_departure_duplicate = False
                 return
 
         if self._wait_for != "tpos_status":
@@ -764,7 +928,6 @@ class SamplingTestController:
             )
             return
 
-        expected_sensor = "L" if self._current_direction in ("HOME", "-") else "R"
         if event not in ("L", "R"):
             self._fail_with_stop(
                 self._build_unexpected_packet_reason(
@@ -774,21 +937,18 @@ class SamplingTestController:
             )
             return
 
-        if self._current_direction == "+" and event != "R":
+        expected_sensor = self._expected_sensor_for_direction(self._current_direction)
+        if event != expected_sensor:
             self._fail_with_stop(
-                f"Wrong sensor event during positive move. Expected R, got {event}. PWM={self._current_pwm}, sample_index={self._current_sample_index}.",
-                resumable=True,
-            )
-            return
-        if self._current_direction == "-" and event != "L":
-            self._fail_with_stop(
-                f"Wrong sensor event during negative move. Expected L, got {event}. PWM={self._current_pwm}, sample_index={self._current_sample_index}.",
+                f"Wrong sensor event during {('outward' if self._current_direction == self._outward_direction else 'return')} move. Expected {expected_sensor}, got {event}. PWM={self._current_pwm}, sample_index={self._current_sample_index}.",
                 resumable=True,
             )
             return
 
         self._pending_sensor_time = self._clock()
         self._pending_getpos_after_sensor = expected_sensor
+        self._pending_departure_sensor = None
+        self._allow_departure_duplicate = False
         self._wait_for = "getpos"
         self._set_state(self.S_SAMPLE_WAIT_GETPOS)
         self._expected_response_description = "GETPOS response"
@@ -804,6 +964,8 @@ class SamplingTestController:
             )
             return
         self._pending_getpos_after_sensor = None
+        self._pending_departure_sensor = None
+        self._allow_departure_duplicate = False
         if not isinstance(value, tuple) or len(value) != 2 or value[0] != "G":
             self._fail_with_stop(
                 self._build_unexpected_packet_reason(
@@ -816,6 +978,8 @@ class SamplingTestController:
         position = int(value[1])
         if self._current_direction == "HOME":
             self._start_l_pos = position
+            self._home_position = position
+            self._pending_getpos_after_sensor = self._home_sensor
             self._wait_for = None
             self.status_changed(f"Home position captured: {position}")
             self.log_message(f"Home endpoint captured: {position}")
@@ -837,17 +1001,18 @@ class SamplingTestController:
             )
             return
 
-        if self._current_direction == "+":
+        if self._current_direction == self._outward_direction:
             self._current_r_pos = position
+            self._opposite_position = position
             if self._start_l_pos is None:
-                self._fail_with_stop("Home position is missing before positive measurement.", resumable=False)
+                self._fail_with_stop("Home position is missing before outward measurement.", resumable=False)
                 return
             range_value = abs(int(self._current_r_pos) - int(self._start_l_pos))
             return_error = None
         else:
             self._current_l_pos = position
             if self._current_r_pos is None:
-                self._fail_with_stop("Positive reference position is missing before negative measurement.", resumable=False)
+                self._fail_with_stop("Opposite reference position is missing before return measurement.", resumable=False)
                 return
             range_value = abs(int(self._current_r_pos) - int(self._current_l_pos))
             return_error = abs(int(self._current_l_pos) - int(self._start_l_pos or 0))
@@ -920,7 +1085,7 @@ class SamplingTestController:
         self._completed_measurements += 1
         self.samples_completed_changed(self._completed_measurements, self._total_measurements)
 
-        if self._current_direction == "+":
+        if self._current_direction == self._outward_direction:
             self._start_negative_leg()
             return
 
@@ -960,13 +1125,35 @@ class SamplingTestController:
         self._fail_with_stop(f"Motor fault reported during Sampling: {reason}", resumable=False)
 
     def _move_to_middle_and_complete(self, range_value: int) -> None:
-        self._middle_target = int(int(range_value) // 2)
+        _ = range_value
+        try:
+            self._middle_target = self._calculate_middle_target()
+        except RuntimeError as exc:
+            self._fail_with_stop(str(exc), resumable=False)
+            return
         self._set_state(self.S_WAIT_MIDDLE_TPOS)
         self._wait_for = "tpos_status"
         self._expected_response_description = "TPOS middle completion"
         self.status_changed("Moving to middle")
         self.log_message("Moving to middle")
         self.command_requested(build_tpos(int(self._middle_target or 0)))
+
+    def _calculate_middle_target(self) -> int:
+        home_pos = self._home_position if self._home_position is not None else self._start_l_pos
+        opposite_pos = self._opposite_position if self._opposite_position is not None else self._current_r_pos
+        if home_pos is None or opposite_pos is None:
+            raise RuntimeError("Sampling endpoint positions are missing for middle target calculation.")
+        return int(int(home_pos) + ((int(opposite_pos) - int(home_pos)) // 2))
+
+    def _clear_pending_runtime_state(self) -> None:
+        self._wait_for = None
+        self._expected_response_description = ""
+        self._pending_ack_velocity = None
+        self._pending_ack_time = None
+        self._pending_sensor_time = None
+        self._pending_departure_sensor = None
+        self._allow_departure_duplicate = False
+        self._pending_getpos_after_sensor = None
 
     def _coerce_packet(self, packet: list[int] | bytes | bytearray | dict[str, Any]) -> dict[str, Any] | None:
         if isinstance(packet, dict):
@@ -1011,3 +1198,59 @@ class SamplingTestController:
     @staticmethod
     def _build_unexpected_packet_reason(raw_hex: str, expected: str) -> str:
         return f"Unexpected packet while waiting for {expected}: {raw_hex}"
+
+    def _build_terminal_result(
+        self,
+        *,
+        terminal_state: str,
+        final_status: str,
+        status_text: str,
+        reason: str,
+        failure_context: str,
+        resume_text: str,
+        resumable: bool,
+    ) -> SamplingTerminalResult:
+        return SamplingTerminalResult(
+            terminal_state=terminal_state,
+            final_status=final_status,
+            status_text=status_text,
+            reason=reason,
+            failure_context=failure_context,
+            resume_text=resume_text,
+            pwm=self._current_pwm if self._current_pwm_index >= 0 else None,
+            direction=self._current_direction or None,
+            sample_index=self._current_sample_index if self._current_sample_index > 0 else None,
+            completed_count=int(self._completed_measurements),
+            total_count=int(self._total_measurements),
+            resumable=resumable,
+        )
+
+    def _format_failure_context(self) -> str:
+        parts: list[str] = []
+        if self._current_pwm_index >= 0:
+            parts.append(f"PWM {int(self._current_pwm)}")
+        if self._current_direction:
+            parts.append(f"Direction {self._current_direction}")
+        if self._current_sample_index > 0:
+            parts.append(f"Sample {int(self._current_sample_index)}")
+        return " | ".join(parts) if parts else "-"
+
+    def _summarize_failure_reason(self, reason: str) -> str:
+        text = str(reason).strip()
+        if not text:
+            return "-"
+        for marker in (" Current PWM=", " PWM=", " direction=", " Direction ", " sample_index="):
+            if marker in text:
+                text = text.split(marker, 1)[0].rstrip()
+        if text.endswith("."):
+            return text
+        if "." in text:
+            return text.split(".", 1)[0].rstrip() + "."
+        return text
+
+    def _build_resume_text(self, reason: str, *, resumable: bool) -> str:
+        if not resumable:
+            if "Unexpected encoder reset during sampling." in reason:
+                return "Unavailable - encoder reset requires a fresh start."
+            return "Unavailable - sampling requires a fresh start."
+        return "Sampling is running."
