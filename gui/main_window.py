@@ -24,6 +24,7 @@ from myconfig.constants import NODE_ID_MAPPING, BCMD_GET_NODE_ID
 from data.binary_cmd_parser import decode_command, parse_get_interrupt
 
 from services import (
+    CommunicationLogStore,
     RobotBackendClient,
     RuntimePacketEvent,
     RuntimePacketHandler,
@@ -33,7 +34,6 @@ from services import (
     ensure_node_status,
     reset_node_status,
 )
-
 from gui.test_all_dialog import TestAllDialog
 from gui.comm_monitor import CommMonitorDialog
 from gui.motor_animation_module import MotorAnimationModule
@@ -106,6 +106,9 @@ class MainWindow(QMainWindow):
         self.rx_buffer = bytearray()
 
         self.backend_client = RobotBackendClient()
+        self.communication_log_store = CommunicationLogStore()
+        self.comm_log_store = self.communication_log_store
+        self.backend_client.serial_connection.set_communication_log_store(self.communication_log_store)
         self.packet_handler = RuntimePacketHandler()
         self.rx_log_writer: RxLogWriter | None = None
         # Legacy dialogs still expect these attributes while MainWindow is being migrated.
@@ -2168,6 +2171,8 @@ class MainWindow(QMainWindow):
 
                     self.rx_buffer += data
                     packets, self.rx_buffer = self.backend_client.parse_rx_packets(self.rx_buffer)
+                    if self.communication_log_store is not None:
+                        self.communication_log_store.record_in(bytes(data), packets=packets)
                     for packet in packets:
                         self.packet_received.emit(packet)
                     events = self.packet_handler.handle_packets(

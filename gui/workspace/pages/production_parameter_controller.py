@@ -10,6 +10,7 @@ from typing import Any, Callable
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from ..bridges import WorkspaceRuntimeBridge
+from myconfig.node_display import ML20_NODE_MAP
 
 UUID_COMMAND = 0xE0
 UUID_READ_PARAM = 0x3F
@@ -50,20 +51,6 @@ PID_D_SUB_ID = 0x64
 PARAM_WRITE = 0x3D
 PARAM_READ = 0x3F
 PARAM_RESPONSE = 0x3A
-
-ML20_NODE_MAP: dict[int, str] = {
-    1: "MCU Master",
-    3: "X",
-    4: "Y",
-    5: "V",
-    6: "H",
-    7: "NZ",
-    8: "RZ",
-    9: "PZ",
-    10: "HMI",
-    11: "NGActuator",
-    12: "Z",
-}
 
 
 @dataclass(frozen=True)

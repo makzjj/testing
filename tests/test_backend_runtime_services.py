@@ -14,8 +14,10 @@ from services import (
     ensure_node_status,
     reset_node_status,
 )
+from services.communication_log_store import CommunicationLogStore
 from services.robot_backend_client import RobotBackendClient
 from serial_conn.commands import CommandBuilder
+from serial_conn.connection import SerialConnection
 from myconfig.constants import COMMANDS
 
 
@@ -162,6 +164,34 @@ class RobotBackendClientTests(unittest.TestCase):
 
         self.assertEqual(client.get_command_bytes("ROBOT On"), COMMANDS["ROBOT On"])
         self.assertEqual(client.get_command_bytes("ROBOT Off"), COMMANDS["ROBOT Off"])
+
+
+class SerialConnectionCommunicationLogTests(unittest.TestCase):
+    """Confirms log filtering does not interfere with actual writes."""
+
+    def test_filtered_polling_frame_still_writes_to_serial(self) -> None:
+        class _FakeSerial:
+            def __init__(self) -> None:
+                self.is_open = True
+                self.writes: list[bytes] = []
+
+            def write(self, data) -> int:
+                payload = bytes(data)
+                self.writes.append(payload)
+                return len(payload)
+
+        fake_serial = _FakeSerial()
+        connection = SerialConnection()
+        connection._set_target(fake_serial)
+        store = CommunicationLogStore()
+        connection.set_communication_log_store(store)
+
+        payload = CommandBuilder.build_can_over_uart_packet(0x01, 0x01, [0xB5, 0x3F])
+        written = connection.write(payload)
+
+        self.assertEqual(written, len(payload))
+        self.assertEqual(fake_serial.writes[-1], bytes(payload))
+        self.assertEqual(store.entries(), [])
 
 
 if __name__ == "__main__":

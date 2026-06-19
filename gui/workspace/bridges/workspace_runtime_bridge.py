@@ -23,6 +23,7 @@ from .live_hardware_overlay_provider import LiveHardwareOverlayProvider
 from .raw_project_config_reader import RawProjectConfigReader
 from .workspace_snapshot_factory import WorkspaceSnapshotFactory
 from services.robot_backend_client import RobotBackendClient
+from services.communication_log_store import CommunicationLogStore
 
 _ALLOWED_CONFIG_SUFFIXES = {".yaml", ".yml"}
 
@@ -245,6 +246,16 @@ class WorkspaceRuntimeBridge:
         if create_if_missing:
             self._runtime_launcher.ensure_runtime_widget()
         return self._runtime_launcher.current_window()
+
+    def get_runtime_communication_log_store(self, *, create_if_missing: bool = False) -> CommunicationLogStore | None:
+        """Return the shared communication log buffer from the runtime window."""
+        runtime_window = self.get_runtime_window(create_if_missing=create_if_missing)
+        if runtime_window is None:
+            return None
+        store = getattr(runtime_window, "communication_log_store", None)
+        if store is None:
+            store = getattr(runtime_window, "comm_log_store", None)
+        return store
 
     def get_runtime_connection_state(self, *, create_if_missing: bool = False) -> tuple[bool, bool]:
         """Return lightweight serial/MCU connection flags from the shared runtime backend."""

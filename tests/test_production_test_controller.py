@@ -45,6 +45,7 @@ from gui.workspace.pages.production_parameter_controller import (
     parse_uuid_value,
     validate_uuid_format,
 )
+from services.communication_log_store import CommunicationLogStore
 from myconfig.constants import COMMANDS
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -83,6 +84,7 @@ class _FakeRuntimeWindow(QObject):
     def __init__(self, *, connected: bool = True, mcu_version: str | None = "v1.0.0") -> None:
         super().__init__()
         self.backend_client = _FakeBackendClient(connected=connected)
+        self.communication_log_store = CommunicationLogStore(max_entries=32)
         self.mcu_version = mcu_version
         self._selected_port = "COM11"
         self._selected_baud = "115200"
@@ -104,6 +106,12 @@ class _FakeBridge:
         if create_if_missing:
             self.create_requests += 1
         return self.runtime_window
+
+    def get_runtime_communication_log_store(self, *, create_if_missing: bool = False):
+        runtime_window = self.get_runtime_window(create_if_missing=create_if_missing)
+        if runtime_window is None:
+            return None
+        return runtime_window.communication_log_store
 
     def get_runtime_connection_state(self, *, create_if_missing: bool = False) -> tuple[bool, bool]:
         runtime_window = self.get_runtime_window(create_if_missing=create_if_missing)
@@ -4329,5 +4337,53 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         self.assertEqual(popup.range_field.text(), "2499778")
         self.assertEqual(differences[-1], 100)
         popup.close()
+
+    def test_communication_logs_button_reuses_popup_and_keeps_progress_log_intact(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+        store = runtime_window.communication_log_store
+
+        store.record_out(
+            bytes.fromhex("25 A5 06 0B 31 03 88 FF 42 00 00"),
+            decoded_line="[N6:H] RUN 255 66 (-190)",
+        )
+        page.progress_section.append_step("Progress line")
+
+        page._handle_view_logs_requested()
+        dialog = page._communication_logs_dialog
+        assert dialog is not None
+        self.assertIn("[OUT] 25 A5 06 0B 31 03 88 FF 42 00 00 (11)", dialog.log_output.toPlainText())
+
+        dialog.hide()
+        store.record_in(
+            bytes.fromhex("C8 24 06 0A 25 A5 06 01 31 02 81 4C"),
+            decoded_lines=["                              [N6:H] TPOS 'L'"],
+        )
+        page._handle_view_logs_requested()
+        self.assertIs(page._communication_logs_dialog, dialog)
+        self.assertIn("[IN ] C8 24 06 0A 25 A5 06 01 31 02 81 4C (12)", dialog.log_output.toPlainText())
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            save_path = Path(temp_dir) / "20260619_093855_communication.log"
+            with patch(
+                "gui.workspace.dialogs.communication_log_dialog.QFileDialog.getSaveFileName",
+                return_value=(str(save_path), "Log Files (*.log)"),
+            ):
+                dialog._handle_save_clicked()
+            saved_text = save_path.read_text(encoding="utf-8")
+            self.assertIn("IPQC Communication Log", saved_text)
+            self.assertIn("Current Page: Production", saved_text)
+            self.assertIn("Selected Node:", saved_text)
+            self.assertIn("[OUT] 25 A5 06 0B 31 03 88 FF 42 00 00 (11)", saved_text)
+
+        dialog.clear_button.click()
+        self.assertEqual(store.to_plain_text().strip(), "")
+        self.assertIn("Progress line", page.progress_section.to_plain_text())
+
+        page._handle_view_logs_requested()
+        self.assertIs(page._communication_logs_dialog, dialog)
+        self.assertEqual(dialog.log_output.toPlainText().strip(), "")
+
 if __name__ == "__main__":
     unittest.main()

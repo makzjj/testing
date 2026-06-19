@@ -1,11 +1,13 @@
 """Reusable backend services for the BioBot tester platform."""
 
+from .communication_log_store import CommunicationLogStore
 from .node_status_store import build_default_node_status, connected_node_ids, ensure_node_status, reset_node_status
 from .runtime_packet_handler import RuntimePacketEvent, RuntimePacketHandler
 from .rx_log_writer import RxLogWriter
 
 __all__ = [
     "RobotBackendClient",
+    "CommunicationLogStore",
     "RuntimePacketEvent",
     "RuntimePacketHandler",
     "RxLogWriter",

@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..bridges import WorkspaceRuntimeBridge
+from ..dialogs.communication_log_dialog import CommunicationLogDialog
 from ..dialogs import ProductionMetadataDialog
 from ..dialogs.sampling_test_popup import SamplingTestPopup
 from ..models import SessionState
@@ -33,6 +34,7 @@ from ..widgets import DetailListWidget, LabeledControl, PanelFrame, SimpleTableW
 from ..controllers.sampling_test_controller import SamplingTestConfig, SamplingTestController
 from .single_axis_functional_popup import SingleAxisFunctionalPopup
 from services.ipqc_excel_adapter import IpqcExcelAdapter
+from myconfig.node_display import ML20_NODE_MAP
 from .base_page import BaseWorkspacePage
 from .production_parameter_controller import (
     ParameterDefinition,
@@ -46,24 +48,6 @@ from .production_parameter_controller import (
 from .production_test_controller import ProductionTestController
 from .production_test_models import StepResult
 
-# TODO(Phase 2/3): move ML 2.0 node mapping to project-config/model-aware constants.
-# TODO(Phase 2/3): replace old hardcoded node lists in legacy pages with model-aware config.
-# TODO(Phase 2/3): align ML2.0.yaml-driven node identities when config integration is prioritized.
-# Fixed Phase 1 ML 2.0 production node identity map.
-# Note: Node 2 is not part of the currently expected ML 2.0 production routing set.
-ML20_NODE_MAP: dict[int, str] = {
-    1: "MCU Master",
-    3: "X",
-    4: "Y",
-    5: "V",
-    6: "H",
-    7: "NZ",
-    8: "RZ",
-    9: "PZ",
-    10: "HMI",
-    11: "NGActuator",
-    12: "Z",
-}
 _ML20_NODE_ORDER: tuple[int, ...] = tuple(ML20_NODE_MAP)
 RUNTIME_POLL_INTERVAL_MS = 1000
 EEPROM_SAVE_SETTLE_MS = 2000
@@ -123,6 +107,7 @@ class ProductionPage(BaseWorkspacePage):
         self.node_status_section = self.robot_nodes_section
         self.result_summary_section = _ResultSummarySection()
         self.progress_section = _TestProgressSection()
+        self._communication_logs_dialog: CommunicationLogDialog | None = None
         self._test_controller = ProductionTestController(bridge)
         self._parameter_controller = ProductionParameterController(bridge, node_map=ML20_NODE_MAP)
         self._ipqc_excel_adapter = IpqcExcelAdapter()
@@ -177,6 +162,7 @@ class ProductionPage(BaseWorkspacePage):
         self._parameter_controller.eeprom_save_finished.connect(self._handle_eeprom_save_finished)
         self.progress_section.refresh_requested.connect(self.refresh)
         self.progress_section.clear_requested.connect(self._handle_clear_progress_log)
+        self.progress_section.view_logs_requested.connect(self._handle_view_logs_requested)
         self.test_control_section.node_selected.connect(self._handle_test_control_node_selected)
         self._current_programmed_pwm_value = "-"
         self._parameter_definitions = list(WORKBOOK_PARAMETER_DEFINITIONS.values())
@@ -939,6 +925,42 @@ class ProductionPage(BaseWorkspacePage):
 
     def _handle_clear_progress_log(self) -> None:
         self.progress_section.clear_log()
+
+    def _get_communication_log_store(self):
+        store = None
+        if hasattr(self._bridge, "get_runtime_communication_log_store"):
+            store = self._bridge.get_runtime_communication_log_store(create_if_missing=True)
+        if store is None:
+            runtime_window = self.get_runtime_window(create_if_missing=True)
+            store = getattr(runtime_window, "communication_log_store", None) if runtime_window is not None else None
+        if store is None:
+            from services.communication_log_store import CommunicationLogStore
+
+            store = CommunicationLogStore()
+        return store
+
+    def _handle_view_logs_requested(self) -> None:
+        store = self._get_communication_log_store()
+        if self._communication_logs_dialog is None:
+            self._communication_logs_dialog = CommunicationLogDialog(
+                store,
+                self,
+                context_provider=self._communication_log_context,
+            )
+        else:
+            self._communication_logs_dialog._store = store
+        self._communication_logs_dialog.show()
+        self._communication_logs_dialog.raise_()
+        self._communication_logs_dialog.activateWindow()
+
+    def _communication_log_context(self) -> tuple[str, str]:
+        current_page = "Production"
+        try:
+            node_id, node_name = self.test_control_section.selected_node()
+            selected_node = f"Node {node_id} - {node_name}"
+        except Exception:
+            selected_node = "-"
+        return current_page, selected_node
 
     def _handle_test_control_node_selected(self) -> None:
         self._sync_production_context(log_reason="Selected node changed. Previous verification and test results were invalidated.")
@@ -2672,6 +2694,7 @@ class _UuidCsvSection(PanelFrame):
 class _TestProgressSection(PanelFrame):
     refresh_requested = pyqtSignal()
     clear_requested = pyqtSignal()
+    view_logs_requested = pyqtSignal()
 
     def __init__(self) -> None:
         super().__init__("Status / Test Progress", "")
@@ -2681,6 +2704,11 @@ class _TestProgressSection(PanelFrame):
         controls = QHBoxLayout()
         controls.setContentsMargins(0, 0, 0, 0)
         controls.setSpacing(8)
+        controls.addStretch(1)
+        view_logs_button = QPushButton("View Logs")
+        view_logs_button.setProperty("tone", "secondary")
+        view_logs_button.clicked.connect(self.view_logs_requested.emit)
+        controls.addWidget(view_logs_button)
         refresh_button = QPushButton("Refresh")
         refresh_button.setProperty("tone", "secondary")
         refresh_button.clicked.connect(self.refresh_requested.emit)
@@ -2689,7 +2717,6 @@ class _TestProgressSection(PanelFrame):
         clear_button.setProperty("tone", "secondary")
         clear_button.clicked.connect(self.clear_requested.emit)
         controls.addWidget(clear_button)
-        controls.addStretch(1)
         self.body_layout.addLayout(controls)
 
         self._log_output = QTextEdit()

@@ -7,6 +7,8 @@ import os
 import serial
 import serial.tools.list_ports
 
+from services.communication_log_store import CommunicationLogStore, format_outgoing_frame_decoded_text
+
 
 class SerialConnection:
     def __init__(self):
@@ -16,6 +18,11 @@ class SerialConnection:
         self.timeout = 0.1
         self.log_file = "biobot_serial.log"
         self.connected = False
+        self.communication_log_store: CommunicationLogStore | None = None
+
+    def set_communication_log_store(self, store: CommunicationLogStore | None) -> None:
+        """Attach the shared communication log buffer."""
+        self.communication_log_store = store
 
     def _log(self, level: str, message: str):
         """Write serial diagnostics to a small local log file."""
@@ -142,6 +149,9 @@ class SerialConnection:
             self._log("INFO", f"TX[{port_type}] wrote {written}/{len(data)} bytes")
             if written != len(data):
                 self._log("WARNING", f"Partial write on {port_type} port: {written}/{len(data)} bytes")
+            if self.communication_log_store is not None and written == len(data):
+                decoded_line = format_outgoing_frame_decoded_text(bytes(data))
+                self.communication_log_store.record_out(bytes(data), decoded_line=decoded_line)
             return written
         except serial.SerialException as exc:
             self._log("ERROR", f"Serial write failed on {port_type} port: {exc}")
