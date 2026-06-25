@@ -522,7 +522,7 @@ class ProductionPage(BaseWorkspacePage):
             except RuntimeError:
                 node_id = self._sampling_session.node_id if self._sampling_session is not None else None
                 node_name = self._sampling_session.node_name if self._sampling_session is not None else None
-            active_group = self._ipqc_excel_adapter.active_sheet_group or "-"
+            active_group = self._current_sampling_base_group() or "-"
             if node_id is not None and node_name and active_group != "-":
                 try:
                     sheet_name = self._ipqc_excel_adapter.resolve_sampling_sheet_name(active_group)
@@ -559,7 +559,7 @@ class ProductionPage(BaseWorkspacePage):
         except RuntimeError:
             node_id = self._sampling_session.node_id if self._sampling_session is not None else None
             node_name = self._sampling_session.node_name if self._sampling_session is not None else None
-        active_group = self._ipqc_excel_adapter.active_sheet_group
+        active_group = self._current_sampling_base_group()
         resume_enabled, resume_reason = self._sampling_controller.resume_availability(
             node_id=node_id,
             node_name=node_name,
@@ -630,7 +630,7 @@ class ProductionPage(BaseWorkspacePage):
             self._refresh_sampling_action_states()
             return
 
-        active_group = self._ipqc_excel_adapter.active_sheet_group
+        active_group = self._current_sampling_base_group()
         if not active_group:
             reason = "Select an active workbook sheet group before starting Sampling."
             self.console_message.emit(f"[Production] {reason}")
@@ -755,11 +755,10 @@ class ProductionPage(BaseWorkspacePage):
             node_id = self._sampling_session.node_id if self._sampling_session is not None else None
             node_name = self._sampling_session.node_name if self._sampling_session is not None else None
         sheet_name = "-"
-        if self._ipqc_excel_adapter.has_loaded_workbook():
+        active_group = self._current_sampling_base_group()
+        if active_group:
             try:
-                active_group = self._ipqc_excel_adapter.active_sheet_group
-                if active_group:
-                    sheet_name = self._ipqc_excel_adapter.resolve_sampling_sheet_name(active_group)
+                sheet_name = self._ipqc_excel_adapter.resolve_sampling_sheet_name(active_group)
             except Exception:
                 sheet_name = "-"
         popup.set_context(node_id, node_name, sheet_name)
@@ -778,7 +777,7 @@ class ProductionPage(BaseWorkspacePage):
             except RuntimeError:
                 node_id = self._sampling_session.node_id if self._sampling_session is not None else None
                 node_name = self._sampling_session.node_name if self._sampling_session is not None else None
-            active_group = self._ipqc_excel_adapter.active_sheet_group
+            active_group = self._current_sampling_base_group()
             resume_enabled, resume_reason = self._sampling_controller.resume_availability(
                 node_id=node_id,
                 node_name=node_name,
@@ -1527,6 +1526,8 @@ class ProductionPage(BaseWorkspacePage):
         if not self._ipqc_excel_adapter.has_loaded_workbook():
             return None
         active_group = self._ipqc_excel_adapter.active_sheet_group
+        if not active_group and self._production_context_key is not None:
+            active_group = self._production_context_key.base_group
         if not active_group:
             return None
         try:
@@ -1538,6 +1539,12 @@ class ProductionPage(BaseWorkspacePage):
             base_group=str(active_group),
             node_id=int(node_id),
         )
+
+    def _current_sampling_base_group(self) -> str | None:
+        if self._production_context_key is not None and self._production_context_key.base_group:
+            return str(self._production_context_key.base_group)
+        active_group = self._ipqc_excel_adapter.active_sheet_group
+        return str(active_group) if active_group else None
 
     def _clear_sampling_context_for_selected_node_change(self) -> None:
         self._single_axis_passed = False
@@ -1572,6 +1579,8 @@ class ProductionPage(BaseWorkspacePage):
         current_key = self._current_production_context_key()
         previous_key = self._production_context_key
         if current_key == previous_key:
+            return
+        if current_key is None:
             return
         self._production_context_key = current_key
         self._parameter_verification_context_key = current_key
@@ -1808,7 +1817,7 @@ class ProductionPage(BaseWorkspacePage):
             reason = "Stop the active Production test before starting Sampling."
         else:
             try:
-                active_group = self._ipqc_excel_adapter.active_sheet_group
+                active_group = self._current_sampling_base_group()
                 if not active_group:
                     raise RuntimeError("No active workbook sheet group is selected.")
                 layout = self._ipqc_excel_adapter.discover_sampling_layout(active_group)
@@ -1823,7 +1832,7 @@ class ProductionPage(BaseWorkspacePage):
             self._sampling_popup.set_stop_available(self._sampling_controller.is_active())
             self._sampling_popup.set_sampling_configuration_enabled(not self._sampling_controller.is_active())
             try:
-                active_group = self._ipqc_excel_adapter.active_sheet_group
+                active_group = self._current_sampling_base_group()
                 sheet_name = self._ipqc_excel_adapter.resolve_sampling_sheet_name(active_group) if active_group else "-"
             except Exception:
                 sheet_name = "-"

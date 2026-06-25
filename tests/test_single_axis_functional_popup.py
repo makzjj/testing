@@ -8,7 +8,7 @@ from gui.workspace.pages.single_axis_functional_popup import SingleAxisFunctiona
 from gui.workspace.controllers.single_axis_functional_test_controller import (
     FunctionalTestConfig,
 )
-from data.binary_cmd_builders import build_hunting_timeout, build_nodeconfig_query_payload
+from data.binary_cmd_builders import build_hunting_timeout, build_nodeconfig_query_payload, build_tpos
 
 
 def get_app():
@@ -112,16 +112,50 @@ def test_position_and_range_difference_updates(monkeypatch):
     # Position direct callback
     popup.controller.position_changed(123)
     assert popup.position_field.text() == "123"
-    # Range and difference append and field update
+    # Range 1 and Range 2 update the field; difference only logs.
     popup.controller.range1_changed(1000)
+    assert popup.range_field.text() == "1000"
     popup.controller.range2_changed(1100)
+    assert popup.range_field.text() == "1100"
     popup.controller.difference_changed(100)
     text = popup.status_block.toPlainText()
     assert "Range 1: 1000" in text
     assert "Range 2: 1100" in text
     assert "Difference: 100" in text
-    # range_field shows last updated value
-    assert popup.range_field.text() == "100"
+    # range_field keeps the latest real movement value, not the difference.
+    assert popup.range_field.text() == "1100"
+
+
+def test_middle_travel_range_uses_tpos_target_then_latest_position(monkeypatch):
+    _suppress_message_boxes(monkeypatch)
+    popup = SingleAxisFunctionalPopup(node_options=[(4, "Axis")], allow_safe_tx=True)
+
+    popup.controller.position_changed(8)
+    popup.controller.command_requested(build_tpos(50000))
+    assert popup.range_field.text() == "49992"
+    assert "Middle travel distance: 49992" in popup.status_block.toPlainText()
+
+    popup.controller.position_changed(49990)
+    assert popup.range_field.text() == "49992"
+
+
+def test_range_display_resets_between_runs(monkeypatch):
+    _suppress_message_boxes(monkeypatch)
+    popup = SingleAxisFunctionalPopup(node_options=[(4, "Axis")], allow_safe_tx=True)
+    popup.node_combo.setCurrentIndex(1)
+
+    popup._handle_run_clicked()
+    popup.controller.range1_changed(1000)
+    popup.controller.range2_changed(1100)
+    popup.controller.position_changed(12)
+    popup.controller.command_requested(build_tpos(50000))
+    assert popup.range_field.text() == "49988"
+
+    popup.stop_button.click()
+    popup._handle_run_clicked()
+
+    assert popup.range_field.text() == "-"
+    assert popup.status_block.toPlainText().count("Middle travel distance: 49988") == 1
 
 
 def test_pass_triggers_sampling_prompt_and_reenables(monkeypatch):

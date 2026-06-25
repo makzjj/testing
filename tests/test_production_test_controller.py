@@ -2455,6 +2455,50 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         return page.stage_section._rows["sampling"][1]
 
     @staticmethod
+    def _create_7nz_ipqc_workbook(path: Path) -> None:
+        wb = Workbook()
+        for index, base_group in enumerate(("7NZ", "7NX")):
+            ws = wb.active if index == 0 else wb.create_sheet(base_group)
+            if index == 0:
+                ws.title = base_group
+            sampling = wb.create_sheet(f"{base_group}_D")
+            wb.create_sheet(f"{base_group}_A")
+            ws["A1"] = "Programming"
+            ws["B2"] = "Source"
+            ws["C2"] = "Programmed"
+            ws["D2"] = "Check"
+            ws["A3"] = "Operator"
+            ws["A4"] = "Assembler"
+            ws["A5"] = "UUID"
+            ws["A6"] = "PWM"
+            ws["A7"] = "Proportionate (P)"
+            ws["A8"] = "Integral (I)"
+            ws["A9"] = "Derivative (D)"
+            ws["A10"] = "PID_SlewRate"
+            ws["A11"] = "RampDown_Slope"
+            ws["A12"] = "RampDown_Step"
+            ws["A13"] = "RampDown_MinVel"
+            ws["A14"] = "RampDown_TargetOffset"
+            ws["A15"] = "RampDown_Region"
+            ws["A16"] = "Acceptable_Error"
+            ws["B3"] = f"operator-{base_group.lower()}"
+            ws["B4"] = f"assembler-{base_group.lower()}"
+            ws["B5"] = "1223307010"
+            ws["B6"] = "100"
+            ws["B7"] = "0.125"
+            ws["B8"] = "0.025"
+            ws["B9"] = "0.010"
+            ws["B10"] = "1500"
+            ws["B11"] = "-25"
+            ws["B12"] = "4"
+            ws["B13"] = "8"
+            ws["B14"] = "-12"
+            ws["B15"] = "75"
+            ws["B16"] = "30"
+            ProductionPageWorkflowTests._populate_sampling_sheet(sampling)
+        wb.save(path)
+
+    @staticmethod
     def _mark_sampling_controller_running(controller, *args, **kwargs) -> bool:
         controller._running = True
         return True
@@ -2532,6 +2576,115 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             self.assertTrue(page._sampling_popup.isVisible())
             self.assertTrue(page._sampling_popup.start_button.isEnabled())
             self.assertIn("Sampling ready for Node 8 RZ using 3X_D", page._sampling_popup.log_output.toPlainText())
+
+    def test_sampling_context_survives_refresh_and_reopen_for_stable_base_group(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc_7nz.xlsx"
+            self._create_7nz_ipqc_workbook(workbook_path)
+            self._load_workbook(page, workbook_path)
+            page._handle_ipqc_sheet_group_changed("7NZ")
+            self._select_node(page, "Node 7 - NZ")
+            self._enable_single_axis_pass(page)
+
+            self.assertTrue(page._single_axis_passed)
+            self.assertIsNotNone(page._sampling_motion_polarity)
+            self.assertIsNotNone(page._sampling_sensor_profile)
+            self.assertTrue(self._sampling_stage_button(page).isEnabled())
+
+            page._handle_start_sampling_requested()
+            self._app.processEvents()
+
+            popup = page._sampling_popup
+            self.assertIsNotNone(popup)
+            assert popup is not None
+            self.assertEqual(popup.sampling_sheet_value.text(), "7NZ_D")
+            self.assertTrue(popup.start_button.isEnabled())
+
+            page.refresh()
+            self._app.processEvents()
+
+            self.assertTrue(page._single_axis_passed)
+            self.assertIsNotNone(page._sampling_motion_polarity)
+            self.assertIsNotNone(page._sampling_sensor_profile)
+            self.assertEqual(popup.sampling_sheet_value.text(), "7NZ_D")
+            self.assertTrue(popup.start_button.isEnabled())
+            self.assertTrue(self._sampling_stage_button(page).isEnabled())
+
+            popup.close()
+            self._app.processEvents()
+            page._handle_start_sampling_requested()
+            self._app.processEvents()
+
+            self.assertTrue(page._single_axis_passed)
+            self.assertIsNotNone(page._sampling_motion_polarity)
+            self.assertIsNotNone(page._sampling_sensor_profile)
+            self.assertEqual(popup.sampling_sheet_value.text(), "7NZ_D")
+            self.assertTrue(popup.start_button.isEnabled())
+            self.assertTrue(self._sampling_stage_button(page).isEnabled())
+
+    def test_sampling_context_clears_only_on_real_node_workbook_or_base_group_change(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc_7nz.xlsx"
+            workbook_path_2 = Path(tmpdir) / "ipqc_7nz_next.xlsx"
+            self._create_7nz_ipqc_workbook(workbook_path)
+            self._create_7nz_ipqc_workbook(workbook_path_2)
+            self._load_workbook(page, workbook_path)
+            page._handle_ipqc_sheet_group_changed("7NZ")
+            self._select_node(page, "Node 7 - NZ")
+            self._enable_single_axis_pass(page)
+            page._handle_start_sampling_requested()
+            self._app.processEvents()
+
+            popup = page._sampling_popup
+            self.assertIsNotNone(popup)
+            assert popup is not None
+
+            self._select_node(page, "Node 8 - RZ")
+            page._handle_test_control_node_selected()
+            self._app.processEvents()
+
+            self.assertFalse(page._single_axis_passed)
+            self.assertIsNone(page._sampling_motion_polarity)
+            self.assertIsNone(page._sampling_sensor_profile)
+            self.assertFalse(self._sampling_stage_button(page).isEnabled())
+            self.assertFalse(popup.start_button.isEnabled())
+
+            page._handle_ipqc_sheet_group_changed("7NX")
+            self._app.processEvents()
+            self.assertFalse(page._single_axis_passed)
+            self.assertIsNone(page._sampling_motion_polarity)
+            self.assertIsNone(page._sampling_sensor_profile)
+            self.assertFalse(self._sampling_stage_button(page).isEnabled())
+            self.assertFalse(popup.start_button.isEnabled())
+            self.assertEqual(popup.sampling_sheet_value.text(), "7NX_D")
+
+            self._select_node(page, "Node 7 - NZ")
+            self._enable_single_axis_pass(page)
+            page._handle_start_sampling_requested()
+            self._app.processEvents()
+
+            self.assertTrue(page._single_axis_passed)
+            self.assertIsNotNone(page._sampling_motion_polarity)
+            self.assertIsNotNone(page._sampling_sensor_profile)
+            self.assertTrue(self._sampling_stage_button(page).isEnabled())
+            self.assertTrue(popup.start_button.isEnabled())
+            self.assertEqual(popup.sampling_sheet_value.text(), "7NX_D")
+
+            self._load_workbook(page, workbook_path_2)
+            self._app.processEvents()
+            self.assertFalse(page._single_axis_passed)
+            self.assertIsNone(page._sampling_motion_polarity)
+            self.assertIsNone(page._sampling_sensor_profile)
+            self.assertFalse(self._sampling_stage_button(page).isEnabled())
+            self.assertFalse(popup.start_button.isEnabled())
 
     def test_missing_sampling_sheet_fails_before_any_run_command_is_sent(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -4357,7 +4510,7 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             self.assertTrue(page._last_parameter_verification_results_by_name["UUID"].passed)
             self.assertEqual(page.uuid_section.workbook_validation_text, "Workbook Validation: PASSED")
 
-    def test_single_axis_return_leg_range_display_uses_opposite_delta(self) -> None:
+    def test_single_axis_return_leg_range_display_uses_middle_travel_delta(self) -> None:
         controller = SingleAxisFunctionalTestController(FunctionalTestConfig(reference_sensor="L", opposite_sensor="R"))
         polarity = decode_nodeconfig_motion_polarity(0x00)
         controller._node_id = 6
@@ -4378,7 +4531,7 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         controller._range_1 = 2_499_678
         controller._handle_getpos(("G", -100))
 
-        self.assertEqual(popup.range_field.text(), "2499778")
+        self.assertEqual(popup.range_field.text(), "1249939")
         self.assertEqual(differences[-1], 100)
         popup.close()
         self._app.processEvents()

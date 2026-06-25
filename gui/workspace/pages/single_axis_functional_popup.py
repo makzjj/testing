@@ -23,7 +23,6 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-
 from typing import TYPE_CHECKING, Optional, Any
 
 if TYPE_CHECKING:  # pragma: no cover - only for type checking to avoid circular import at runtime
@@ -63,6 +62,11 @@ class SingleAxisFunctionalPopup(QDialog):
         self._adapter = None  # set during live runs
         # safe TX log for tests/inspection (no real hardware tx in this phase)
         self._tx_log: list[list[int]] = []
+        self._last_position_value: int | None = None
+        self._middle_travel_origin_position: int | None = None
+        self._middle_travel_target_position: int | None = None
+        self._middle_travel_display_value: int | None = None
+        self._middle_travel_active = False
         # Test-only flag: when True and no backend is connected/provided,
         # allow starting in safe TX mode. For normal UI usage this should be False.
         self._allow_safe_tx: bool = bool(allow_safe_tx)
@@ -177,6 +181,10 @@ class SingleAxisFunctionalPopup(QDialog):
 
     def update_position(self, value: object) -> None:
         self.position_field.setText(str(value))
+        try:
+            self._last_position_value = int(value)
+        except (TypeError, ValueError):
+            self._last_position_value = None
 
     def update_range(self, value: object) -> None:
         self.range_field.setText(str(value))
@@ -190,6 +198,7 @@ class SingleAxisFunctionalPopup(QDialog):
     def reset_flags(self) -> None:
         self.set_left_flag_active(False)
         self.set_right_flag_active(False)
+        self._clear_middle_travel_state()
 
     def mark_passed(self) -> None:
         node_text = self._selected_node_text()
@@ -198,6 +207,7 @@ class SingleAxisFunctionalPopup(QDialog):
         self.functional_passed.emit(node_id, node_name)
         # Re-enable controls after finish
         self._finish_run_ui()
+        self._clear_middle_travel_state()
         # Keep the pass gate independent from the sampling prompt decision.
         if self.ask_start_sampling():
             self.sampling_start_requested.emit()
@@ -209,12 +219,14 @@ class SingleAxisFunctionalPopup(QDialog):
         self.append_status(f"Node {node_text}: Functional test FAILED. Reason: {reason}")
         node_id, node_name = self._selected_node_data()
         self.functional_failed.emit(node_id, node_name, str(reason))
+        self._clear_middle_travel_state()
         QMessageBox.warning(self, "Functional Test Failed", str(reason))
         self._finish_run_ui()
 
     def mark_aborted(self) -> None:
         node_id, node_name = self._selected_node_data()
         self.functional_aborted.emit(node_id, node_name, "Functional test aborted.")
+        self._clear_middle_travel_state()
         self._finish_run_ui()
 
     def ask_start_sampling(self) -> bool:
@@ -296,6 +308,7 @@ class SingleAxisFunctionalPopup(QDialog):
         self.stop_button.setEnabled(True)
         self.node_combo.setEnabled(False)
         self.tolerance_combo.setEnabled(False)
+        self._clear_middle_travel_state()
         self.update_position(0)
         self.update_range("-")
         self.reset_flags()
@@ -365,6 +378,7 @@ class SingleAxisFunctionalPopup(QDialog):
                 pass
         self._adapter = None
         self._active_node_id = None
+        self._clear_middle_travel_state()
 
     def _show_log_placeholder(self) -> None:
         log_text = self.status_block.toPlainText().strip() or "No status messages available."
@@ -423,6 +437,7 @@ class SingleAxisFunctionalPopup(QDialog):
                 self.append_status(f"TX Node {self._active_node_id}: {hex_str}")
             else:
                 self.append_status(f"TX requested: {hex_str}")
+            self._maybe_start_middle_travel_display(payload)
 
         # Range/diff helpers: update range label and append status for visibility
         def _on_range1(val: int) -> None:
@@ -434,7 +449,6 @@ class SingleAxisFunctionalPopup(QDialog):
             self.append_status(f"Range 2: {int(val)}")
 
         def _on_diff(val: int) -> None:
-            self.update_range(val)
             self.append_status(f"Difference: {int(val)}")
 
         # Pass/fail wrappers
@@ -460,6 +474,31 @@ class SingleAxisFunctionalPopup(QDialog):
         self.controller.test_passed = _on_pass
         self.controller.test_failed = _on_fail
         self.controller.test_aborted = _on_abort
+
+    def _clear_middle_travel_state(self) -> None:
+        self._middle_travel_active = False
+        self._middle_travel_origin_position = None
+        self._middle_travel_target_position = None
+        self._middle_travel_display_value = None
+
+    def _maybe_start_middle_travel_display(self, payload: list[int]) -> None:
+        if len(payload) != 5 or payload[0] != 0x81:
+            return
+        target = int.from_bytes(bytes(payload[1:]), byteorder="big", signed=False)
+        self._middle_travel_active = True
+        self._middle_travel_target_position = target
+        self._middle_travel_origin_position = self._last_position_value
+        if self._middle_travel_origin_position is None:
+            self._middle_travel_display_value = target
+        else:
+            self._middle_travel_display_value = abs(target - self._middle_travel_origin_position)
+        self.update_range(self._middle_travel_display_value)
+        self.append_status(f"Middle travel distance: {self.range_field.text()}")
+
+    def _refresh_middle_travel_display(self) -> None:
+        if not self._middle_travel_active or self._middle_travel_display_value is None:
+            return
+        self.update_range(self._middle_travel_display_value)
 
     def _ensure_controller(self) -> None:
         if self.controller is None:
