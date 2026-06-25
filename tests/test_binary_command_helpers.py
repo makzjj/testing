@@ -14,9 +14,11 @@ from data.binary_cmd_builders import (
 from data.binary_cmd_parser import (
     decode_command,
     decode_nodeconfig_home_sensor,
+    decode_nodeconfig_motion_polarity,
     decode_sensor_flags,
     sensor_flag_allows_range_measurement,
 )
+from services.node_motion_polarity import NodeMotionPolarity
 
 
 class BinaryCommandBuilderTests(unittest.TestCase):
@@ -123,9 +125,31 @@ class BinaryCommandParserTests(unittest.TestCase):
         # LFLAG/RFLAG decode
         self.assertEqual(decode_command(0xC9, [0x3A, 0x09]), ('lflag', 0x09))
         self.assertEqual(decode_command(0xCA, [0x3A, 0x0B]), ('rflag', 0x0B))
-        # NODECONFIG bit0 -> home sensor
+        # NODECONFIG home sensor comes from the canonical motion model.
         self.assertEqual(decode_nodeconfig_home_sensor(0x00), 'L')
-        self.assertEqual(decode_nodeconfig_home_sensor(0x01), 'R')
+        with self.assertRaisesRegex(ValueError, "Unsupported or missing NODECONFIG 0x01"):
+            decode_nodeconfig_home_sensor(0x01)
+        polarity_00 = decode_nodeconfig_motion_polarity(0x00)
+        self.assertIsInstance(polarity_00, NodeMotionPolarity)
+        self.assertEqual(polarity_00.home_sensor, 'L')
+        self.assertEqual(polarity_00.opposite_sensor, 'R')
+        self.assertEqual(polarity_00.hunting_sign, -1)
+        self.assertEqual(polarity_00.outward_sign, 1)
+        self.assertEqual(polarity_00.return_home_sign, -1)
+        self.assertEqual(polarity_00.negative_run_sensor, 'L')
+        self.assertEqual(polarity_00.positive_run_sensor, 'R')
+        polarity_02 = decode_nodeconfig_motion_polarity(0x02)
+        self.assertEqual(polarity_02.home_sensor, 'L')
+        self.assertEqual(polarity_02.opposite_sensor, 'R')
+        self.assertEqual(polarity_02.hunting_sign, 1)
+        self.assertEqual(polarity_02.outward_sign, -1)
+        self.assertEqual(polarity_02.return_home_sign, 1)
+        self.assertEqual(polarity_02.negative_run_sensor, 'R')
+        self.assertEqual(polarity_02.positive_run_sensor, 'L')
+        with self.assertRaisesRegex(ValueError, "Unsupported or missing NODECONFIG 0x01"):
+            decode_nodeconfig_motion_polarity(0x01)
+        with self.assertRaisesRegex(ValueError, "Unsupported or missing NODECONFIG 0x03"):
+            decode_nodeconfig_motion_polarity(0x03)
         # Sensor flag parser
         f1 = decode_sensor_flags(0x01)
         self.assertTrue(f1['send_response'])

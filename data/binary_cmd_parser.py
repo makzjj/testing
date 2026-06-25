@@ -9,6 +9,8 @@ Handles parsing of:
 - 0xD8 GET_INTERRUPT
 """
 
+from services.node_motion_polarity import NodeMotionPolarity
+
 def parse_get_tof(params):
     """Decode ToF sensor response (0xAB).
     Format: 3A [raw_hi] [raw_lo] [filtered_int] [decimal_places]
@@ -371,11 +373,13 @@ def decode_command(cmd, params):
 
 # --- Helpers for controller/tests ---
 def decode_nodeconfig_home_sensor(nodeconfig: int) -> str:
-    """Return 'L' or 'R' based on NODECONFIG bit0 (0=L, 1=R)."""
-    try:
-        return 'R' if (int(nodeconfig) & 0x01) else 'L'
-    except Exception:
-        return 'L'
+    """Return the home sensor from the canonical NODECONFIG motion model."""
+    return decode_nodeconfig_motion_polarity(nodeconfig).home_sensor
+
+
+def decode_nodeconfig_motion_polarity(nodeconfig: int, *, allow_unvalidated: bool = False) -> NodeMotionPolarity:
+    """Return the canonical NODECONFIG motion model."""
+    return NodeMotionPolarity.from_nodeconfig(nodeconfig, allow_unvalidated=allow_unvalidated)
 
 
 def decode_sensor_flags(value: int) -> dict:

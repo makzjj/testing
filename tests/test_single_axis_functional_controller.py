@@ -13,6 +13,7 @@ from data.binary_cmd_builders import (
     build_tpos,
     build_stopmotor,
 )
+from data.binary_cmd_parser import decode_nodeconfig_motion_polarity
 
 
 class Recorder(SingleAxisFunctionalTestController):
@@ -82,40 +83,47 @@ class FunctionalControllerTests(unittest.TestCase):
         )
         self.ctrl = Recorder(cfg)
         self.ctrl.start(3)
-        # New flow: controller queries NODECONFIG first. Provide Right-home with
-        # positive hunt velocity (0x03): home=R, hunt=+190 -> to_opposite=-190, to_home=+190.
+        # New flow: controller queries NODECONFIG first. Provide validated home=L mapping (0x00).
         self.assertEqual(self.ctrl.commands[-1], [0xC4, 0x3F])
-        self.ctrl.handle_runtime_packet(pkt(0xC4, 0x3A, 0x03))
+        self.ctrl.handle_runtime_packet(pkt(0xC4, 0x3A, 0x00))
         # After NODECONFIG response, controller should request HUNTING
         self.assertEqual(self.ctrl.commands[-1], build_hunting_timeout(10000))
 
-    def _drive_to_compare(self, opposite_pos: int, returned_home_pos: int, ctrl: Recorder | None = None) -> None:
+    def _drive_to_compare(
+        self,
+        opposite_pos: int,
+        returned_home_pos: int,
+        ctrl: Recorder | None = None,
+        *,
+        nodeconfig: int = 0x00,
+    ) -> None:
         ctrl = ctrl or self.ctrl
+        polarity = decode_nodeconfig_motion_polarity(nodeconfig)
         ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
-        ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        ctrl.handle_runtime_packet(pkt(0x81, ord(polarity.home_sensor)))
         ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
         self.assertEqual(ctrl.commands[-1], build_lflag_query_payload())
         ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
         self.assertEqual(ctrl.commands[-1], build_rflag_query_payload())
         ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
-        ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
-        ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
+        ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0x00, 0xBE))
+        ctrl.handle_runtime_packet(pkt(0x81, ord(polarity.opposite_sensor)))
         ctrl.handle_runtime_packet(
             pkt(0x82, (opposite_pos >> 24) & 0xFF, (opposite_pos >> 16) & 0xFF, (opposite_pos >> 8) & 0xFF, opposite_pos & 0xFF)
         )
-        ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0x00, 0xBE))
-        ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
+        ctrl.handle_runtime_packet(pkt(0x81, ord(polarity.home_sensor)))
         returned_be = list((returned_home_pos).to_bytes(4, 'big', signed=True))
         ctrl.handle_runtime_packet(pkt(0x82, *returned_be))
 
     def _drive_to_zero_verification(self, ctrl: Recorder, home_position: int) -> None:
         ctrl.start(3)
         self.assertEqual(ctrl.commands[-1], [0xC4, 0x3F])
-        ctrl.handle_runtime_packet(pkt(0xC4, 0x3A, 0x03))
+        ctrl.handle_runtime_packet(pkt(0xC4, 0x3A, 0x00))
         self.assertEqual(ctrl.commands[-1], build_hunting_timeout(10000))
         ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
-        ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         ctrl.handle_runtime_packet(pkt(0x82, *list(int(home_position).to_bytes(4, "big", signed=True))))
 
@@ -210,10 +218,10 @@ class FunctionalControllerTests(unittest.TestCase):
         self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41, 0x00))
         self.assertIn("WAIT_FOR_HUNTING_COMPLETION", self.ctrl.statuses[-1])
 
-        # 3) Right sensor cut (reference)
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        # 3) Left sensor cut (home)
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         self.assertIn("WAIT_FOR_ENCODER_INITIALIZATION", self.ctrl.statuses[-1])
-        self.assertTrue(self.ctrl.flags["R"][-1])
+        self.assertTrue(self.ctrl.flags["L"][-1])
 
         # 4) Encoder zeroed
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
@@ -229,29 +237,29 @@ class FunctionalControllerTests(unittest.TestCase):
         self.assertEqual(self.ctrl.commands[-1], build_rflag_query_payload())
         # Provide SensorR response; only after both should safety check and RUN happen
         self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
-        # Now RUN to left should be requested first (R -> L)
-        self.assertEqual(self.ctrl.commands[-1], build_run(-190))
+        # Now RUN outward should be requested first (home -> opposite)
+        self.assertEqual(self.ctrl.commands[-1], build_run(190))
 
         # 6) RUN started ACK
         self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0x00, 0xBE))
-        self.assertIn("WAIT_FOR_LEFT_SENSOR", self.ctrl.statuses[-1])
+        self.assertIn("WAIT_FOR_RIGHT_SENSOR", self.ctrl.statuses[-1])
 
-        # 7) Left sensor hit (opposite)
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
+        # 7) Right sensor hit (opposite)
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
         self.assertEqual(self.ctrl.commands[-1], build_getpos())
 
         # 8) Read and store range_1 as opposite_pos (+100000)
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x01, 0x86, 0xA0))
         self.assertEqual(self.ctrl.range1, 100000)
-        # RUN back to right requested
-        self.assertEqual(self.ctrl.commands[-1], build_run(190))
+        # RUN back home requested
+        self.assertEqual(self.ctrl.commands[-1], build_run(-190))
 
         # 9) RUN-to-right started
         self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0x00, 0xBE))
-        self.assertIn("WAIT_FOR_RIGHT_SENSOR", self.ctrl.statuses[-1])
+        self.assertIn("WAIT_FOR_LEFT_SENSOR", self.ctrl.statuses[-1])
 
-        # 10) Right sensor hit (return to reference)
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        # 10) Left sensor hit (return home)
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         self.assertEqual(self.ctrl.commands[-1], build_getpos())
 
         # 11) Read returned_home_pos near zero (+8)
@@ -285,21 +293,21 @@ class FunctionalControllerTests(unittest.TestCase):
     def test_live_run_ack_minimal_format_is_accepted(self):
         # Drive to first RUN awaiting ACK
         self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))  # hunting accepted
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))  # reference sensor
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))  # home sensor
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))  # encoder init
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))  # zero
-        # Provide safe flags then controller will send first RUN (-190)
+        # Provide safe flags then controller will send first RUN (+190)
         self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
         self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
         # Live ACK format: 88 53 00 BE (no 0x84)
         self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x00, 0xBE))
-        # Should transition to waiting for left sensor
-        self.assertIn("WAIT_FOR_LEFT_SENSOR", self.ctrl.statuses[-1])
+        # Should transition to waiting for right sensor
+        self.assertIn("WAIT_FOR_RIGHT_SENSOR", self.ctrl.statuses[-1])
 
     def test_ignore_getpos_while_waiting_for_run_ack_then_proceed(self):
         # Reach state awaiting first RUN ACK
         self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
         self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
@@ -313,19 +321,19 @@ class FunctionalControllerTests(unittest.TestCase):
         self.assertFalse(self.ctrl.failed)
         # Now the valid ACK arrives (live format) and we proceed to wait for left sensor
         self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x00, 0xBE))
-        self.assertIn("WAIT_FOR_LEFT_SENSOR", self.ctrl.statuses[-1])
+        self.assertIn("WAIT_FOR_RIGHT_SENSOR", self.ctrl.statuses[-1])
 
     def test_timeout_waiting_for_run_ack_stops_and_fails(self):
         # Reach state awaiting return RUN ACK (second leg)
         self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
         self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
         self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
         # First leg ack and opposite sensor
-        self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0xFF, 0x42))  # -190 live format
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
+        self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x00, 0xBE))  # +190 live format
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x13, 0x88))  # +5000
         # Now controller sent RUN back to right; simulate that no ACK comes and timeout fires
         self.ctrl.on_timeout()
@@ -333,9 +341,9 @@ class FunctionalControllerTests(unittest.TestCase):
         self.assertEqual(self.ctrl.commands[-1], build_stopmotor())
 
     def test_getpos_is_only_sent_after_encoder_initialized(self):
-        # Accept hunting and receive Z-form reference (by R)
+        # Accept hunting and receive Z-form home sensor (by L)
         self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
-        self.ctrl.handle_runtime_packet(pkt(0x81, 0x5A, 0x52))  # 'Z','R'
+        self.ctrl.handle_runtime_packet(pkt(0x81, 0x5A, 0x4C))  # 'Z','L'
         # Ensure no GETPOS was sent yet
         self.assertNotEqual(self.ctrl.commands[-1], build_getpos())
         # Now receive encoder initialized 'I' -> GETPOS must be sent immediately
@@ -355,14 +363,14 @@ class FunctionalControllerTests(unittest.TestCase):
 
     def test_missing_encoder_init_after_reference_sensor_fails(self):
         self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         self.ctrl.on_timeout()
         self.assertEqual(self.ctrl.commands[-1], build_stopmotor())
         self.assertTrue(self.ctrl.failed)
 
     def test_zero_outside_tolerance_fails(self):
         self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         # GETPOS returns 10, tolerance 5 -> fail
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x0A))
@@ -371,7 +379,7 @@ class FunctionalControllerTests(unittest.TestCase):
 
     def test_first_run_ack_missing_fails(self):
         self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
         # Expect only SensorL query before any flag response
@@ -386,7 +394,7 @@ class FunctionalControllerTests(unittest.TestCase):
 
     def test_missing_sensor_l_flag_times_out_and_stops(self):
         self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
         self.assertEqual(self.ctrl.commands[-1], build_lflag_query_payload())
@@ -396,7 +404,7 @@ class FunctionalControllerTests(unittest.TestCase):
 
     def test_missing_sensor_r_flag_times_out_and_stops(self):
         self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
         self.assertEqual(self.ctrl.commands[-1], build_lflag_query_payload())
@@ -409,7 +417,7 @@ class FunctionalControllerTests(unittest.TestCase):
 
     def test_wrong_command_flag_response_is_ignored_until_timeout(self):
         self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
         self.assertEqual(self.ctrl.commands[-1], build_lflag_query_payload())
@@ -424,7 +432,7 @@ class FunctionalControllerTests(unittest.TestCase):
 
     def test_late_flag_packets_after_failure_are_ignored(self):
         self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
         self.ctrl.on_timeout()
@@ -453,33 +461,33 @@ class FunctionalControllerTests(unittest.TestCase):
 
     def test_range1_getpos_and_abs_store_then_run_right(self):
         self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
         # Provide flags prior to RUN
         self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
         self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
-        self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
+        self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0x00, 0xBE))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
         # supply negative range_1 to ensure abs is used in UI value
         neg = int.from_bytes((-1234).to_bytes(4, 'big', signed=True), 'big', signed=False)
         self.ctrl.handle_runtime_packet(pkt(0x82, (neg>>24)&0xFF, (neg>>16)&0xFF, (neg>>8)&0xFF, neg&0xFF))
         self.assertEqual(self.ctrl.range1, 1234)
-        self.assertEqual(self.ctrl.commands[-1], build_run(190))
+        self.assertEqual(self.ctrl.commands[-1], build_run(-190))
 
     def test_return_run_ack_missing_fails(self):
-        # Reach state where right ACK is expected (return to reference R)
+        # Reach state where home ACK is expected (return to reference L)
         self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
         # Provide flags prior to RUN
         self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
         self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
-        self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
+        self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0x00, 0xBE))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x13, 0x88))
-        # Expecting RUN +190 ack
+        # Expecting RUN -190 ack
         self.ctrl.on_timeout()
         self.assertTrue(self.ctrl.failed)
         self.assertEqual(self.ctrl.commands[-1], build_stopmotor())
@@ -505,17 +513,17 @@ class FunctionalControllerTests(unittest.TestCase):
     def test_range2_delta_and_mismatch_fails(self):
         # Drive until GETPOS r2 then fail compare
         self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
         # Provide flags prior to RUN
         self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
         self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
-        self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
-        self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x13, 0x88))  # +5000
         self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0x00, 0xBE))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x13, 0x88))  # +5000
+        self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         # returned_home_pos = -5020 -> range_2 = abs(5000 - (-5020)) = 10020
         neg = int.from_bytes((-5020).to_bytes(4, 'big', signed=True), 'big', signed=False)
         self.ctrl.handle_runtime_packet(pkt(0x82, (neg>>24)&0xFF, (neg>>16)&0xFF, (neg>>8)&0xFF, neg&0xFF))
@@ -526,17 +534,17 @@ class FunctionalControllerTests(unittest.TestCase):
     def test_tpos_no_move_within_tolerance_passes(self):
         # Up to compare pass with r1=5000 (opposite), returned_home_pos=+3 -> r2=4997, diff=3 => middle=2500
         self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
         # Provide flags prior to RUN
         self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
         self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
-        self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
-        self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x13, 0x88))  # +5000
         self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0x00, 0xBE))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x13, 0x88))  # +5000
+        self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         # returned_home_pos = +3
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x03))
         # TPOS requested to +2500
@@ -558,18 +566,18 @@ class FunctionalControllerTests(unittest.TestCase):
             )
         )
         ctrl_pass.start(3)
-        ctrl_pass.handle_runtime_packet(pkt(0xC4, 0x3A, 0x03))
+        ctrl_pass.handle_runtime_packet(pkt(0xC4, 0x3A, 0x00))
         ctrl_pass.handle_runtime_packet(pkt(0xC3, 0x41))
-        ctrl_pass.handle_runtime_packet(pkt(0x81, ord('R')))
+        ctrl_pass.handle_runtime_packet(pkt(0x81, ord('L')))
         ctrl_pass.handle_runtime_packet(pkt(0x81, ord('I')))
         ctrl_pass.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
         ctrl_pass.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
         ctrl_pass.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
-        ctrl_pass.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
-        ctrl_pass.handle_runtime_packet(pkt(0x81, ord('L')))
-        ctrl_pass.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x13, 0x88))
         ctrl_pass.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0x00, 0xBE))
         ctrl_pass.handle_runtime_packet(pkt(0x81, ord('R')))
+        ctrl_pass.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x13, 0x88))
+        ctrl_pass.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
+        ctrl_pass.handle_runtime_packet(pkt(0x81, ord('L')))
         ctrl_pass.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
         middle = 2500
         self.assertEqual(ctrl_pass.commands[-1], build_tpos(middle))
@@ -586,18 +594,18 @@ class FunctionalControllerTests(unittest.TestCase):
             )
         )
         ctrl_fail.start(3)
-        ctrl_fail.handle_runtime_packet(pkt(0xC4, 0x3A, 0x03))
+        ctrl_fail.handle_runtime_packet(pkt(0xC4, 0x3A, 0x00))
         ctrl_fail.handle_runtime_packet(pkt(0xC3, 0x41))
-        ctrl_fail.handle_runtime_packet(pkt(0x81, ord('R')))
+        ctrl_fail.handle_runtime_packet(pkt(0x81, ord('L')))
         ctrl_fail.handle_runtime_packet(pkt(0x81, ord('I')))
         ctrl_fail.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
         ctrl_fail.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
         ctrl_fail.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
-        ctrl_fail.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
-        ctrl_fail.handle_runtime_packet(pkt(0x81, ord('L')))
-        ctrl_fail.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x13, 0x88))
         ctrl_fail.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0x00, 0xBE))
         ctrl_fail.handle_runtime_packet(pkt(0x81, ord('R')))
+        ctrl_fail.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x13, 0x88))
+        ctrl_fail.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
+        ctrl_fail.handle_runtime_packet(pkt(0x81, ord('L')))
         ctrl_fail.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
         self.assertEqual(ctrl_fail.commands[-1], build_tpos(middle))
         ctrl_fail.handle_runtime_packet(pkt(0x81, ord('N'), 0x82, *list((middle + 513).to_bytes(4, 'big', signed=True))))
@@ -615,9 +623,9 @@ class FunctionalControllerTests(unittest.TestCase):
             )
         )
         ctrl.start(3)
-        ctrl.handle_runtime_packet(pkt(0xC4, 0x3A, 0x03))
+        ctrl.handle_runtime_packet(pkt(0xC4, 0x3A, 0x00))
         ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
-        ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
         ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
@@ -636,24 +644,24 @@ class FunctionalControllerTests(unittest.TestCase):
     def test_big_endian_middle_byte_order(self):
         # Drive up to middle command emission and check bytes
         self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
         # Provide flags prior to RUN
         self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
         self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
-        self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
-        self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x13, 0x88))  # +5000
         self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0x00, 0xBE))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x13, 0x88))  # +5000
+        self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         # returned_home_pos = 0 -> middle should be +2500
         self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
         expected = build_tpos(2500)
         self.assertEqual(self.ctrl.commands[-1], expected)
 
     def test_configurable_left_as_reference_sequence_still_works(self):
-        # Old sequence L -> I -> R -> L -> Middle using explicit config
+        # Node 6 uses the single-sensor profile, so both completions are L.
         cfg = FunctionalTestConfig(
             hunt_timeout_ms=10_000,
             velocity_left_to_right=190,
@@ -681,10 +689,10 @@ class FunctionalControllerTests(unittest.TestCase):
         ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
         self.assertEqual(ctrl.commands[-1], build_run(190))
         ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0x00, 0xBE))
-        ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
         self.assertEqual(ctrl.commands[-1], build_getpos())
         ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x13, 0x88))  # +5000
-        # Return R->L (-190)
+        # Return L->L (-190)
         self.assertEqual(ctrl.commands[-1], build_run(-190))
         ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
         ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
@@ -695,17 +703,17 @@ class FunctionalControllerTests(unittest.TestCase):
         self.assertTrue(ctrl.passed)
 
     def test_wrong_sensor_events_fail_safely(self):
-        # Expect R during hunting, but get L -> fail
+        # Expect L during hunting, but get R -> fail
         self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
-        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
         self.assertTrue(self.ctrl.failed)
         self.assertEqual(self.ctrl.commands[-1], build_stopmotor())
 
     def test_accept_z_sensor_events_and_fail_on_reset_during_run(self):
         # HUNT accept
         self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
-        # Reference via Z-form (e.g., stopped by R flag)
-        self.ctrl.handle_runtime_packet(pkt(0x81, 0x5A, 0x52))  # 'Z','R'
+        # Reference via Z-form (e.g., stopped by L flag)
+        self.ctrl.handle_runtime_packet(pkt(0x81, 0x5A, 0x4C))  # 'Z','L'
         self.assertIn("WAIT_FOR_ENCODER_INITIALIZATION", self.ctrl.statuses[-1])
         # Zeroed
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
@@ -714,8 +722,8 @@ class FunctionalControllerTests(unittest.TestCase):
         # Provide flags and begin RUN
         self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
         self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
-        # RUN ack (toward opposite L)
-        self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
+        # RUN ack (toward opposite R)
+        self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0x00, 0xBE))
         # Unexpected encoder reset during RUN -> should fail
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         self.assertTrue(self.ctrl.failed)

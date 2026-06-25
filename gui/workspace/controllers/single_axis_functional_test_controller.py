@@ -27,8 +27,9 @@ from data.binary_cmd_builders import (
 )
 from data.binary_cmd_parser import (
     decode_command,
-    decode_nodeconfig_home_sensor,
+    decode_nodeconfig_motion_polarity,
 )
+from services.node_sensor_profile import NodeSensorProfile
 from data.binary_cmd_builders import (
     build_lflag_query_payload,
     build_rflag_query_payload,
@@ -94,11 +95,6 @@ class SingleAxisFunctionalTestController:
 
     def __init__(self, config: FunctionalTestConfig | None = None) -> None:
         self.cfg = config or FunctionalTestConfig()
-        # Normalize/validate sensor configuration
-        if (self.cfg.reference_sensor, self.cfg.opposite_sensor) not in (("L", "R"), ("R", "L")):
-            # Fallback to safe default if misconfigured
-            self.cfg.reference_sensor = "R"
-            self.cfg.opposite_sensor = "L"
         self._node_id: int | None = None
         self._state: str = self.S_IDLE
 
@@ -118,6 +114,9 @@ class SingleAxisFunctionalTestController:
         self._lflag: int | None = None
         self._rflag: int | None = None
         self._running: bool = False
+        self._motion_polarity = None
+        self._sensor_profile: NodeSensorProfile | None = None
+        self._movement_phase: str | None = None
 
     # --- Signal-like methods (override/monkeypatch in tests) ---
     def command_requested(self, payload: list[int]) -> None:  # pragma: no cover - overridden in tests
@@ -160,7 +159,7 @@ class SingleAxisFunctionalTestController:
         self._reset_run_state()
         self._running = True
         self._set_state(self.S_IDLE)
-        # Query NODECONFIG first to derive home/reference sensor only (bit0)
+        # Query NODECONFIG first to derive the live motion polarity and sensor profile.
         self._wait_for = "nodeconfig"
         # Log explicitly for live popup visibility
         self.status_changed("Querying NODECONFIG: C4 3F")
@@ -327,7 +326,18 @@ class SingleAxisFunctionalTestController:
         self._wait_for = None
         self._lflag = None
         self._rflag = None
+        self._motion_polarity = None
+        self._sensor_profile = None
+        self._movement_phase = None
         self._running = False
+
+    @property
+    def motion_polarity(self):
+        return self._motion_polarity
+
+    @property
+    def sensor_profile(self) -> NodeSensorProfile | None:
+        return self._sensor_profile
 
     def _complete_pass(self) -> None:
         self._running = False
@@ -340,9 +350,16 @@ class SingleAxisFunctionalTestController:
         if self._state != self.S_HUNTING or self._wait_for != "hunting_ack":
             return
         if value == "accepted":
-            # Proceed to wait for reference sensor (L or R)
+            polarity = self._require_motion_polarity()
+            if polarity is None:
+                return
+            profile = self._require_sensor_profile()
+            if profile is None:
+                return
+            # Proceed to wait for the configured home sensor.
             self._set_state(self.S_WAIT_HUNTING_SENSOR)
-            self._wait_for = "left_sensor" if self.cfg.reference_sensor == "L" else "right_sensor"
+            self._movement_phase = "hunt"
+            self._wait_for = "left_sensor" if profile.completion_sensor_for_phase("hunt") == "L" else "right_sensor"
         elif value == "rejected" or value is None:
             self._request_stopmotor()
             self._fail("HUNTING rejected/NACK")
@@ -354,75 +371,48 @@ class SingleAxisFunctionalTestController:
         if not isinstance(value, dict) or "event" not in value:
             return
         event = value["event"]
-        # Normalize Z-form sensor stops to direct L/R events
-        if event == 'Z':
-            by = value.get('by')
-            if by in ('L', 'R'):
+        if event == "Z":
+            by = value.get("by")
+            if by in ("L", "R"):
                 event = by
-        # Sensor flags from simple events
+
         if event == "L":
             self.left_flag_changed(True)
-            if self._state == self.S_WAIT_HUNTING_SENSOR:
-                # Expect reference sensor only
-                if self._wait_for == "left_sensor":
-                    # After reference sensor, wait for encoder init 'I'
-                    self._set_state(self.S_WAIT_ZERO)
-                    self._wait_for = "zeroed"
-                    return
-                else:
-                    # Wrong reference sensor during hunting
-                    self._request_stopmotor()
-                    self._fail("Wrong sensor event during hunting (expected R, got L)")
-                    return
-            if self._state == self.S_WAIT_LEFT and self._wait_for == "left_sensor":
-                # Determine whether this is first leg completion (opposite=L) or return (home=L)
-                if self.cfg.opposite_sensor == "L":
-                    # First leg to opposite completed -> read range_1
-                    self._set_state(self.S_READ_RANGE1)
-                    self._wait_for = "getpos_r1"
-                else:
-                    # Return to home completed -> read range_2
-                    self._set_state(self.S_READ_RANGE2)
-                    self._wait_for = "getpos_r2"
-                # Request GETPOS
-                self._emit_command(build_getpos())
-                return
-            # Wrong sensor during move-to-right
-            if self._state == self.S_WAIT_RIGHT and self._wait_for == "right_sensor":
-                self._request_stopmotor()
-                self._fail("Wrong sensor event during right move (got L)")
-                return
-
-        if event == "R":
+        elif event == "R":
             self.right_flag_changed(True)
-            if self._state == self.S_WAIT_RIGHT and self._wait_for == "right_sensor":
-                # Determine whether this is first leg completion (opposite=R) or return (home=R)
-                if self.cfg.opposite_sensor == "R":
-                    # First leg to opposite completed -> read range_1
-                    self._set_state(self.S_READ_RANGE1)
-                    self._wait_for = "getpos_r1"
-                else:
-                    # Return to home completed -> read range_2
-                    self._set_state(self.S_READ_RANGE2)
-                    self._wait_for = "getpos_r2"
+
+        if self._state == self.S_WAIT_HUNTING_SENSOR and event in ("L", "R"):
+            profile = self._require_sensor_profile()
+            if profile is None:
+                return
+            if profile.matches_phase_sensor("hunt", event):
+                self._set_state(self.S_WAIT_ZERO)
+                self._wait_for = "zeroed"
+                return
+            self._request_stopmotor()
+            self._fail(f"Wrong sensor event during hunting (expected {self._completion_sensor_for_phase('hunt')}, got {event})")
+            return
+
+        if self._state in (self.S_WAIT_LEFT, self.S_WAIT_RIGHT) and self._wait_for in ("left_sensor", "right_sensor") and event in ("L", "R"):
+            profile = self._require_sensor_profile()
+            if profile is None:
+                return
+            if self._movement_phase == "outward" and profile.matches_phase_sensor("outward", event):
+                self._set_state(self.S_READ_RANGE1)
+                self._wait_for = "getpos_r1"
                 self._emit_command(build_getpos())
                 return
-            # Wrong sensor during move-to-left
-            if self._state == self.S_WAIT_LEFT and self._wait_for == "left_sensor":
-                self._request_stopmotor()
-                self._fail("Wrong sensor event during left move (got R)")
+            if self._movement_phase == "return" and profile.matches_phase_sensor("return", event):
+                self._set_state(self.S_READ_RANGE2)
+                self._wait_for = "getpos_r2"
+                self._emit_command(build_getpos())
                 return
-            # Wrong reference sensor during hunting
-            if self._state == self.S_WAIT_HUNTING_SENSOR:
-                if self._wait_for == "right_sensor":
-                    # expected right, ok handled above in WAIT_RIGHT; here for hunting we just move to zero wait
-                    self._set_state(self.S_WAIT_ZERO)
-                    self._wait_for = "zeroed"
-                    return
-                else:
-                    self._request_stopmotor()
-                    self._fail("Wrong sensor event during hunting (expected L, got R)")
-                    return
+            self._request_stopmotor()
+            self._fail(
+                f"Wrong sensor event during {self._movement_phase or 'movement'} move "
+                f"(expected {self._completion_sensor_for_phase(self._movement_phase or 'outward')}, got {event})"
+            )
+            return
 
         if event == "I":
             # Encoder zeroed
@@ -507,13 +497,26 @@ class SingleAxisFunctionalTestController:
             self._range_1 = abs(position)
             self.range1_changed(self._range_1)
             # Now send RUN in return direction back to reference/home sensor
-            if self.cfg.reference_sensor == "R":
+            polarity = self._require_motion_polarity()
+            if polarity is None:
+                return
+            profile = self._require_sensor_profile()
+            if profile is None:
+                return
+            self._movement_phase = "return"
+            run_sign = polarity.sign_to_home()
+            run_velocity = self._run_velocity_for_sign(run_sign)
+            expected_sensor = profile.completion_sensor_for_phase("return")
+            self.status_changed(
+                f"Returning home: RUN {run_velocity}, expected sensor {expected_sensor}"
+            )
+            if expected_sensor == "R":
                 self._set_state(self.S_RUN_TO_RIGHT)
-                self._emit_command(build_run(getattr(self, "_vel_to_home", self.cfg.velocity_left_to_right)))
+                self._emit_command(build_run(run_velocity))
                 self._wait_for = "run_right_ack"
             else:
                 self._set_state(self.S_RUN_TO_LEFT)
-                self._emit_command(build_run(getattr(self, "_vel_to_home", self.cfg.velocity_right_to_left)))
+                self._emit_command(build_run(run_velocity))
                 self._wait_for = "run_left_ack"
             return
 
@@ -571,34 +574,54 @@ class SingleAxisFunctionalTestController:
             if value is None:
                 self._request_stopmotor()
                 return self._fail("RUN-to-right ACK missing/invalid")
-            # Now wait for right sensor cut
-            self._set_state(self.S_WAIT_RIGHT)
-            self._wait_for = "right_sensor"
+            profile = self._require_sensor_profile()
+            if profile is None:
+                return
+            expected_sensor = profile.completion_sensor_for_phase(self._movement_phase or "outward")
+            self._set_state(self.S_WAIT_RIGHT if expected_sensor == "R" else self.S_WAIT_LEFT)
+            self._wait_for = "right_sensor" if expected_sensor == "R" else "left_sensor"
             return
         if self._state == self.S_RUN_TO_LEFT and self._wait_for == "run_left_ack":
             if value is None:
                 self._request_stopmotor()
                 return self._fail("RUN-to-left ACK missing/invalid")
-            # Now wait for left sensor cut
-            self._set_state(self.S_WAIT_LEFT)
-            self._wait_for = "left_sensor"
+            profile = self._require_sensor_profile()
+            if profile is None:
+                return
+            expected_sensor = profile.completion_sensor_for_phase(self._movement_phase or "outward")
+            self._set_state(self.S_WAIT_RIGHT if expected_sensor == "R" else self.S_WAIT_LEFT)
+            self._wait_for = "right_sensor" if expected_sensor == "R" else "left_sensor"
             return
 
     def _handle_nodeconfig(self, value) -> None:
-        # Handle C4 3A <nodeconfig> (bits: 0=home L/R, 1=hunt speed sign)
+        # Handle C4 3A <nodeconfig> using canonical motion polarity from bits 0 and 1.
         if self._wait_for != "nodeconfig":
             return
         if not isinstance(value, int):
             self._request_stopmotor()
             return self._fail("Invalid NODECONFIG response")
         nodeconfig = value & 0xFF
-        home_sensor = decode_nodeconfig_home_sensor(nodeconfig)
-        opposite_sensor = 'L' if home_sensor == 'R' else 'R'
-        # Apply only sensor roles; RUN velocities come from explicit config
-        self.cfg.reference_sensor = home_sensor
-        self.cfg.opposite_sensor = opposite_sensor
-        # Log received NODECONFIG and derived home
-        self.status_changed(f"NODECONFIG received: 0x{nodeconfig:02X}, home={home_sensor}")
+        try:
+            polarity = decode_nodeconfig_motion_polarity(nodeconfig)
+        except ValueError as exc:
+            self._request_stopmotor()
+            return self._fail(str(exc))
+        self._motion_polarity = polarity
+        if self._node_id is None:
+            self._request_stopmotor()
+            return self._fail("Node context unavailable for sensor profile resolution.")
+        try:
+            self._sensor_profile = NodeSensorProfile.from_node_context(self._node_id, polarity)
+        except ValueError as exc:
+            self._request_stopmotor()
+            return self._fail(str(exc))
+        self.status_changed(f"NODECONFIG received: 0x{nodeconfig:02X}")
+        self.status_changed("Motion polarity:")
+        for line in polarity.format_motion_summary().splitlines():
+            self.status_changed(f"  {line}")
+        self.status_changed("Sensor profile:")
+        for line in self._sensor_profile.format_summary().splitlines():
+            self.status_changed(line)
         # Proceed to HUNTING
         self._set_state(self.S_HUNTING)
         self.status_changed("Starting HUNTING")
@@ -609,12 +632,18 @@ class SingleAxisFunctionalTestController:
     def _maybe_start_first_run(self) -> None:
         if self._wait_for != "check_flags":
             return
+        polarity = self._require_motion_polarity()
+        if polarity is None:
+            return
+        profile = self._require_sensor_profile()
+        if profile is None:
+            return
         # Require both flags
         if self._lflag is None or self._rflag is None:
             return
-        # Safety gate: opposite sensor must not reset encoder, and should stop/respond
-        opposite = self.cfg.opposite_sensor
-        flag_val = self._rflag if opposite == 'R' else self._lflag
+        # Safety gate: the movement-completion sensor must not reset encoder, and should stop/respond.
+        opposite = profile.completion_sensor_for_phase("outward")
+        flag_val = self._rflag if opposite == "R" else self._lflag
         # bit1 = reset, bit3 = stop, bit0 = response
         has_reset = bool(flag_val & 0x02)
         has_stop = bool(flag_val & 0x08)
@@ -625,14 +654,39 @@ class SingleAxisFunctionalTestController:
             self._fail("Opposite sensor flags unsafe for range (need response+stop, no reset)")
             return
         self.status_changed("Sensor flag safety check passed")
-        # Safe to start first RUN toward opposite, using explicit config velocities only
+        # Safe to start first RUN toward opposite, using the NODECONFIG polarity model.
+        self._movement_phase = "outward"
+        run_sign = polarity.sign_to_opposite()
+        run_velocity = self._run_velocity_for_sign(run_sign)
+        self.status_changed(f"Moving outward: RUN {run_velocity}, expected sensor {opposite}")
         if opposite == 'R':
             self._set_state(self.S_RUN_TO_RIGHT)
-            self.status_changed("Starting RUN to opposite")
-            self._emit_command(build_run(self.cfg.velocity_left_to_right))
+            self._emit_command(build_run(run_velocity))
             self._wait_for = "run_right_ack"
         else:
             self._set_state(self.S_RUN_TO_LEFT)
-            self.status_changed("Starting RUN to opposite")
-            self._emit_command(build_run(self.cfg.velocity_right_to_left))
+            self._emit_command(build_run(run_velocity))
             self._wait_for = "run_left_ack"
+
+    def _require_sensor_profile(self) -> NodeSensorProfile | None:
+        if self._sensor_profile is None:
+            self._request_stopmotor()
+            self._fail("Unsupported or missing node sensor profile. Motion blocked for safety.")
+            return None
+        return self._sensor_profile
+
+    def _completion_sensor_for_phase(self, phase: str) -> str:
+        profile = self._require_sensor_profile()
+        if profile is None:
+            return "L"
+        return profile.completion_sensor_for_phase(phase)
+
+    def _require_motion_polarity(self):
+        if self._motion_polarity is None:
+            self._request_stopmotor()
+            self._fail("Unsupported or missing NODECONFIG. Motion blocked for safety.")
+            return None
+        return self._motion_polarity
+
+    def _run_velocity_for_sign(self, sign: int) -> int:
+        return self.cfg.velocity_left_to_right if int(sign) > 0 else self.cfg.velocity_right_to_left

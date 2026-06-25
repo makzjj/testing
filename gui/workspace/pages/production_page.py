@@ -34,6 +34,8 @@ from ..widgets import DetailListWidget, LabeledControl, PanelFrame, SimpleTableW
 from ..controllers.sampling_test_controller import SamplingTestConfig, SamplingTestController
 from .single_axis_functional_popup import SingleAxisFunctionalPopup
 from services.ipqc_excel_adapter import IpqcExcelAdapter
+from services.node_motion_polarity import NodeMotionPolarity
+from services.node_sensor_profile import NodeSensorProfile
 from myconfig.node_display import ML20_NODE_MAP
 from .base_page import BaseWorkspacePage
 from .production_parameter_controller import (
@@ -64,6 +66,7 @@ class _SamplingSession:
     node_id: int
     node_name: str
     runtime_window: object
+    nodeconfig_raw: int | None = None
 
 
 @dataclass(frozen=True)
@@ -116,7 +119,8 @@ class ProductionPage(BaseWorkspacePage):
         self._sampling_popup: SamplingTestPopup | None = None
         self._single_axis_passed = False
         self._sampling_controller = SamplingTestController(self._ipqc_excel_adapter, SamplingTestConfig())
-        self._sampling_home_sensor = "L"
+        self._sampling_motion_polarity: NodeMotionPolarity | None = None
+        self._sampling_sensor_profile: NodeSensorProfile | None = None
         self._sampling_session: _SamplingSession | None = None
 
         self.stage_section.configuration_requested.connect(self._handle_run_test)
@@ -449,7 +453,7 @@ class ProductionPage(BaseWorkspacePage):
 
     def _handle_single_axis_passed(self, node_id: int, node_name: str) -> None:
         self._single_axis_passed = True
-        self._refresh_sampling_home_sensor_from_single_axis()
+        self._refresh_sampling_context_from_single_axis()
         self.console_message.emit(f"[Production] Single Axis Functional Test PASSED for Node {node_id} {node_name}")
         self.progress_section.append_step(f"Single Axis PASSED for Node {node_id} {node_name}", level="success")
         self.stage_section.set_stage_status("single_axis", "pass")
@@ -457,6 +461,10 @@ class ProductionPage(BaseWorkspacePage):
 
     def _handle_single_axis_failed(self, node_id: int, node_name: str, reason: str) -> None:
         self._single_axis_passed = False
+        self._sampling_motion_polarity = None
+        self._sampling_sensor_profile = None
+        self._sampling_controller.set_motion_polarity(None)
+        self._sampling_controller.set_sensor_profile(None)
         self.console_message.emit(f"[Production] Single Axis Functional Test FAILED for Node {node_id} {node_name}: {reason}")
         self.progress_section.append_step(f"Single Axis FAILED for Node {node_id} {node_name}: {reason}", level="error")
         self.stage_section.set_stage_status("single_axis", "fail")
@@ -464,22 +472,27 @@ class ProductionPage(BaseWorkspacePage):
 
     def _handle_single_axis_aborted(self, node_id: int, node_name: str, reason: str) -> None:
         self._single_axis_passed = False
+        self._sampling_motion_polarity = None
+        self._sampling_sensor_profile = None
+        self._sampling_controller.set_motion_polarity(None)
+        self._sampling_controller.set_sensor_profile(None)
         self.console_message.emit(f"[Production] Single Axis Functional Test ABORTED for Node {node_id} {node_name}: {reason}")
         self.progress_section.append_step(f"Single Axis ABORTED for Node {node_id} {node_name}", level="warning")
         self.stage_section.set_stage_status("single_axis", "fail")
         self._refresh_sampling_action_states()
 
-    def _refresh_sampling_home_sensor_from_single_axis(self) -> None:
-        home_sensor = "L"
+    def _refresh_sampling_context_from_single_axis(self) -> None:
+        polarity = None
+        sensor_profile = None
         popup = self._single_axis_popup
         if popup is not None:
             controller = getattr(popup, "controller", None)
-            cfg = getattr(controller, "cfg", None)
-            candidate = getattr(cfg, "reference_sensor", getattr(cfg, "home_sensor", None))
-            if str(candidate).strip().upper() == "R":
-                home_sensor = "R"
-        self._sampling_home_sensor = home_sensor
-        self._sampling_controller.set_home_sensor(home_sensor)
+            polarity = getattr(controller, "motion_polarity", None)
+            sensor_profile = getattr(controller, "sensor_profile", None)
+        self._sampling_motion_polarity = polarity
+        self._sampling_sensor_profile = sensor_profile
+        self._sampling_controller.set_motion_polarity(polarity)
+        self._sampling_controller.set_sensor_profile(sensor_profile)
 
     # Minimal passthrough to allow popups to query the runtime window via parent
     def get_runtime_window(self, *, create_if_missing: bool = False):  # pragma: no cover - thin delegate
@@ -533,7 +546,14 @@ class ProductionPage(BaseWorkspacePage):
         if self._sampling_controller.is_active():
             self._refresh_sampling_action_states()
             return
-        self._sampling_controller.set_home_sensor(self._sampling_home_sensor)
+        if self._sampling_motion_polarity is None or self._sampling_sensor_profile is None:
+            reason = "Resolve NODECONFIG and node sensor profile before resuming Sampling."
+            self.console_message.emit(f"[Production] {reason}")
+            self.progress_section.append_step(reason, level="warning")
+            self._refresh_sampling_action_states()
+            return
+        self._sampling_controller.set_motion_polarity(self._sampling_motion_polarity)
+        self._sampling_controller.set_sensor_profile(self._sampling_sensor_profile)
         try:
             node_id, node_name = self.test_control_section.selected_node()
         except RuntimeError:
@@ -553,7 +573,8 @@ class ProductionPage(BaseWorkspacePage):
             return
         if self._sampling_session is not None:
             self._attach_sampling_runtime_window(self._sampling_session.runtime_window)
-        self._sampling_controller.set_home_sensor(self._sampling_home_sensor)
+        self._sampling_controller.set_motion_polarity(self._sampling_motion_polarity)
+        self._sampling_controller.set_sensor_profile(self._sampling_sensor_profile)
         popup.begin_active_run("HOME_WAIT_VEL_ACK")
         resumed = self._sampling_controller.resume(node_id=node_id, node_name=node_name, base_group=active_group)
         if not resumed:
@@ -617,6 +638,13 @@ class ProductionPage(BaseWorkspacePage):
             self._set_status_result("READY", reason)
             self._refresh_sampling_action_states()
             return
+        if self._sampling_motion_polarity is None or self._sampling_sensor_profile is None:
+            reason = "Resolve NODECONFIG and node sensor profile before starting Sampling."
+            self.console_message.emit(f"[Production] {reason}")
+            self.progress_section.append_step(reason, level="warning")
+            self._set_status_result("READY", reason)
+            self._refresh_sampling_action_states()
+            return
 
         try:
             layout = self._ipqc_excel_adapter.discover_sampling_layout(active_group)
@@ -639,8 +667,14 @@ class ProductionPage(BaseWorkspacePage):
             return
 
         popup = self._ensure_sampling_popup()
-        self._sampling_session = _SamplingSession(node_id=node_id, node_name=node_name, runtime_window=runtime_window)
-        self._sampling_controller.set_home_sensor(self._sampling_home_sensor)
+        self._sampling_session = _SamplingSession(
+            node_id=node_id,
+            node_name=node_name,
+            runtime_window=runtime_window,
+            nodeconfig_raw=int(self._sampling_motion_polarity.nodeconfig_raw) if self._sampling_motion_polarity is not None else None,
+        )
+        self._sampling_controller.set_motion_polarity(self._sampling_motion_polarity)
+        self._sampling_controller.set_sensor_profile(self._sampling_sensor_profile)
         popup.set_context(node_id, node_name, layout.sheet_name)
         selected_pwm_values = popup.selected_pwm_values()
         selected_samples_per_pwm = popup.selected_samples_per_pwm()
@@ -1508,8 +1542,11 @@ class ProductionPage(BaseWorkspacePage):
     def _clear_sampling_context_for_selected_node_change(self) -> None:
         self._single_axis_passed = False
         self._sampling_controller.clear_resume_context()
+        self._sampling_controller.set_motion_polarity(None)
+        self._sampling_controller.set_sensor_profile(None)
         self._sampling_session = None
-        self._sampling_home_sensor = "L"
+        self._sampling_motion_polarity = None
+        self._sampling_sensor_profile = None
         self.stage_section.reset_stage_states()
         self._set_status_result("READY", "No test has been run yet.", append_to_log=False)
         self._workbook_verification_passed = False
@@ -1750,6 +1787,8 @@ class ProductionPage(BaseWorkspacePage):
             and self._ipqc_excel_adapter.has_loaded_workbook()
             and serial_connected
             and node_selected
+            and self._sampling_motion_polarity is not None
+            and self._sampling_sensor_profile is not None
             and not self._sampling_controller.is_active()
             and not self._test_controller.is_active()
         )
@@ -1761,6 +1800,8 @@ class ProductionPage(BaseWorkspacePage):
             reason = "Connect the serial link before starting Sampling."
         elif not node_selected:
             reason = "Select a node before starting Sampling."
+        elif self._sampling_motion_polarity is None or self._sampling_sensor_profile is None:
+            reason = "Resolve NODECONFIG and node sensor profile before starting Sampling."
         elif self._sampling_controller.is_active():
             reason = "Sampling is already running."
         elif self._test_controller.is_active():

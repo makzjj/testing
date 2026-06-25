@@ -9,6 +9,8 @@ import time
 from data.binary_cmd_builders import build_getpos, build_run, build_stopmotor, build_tpos, build_vel
 from data.binary_cmd_parser import decode_command
 from services.ipqc_excel_adapter import IpqcExcelAdapter, SamplingWorkbookLayout
+from services.node_motion_polarity import NodeMotionPolarity
+from services.node_sensor_profile import NodeSensorProfile
 
 
 @dataclass(frozen=True)
@@ -52,7 +54,9 @@ class SamplingResumeContext:
     reason: str
     resumable: bool
     sample_incomplete: bool
+    nodeconfig_raw: int = -1
     home_sensor: str = "L"
+    sensor_profile_name: str = ""
     middle_target: int | None = None
 
 
@@ -97,7 +101,8 @@ class SamplingTestController:
         self._adapter = workbook_adapter
         self._config = config or SamplingTestConfig()
         self._clock = clock or time.monotonic
-        self._home_sensor = self._normalize_home_sensor(self._config.home_sensor)
+        self._motion_polarity: NodeMotionPolarity | None = None
+        self._sensor_profile: NodeSensorProfile | None = None
         self._node_id: int | None = None
         self._node_name: str | None = None
         self._base_group: str | None = None
@@ -198,10 +203,33 @@ class SamplingTestController:
 
     @property
     def home_sensor(self) -> str:
-        return self._home_sensor
+        if self._sensor_profile is not None:
+            return self._sensor_profile.completion_sensor_for_phase("hunt")
+        if self._motion_polarity is not None:
+            return self._motion_polarity.home_sensor
+        raise RuntimeError("Unsupported or missing node motion context. Motion blocked for safety.")
 
     def set_home_sensor(self, home_sensor: str) -> None:
-        self._home_sensor = self._normalize_home_sensor(home_sensor)
+        self._config = SamplingTestConfig(
+            home_velocity=self._config.home_velocity,
+            home_sensor=self._normalize_home_sensor(home_sensor),
+            pwm_values=self._config.pwm_values,
+            samples_per_direction=self._config.samples_per_direction,
+        )
+
+    @property
+    def motion_polarity(self) -> NodeMotionPolarity | None:
+        return self._motion_polarity
+
+    def set_motion_polarity(self, motion_polarity: NodeMotionPolarity | None) -> None:
+        self._motion_polarity = motion_polarity
+
+    @property
+    def sensor_profile(self) -> NodeSensorProfile | None:
+        return self._sensor_profile
+
+    def set_sensor_profile(self, sensor_profile: NodeSensorProfile | None) -> None:
+        self._sensor_profile = sensor_profile
 
     @property
     def can_resume(self) -> bool:
@@ -237,6 +265,14 @@ class SamplingTestController:
             return False, "Resume unavailable: Sampling has not started."
         if not self._resume_context.resumable:
             return False, f"Resume unavailable: {self._resume_context.reason}"
+        if self._motion_polarity is None:
+            return False, "Unsupported or missing NODECONFIG. Motion blocked for safety."
+        if self._sensor_profile is None:
+            return False, "Unsupported or missing node sensor profile. Motion blocked for safety."
+        if self._resume_context.nodeconfig_raw >= 0 and int(self._motion_polarity.nodeconfig_raw) != int(self._resume_context.nodeconfig_raw):
+            return False, "Resume unavailable: select the original NODECONFIG context."
+        if self._resume_context.sensor_profile_name and self._sensor_profile.profile_name != self._resume_context.sensor_profile_name:
+            return False, "Resume unavailable: select the original node sensor profile."
         if node_id is None or node_name is None:
             return False, "Resume unavailable: select the original Sampling node."
         if int(node_id) != int(self._resume_context.node_id) or str(node_name) != str(self._resume_context.node_name):
@@ -330,6 +366,34 @@ class SamplingTestController:
             return False
         if not self._adapter.has_loaded_workbook():
             reason = "No IPQC workbook is loaded."
+            self.log_message(f"[Sampling] {reason}")
+            self._latest_terminal_result = self._build_terminal_result(
+                terminal_state=self.S_FAILED,
+                final_status="FAILED",
+                status_text="FAILED",
+                reason=reason,
+                failure_context="-",
+                resume_text="Unavailable - sampling requires a fresh start.",
+                resumable=False,
+            )
+            self.sampling_failed(reason)
+            return False
+        if self._motion_polarity is None:
+            reason = "Unsupported or missing NODECONFIG. Motion blocked for safety."
+            self.log_message(f"[Sampling] {reason}")
+            self._latest_terminal_result = self._build_terminal_result(
+                terminal_state=self.S_FAILED,
+                final_status="FAILED",
+                status_text="FAILED",
+                reason=reason,
+                failure_context="-",
+                resume_text="Unavailable - sampling requires a fresh start.",
+                resumable=False,
+            )
+            self.sampling_failed(reason)
+            return False
+        if self._sensor_profile is None:
+            reason = "Unsupported or missing node sensor profile. Motion blocked for safety."
             self.log_message(f"[Sampling] {reason}")
             self._latest_terminal_result = self._build_terminal_result(
                 terminal_state=self.S_FAILED,
@@ -436,6 +500,18 @@ class SamplingTestController:
         context = self._resume_context
         if context is None:
             self.log_message("[Sampling] Resume unavailable: Sampling has not started.")
+            return False
+        if self._motion_polarity is None:
+            self.log_message("[Sampling] Unsupported or missing NODECONFIG. Motion blocked for safety.")
+            return False
+        if self._sensor_profile is None:
+            self.log_message("[Sampling] Unsupported or missing node sensor profile. Motion blocked for safety.")
+            return False
+        if context.nodeconfig_raw >= 0 and int(self._motion_polarity.nodeconfig_raw) != int(context.nodeconfig_raw):
+            self.log_message("[Sampling] Resume unavailable: select the original NODECONFIG context.")
+            return False
+        if context.sensor_profile_name and self._sensor_profile.profile_name != context.sensor_profile_name:
+            self.log_message("[Sampling] Resume unavailable: select the original node sensor profile.")
             return False
 
         self._begin_sampling_run(
@@ -563,28 +639,53 @@ class SamplingTestController:
     def _normalize_home_sensor(value: object) -> str:
         return "R" if str(value).strip().upper() == "R" else "L"
 
+    def _require_motion_polarity(self) -> NodeMotionPolarity | None:
+        if self._motion_polarity is None:
+            self._fail_with_stop("Unsupported or missing NODECONFIG. Motion blocked for safety.", resumable=False)
+            return None
+        return self._motion_polarity
+
+    def _require_sensor_profile(self) -> NodeSensorProfile | None:
+        if self._sensor_profile is None:
+            self._fail_with_stop("Unsupported or missing node sensor profile. Motion blocked for safety.", resumable=False)
+            return None
+        return self._sensor_profile
+
     @property
     def _opposite_sensor(self) -> str:
-        return "L" if self._home_sensor == "R" else "R"
+        profile = self._require_sensor_profile()
+        if profile is None:
+            raise RuntimeError("Unsupported or missing node sensor profile. Motion blocked for safety.")
+        return profile.completion_sensor_for_phase("outward")
 
     @property
     def _outward_direction(self) -> str:
-        return "-" if self._home_sensor == "R" else "+"
+        polarity = self._require_motion_polarity()
+        if polarity is None:
+            raise RuntimeError("Unsupported or missing NODECONFIG. Motion blocked for safety.")
+        return "+" if polarity.outward_sign > 0 else "-"
 
     @property
     def _return_direction(self) -> str:
-        return "+" if self._outward_direction == "-" else "-"
+        polarity = self._require_motion_polarity()
+        if polarity is None:
+            raise RuntimeError("Unsupported or missing NODECONFIG. Motion blocked for safety.")
+        return "+" if polarity.return_home_sign > 0 else "-"
 
     def _velocity_for_direction(self, direction: str, pwm: int) -> int:
-        if self._home_sensor == "L":
-            return int(pwm) if direction == "+" else -int(pwm)
-        return -int(pwm) if direction == "-" else int(pwm)
+        return int(pwm) if direction == "+" else -int(pwm)
 
     def _expected_sensor_for_direction(self, direction: str) -> str:
-        return self._opposite_sensor if direction == self._outward_direction else self._home_sensor
+        profile = self._require_sensor_profile()
+        if profile is None:
+            raise RuntimeError("Unsupported or missing node sensor profile. Motion blocked for safety.")
+        return profile.completion_sensor_for_phase("outward" if direction == self._outward_direction else "return")
 
     def _departure_sensor_for_direction(self, direction: str) -> str:
-        return self._home_sensor if direction == self._outward_direction else self._opposite_sensor
+        profile = self._require_sensor_profile()
+        if profile is None:
+            raise RuntimeError("Unsupported or missing node sensor profile. Motion blocked for safety.")
+        return profile.completion_sensor_for_phase("hunt" if direction == self._outward_direction else "outward")
 
     def _clear_resume_context(self) -> None:
         self._resume_context = None
@@ -602,8 +703,10 @@ class SamplingTestController:
         self._node_id = int(node_id) if node_id is not None else None
         self._node_name = node_name
         self._base_group = base_group
+        if self._motion_polarity is None or self._sensor_profile is None:
+            self._fail_with_stop("Unsupported or missing motion context. Motion blocked for safety.", resumable=False)
+            return
         if resume_context is not None:
-            self._home_sensor = self._normalize_home_sensor(resume_context.home_sensor)
             self._run_pwm_values = tuple(resume_context.pwm_values)
             self._run_samples_per_pwm = int(resume_context.samples_per_direction)
         self._reset_runtime_state()
@@ -734,7 +837,9 @@ class SamplingTestController:
             reason=reason,
             resumable=bool(resumable),
             sample_incomplete=sample_incomplete,
-            home_sensor=self._home_sensor,
+            nodeconfig_raw=int(self._motion_polarity.nodeconfig_raw) if self._motion_polarity is not None else -1,
+            home_sensor=self.home_sensor,
+            sensor_profile_name=self._sensor_profile.profile_name if self._sensor_profile is not None else "",
             middle_target=int(self._middle_target) if self._middle_target is not None else None,
         )
         self._resume_context = context
@@ -854,27 +959,30 @@ class SamplingTestController:
             event = value.get("by")
 
         if self._state == self.S_HOME_WAIT_TPOS:
+            profile = self._require_sensor_profile()
+            if profile is None:
+                return
             if event == "started":
                 self.status_changed("Waiting for TPOS home completion")
                 return
             if event in ("reached", "no_move"):
-                self._pending_getpos_after_sensor = self._home_sensor
+                self._pending_getpos_after_sensor = profile.completion_sensor_for_phase("hunt")
                 self._wait_for = "getpos"
                 self._set_state(self.S_HOME_WAIT_GETPOS)
                 self._expected_response_description = "GETPOS response for home position"
                 self.status_changed("Reading home position")
                 self.command_requested(build_getpos())
                 return
-            if event == self._home_sensor:
-                self._pending_getpos_after_sensor = self._home_sensor
+            if profile.matches_phase_sensor("hunt", event):
+                self._pending_getpos_after_sensor = profile.completion_sensor_for_phase("hunt")
                 self._wait_for = "getpos"
                 self._set_state(self.S_HOME_WAIT_GETPOS)
                 self._expected_response_description = "GETPOS response for home position"
                 self.status_changed("Home sensor reached; reading home position")
                 self.command_requested(build_getpos())
                 return
-            if event == "Z" and value.get("by") == self._home_sensor:
-                self._pending_getpos_after_sensor = self._home_sensor
+            if event == "Z" and profile.matches_phase_sensor("hunt", value.get("by")):
+                self._pending_getpos_after_sensor = profile.completion_sensor_for_phase("hunt")
                 self._wait_for = "getpos"
                 self._set_state(self.S_HOME_WAIT_GETPOS)
                 self._expected_response_description = "GETPOS response for home position"
@@ -979,7 +1087,10 @@ class SamplingTestController:
         if self._current_direction == "HOME":
             self._start_l_pos = position
             self._home_position = position
-            self._pending_getpos_after_sensor = self._home_sensor
+            profile = self._require_sensor_profile()
+            if profile is None:
+                return
+            self._pending_getpos_after_sensor = profile.completion_sensor_for_phase("hunt")
             self._wait_for = None
             self.status_changed(f"Home position captured: {position}")
             self.log_message(f"Home endpoint captured: {position}")
