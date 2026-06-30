@@ -984,6 +984,9 @@ class ProductionPageWorkflowTests(unittest.TestCase):
         bridge = _FakeBridge(runtime_window)
         page = ProductionPage(bridge)
         runtime_window.node_status[8]["connected"] = True
+        page.node_status_section.set_connected(True)
+        page.node_status_section.set_robot_power_state(True)
+        page.node_status_section.begin_visual_update({"connected_nodes": []})
         page._refresh_robot_nodes()
         self.assertIn("#7ed957", page.node_status_section._led_by_node_id[8].styleSheet().lower())
         page._handle_clear_nodes_requested()
@@ -1000,8 +1003,8 @@ class ProductionPageWorkflowTests(unittest.TestCase):
         self.assertGreaterEqual(page.communication_section._port_combo.count(), 1)
         self.assertGreaterEqual(page.communication_section._baud_combo.count(), 1)
         self.assertEqual(page.communication_section._connect_button.text(), "Disconnect")
-        self.assertIn("MCU Firmware Version", page.communication_section._firmware_label.text())
-        self.assertIn("Nodes Firmware Version", page.communication_section._nodes_firmware_label.text())
+        self.assertFalse(hasattr(page.communication_section, "_firmware_label"))
+        self.assertFalse(hasattr(page.communication_section, "_nodes_firmware_label"))
 
     def test_production_page_populates_com_ports_on_startup_without_runtime_page(self) -> None:
         bridge = _FakeBridge(None)
@@ -1093,8 +1096,11 @@ class ProductionPageWorkflowTests(unittest.TestCase):
         bridge = _FakeBridge(runtime_window)
         page = ProductionPage(bridge)
 
+        page.robot_nodes_section.set_connected(True)
+        page.robot_nodes_section.set_robot_power_state(True)
+        page.robot_nodes_section.begin_visual_update({"connected_nodes": []})
+        page._refresh_robot_nodes()
         self.assertIn("#7ed957", page.robot_nodes_section._led_by_node_id[8].styleSheet().lower())
-        self.assertIn("v1.0.0", page.communication_section._nodes_firmware_label.text())
         page._handle_runtime_node_selected(8)
         selected_node_id, _selected_name = page.test_control_section.selected_node()
         self.assertEqual(selected_node_id, 8)

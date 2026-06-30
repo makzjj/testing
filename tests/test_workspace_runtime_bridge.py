@@ -141,6 +141,29 @@ mcu:
             self.assertEqual(list(off_payload), COMMANDS["ROBOT Off"])
             self.assertIsNone(runtime_window.sys_mode)
 
+    def test_bridge_runtime_robot_nodes_exposes_detected_nodes_for_active_scan_ui(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "demo.yaml"
+            config_path.write_text("project:\n  name: demo\n", encoding="utf-8")
+
+            project = ProjectDefinition(name="demo", display_name="Demo", config_path=config_path)
+            bridge = WorkspaceRuntimeBridge(project)
+            runtime_window = SimpleNamespace(
+                node_status={
+                    5: {"connected": True, "firmware": "v1.0.0", "uuid": "", "type": "", "interrupt": ""},
+                    8: {"connected": True, "firmware": "v1.0.0", "uuid": "", "type": "", "interrupt": ""},
+                    9: {"connected": True, "firmware": "v1.0.0", "uuid": "", "type": "", "interrupt": ""},
+                    12: {"connected": True, "firmware": "v1.0.0", "uuid": "", "type": "", "interrupt": ""},
+                },
+                detected_nodes={5, 8, 9, 12},
+            )
+
+            with patch.object(bridge, "get_runtime_window", return_value=runtime_window):
+                nodes = bridge.get_runtime_robot_nodes(create_if_missing=False)
+
+            self.assertEqual(nodes["connected_nodes"], [5, 8, 9, 12])
+            self.assertEqual(nodes["detected_nodes"], [5, 8, 9, 12])
+
     def test_bridge_loads_editor_model_from_accuess_style_yaml(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "ACCuESS.yaml"

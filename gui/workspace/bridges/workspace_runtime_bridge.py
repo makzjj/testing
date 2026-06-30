@@ -428,6 +428,11 @@ class WorkspaceRuntimeBridge:
         connected_nodes = sorted(
             node_id for node_id, status in node_status.items() if 2 <= int(node_id) <= 17 and status.get("connected", False)
         )
+        detected_nodes = sorted(
+            int(node_id)
+            for node_id in (getattr(runtime_window, "detected_nodes", set()) or set())
+            if 2 <= int(node_id) <= 17
+        )
         rows: list[dict[str, str | int]] = []
         for node_id in connected_nodes:
             status = node_status.get(node_id, {})
@@ -447,7 +452,7 @@ class WorkspaceRuntimeBridge:
                     "status": interrupt_status,
                 }
             )
-        return {"connected_nodes": connected_nodes, "rows": rows}
+        return {"connected_nodes": connected_nodes, "detected_nodes": detected_nodes, "rows": rows}
 
     def request_runtime_node_scan(self) -> bool:
         """Trigger runtime node scan/query flow when the legacy runtime exposes one."""

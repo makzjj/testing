@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QFont, QIcon
-from PyQt6.QtWidgets import QHBoxLayout, QMainWindow, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QMainWindow, QMessageBox, QVBoxLayout, QWidget
 
 from myconfig.project_models import ProjectDefinition
 
@@ -19,6 +20,7 @@ from ..constants import (
     WORKSPACE_TITLE_PREFIX,
 )
 from ..pages import ApplicationProductionPage, FirmwarePage, MechanicalPage, ProductionPage, ProjectConfigPage, RuntimePage
+from ..pages.production_page import build_shared_node_status_section
 from ..widgets import ConsolePanel, LiveSessionPanel, WorkspaceBackdrop, WorkspaceTopBar
 from .workspace_page_registry import build_navigation_items, get_route_label
 from .workspace_page_stack import WorkspacePageStack
@@ -39,6 +41,9 @@ class ProjectWorkspaceWindow(QMainWindow):
             "restore_last_project": "Restore last project",
             "write_trace_log": "Write trace log",
         }
+        self._shared_status_poll_timer = QTimer(self)
+        self._shared_status_poll_timer.setInterval(1000)
+        self._shared_status_poll_timer.timeout.connect(self._refresh_shared_node_status)
 
         self.setWindowTitle(f"{WORKSPACE_TITLE_PREFIX} - {project_definition.display_name}")
         self.setWindowIcon(QIcon(str(RESOURCES_DIR / "biobot_robot_arm.ico")))
@@ -49,6 +54,7 @@ class ProjectWorkspaceWindow(QMainWindow):
         self._build_ui()
         self._append_boot_messages()
         self._sync_shell_to_project_definition(preferred_route=self._current_route_id, log_route_change=False)
+        self._shared_status_poll_timer.start()
 
     def _build_ui(self) -> None:
         central = WorkspaceBackdrop()
@@ -80,6 +86,12 @@ class ProjectWorkspaceWindow(QMainWindow):
         top_controls.addWidget(self.top_bar, 0)
         top_controls.addStretch(1)
         center_layout.addLayout(top_controls)
+
+        self.node_status_section = build_shared_node_status_section()
+        self.node_status_section.update_nodes_requested.connect(self._handle_shared_update_nodes_requested)
+        self.node_status_section.clear_nodes_requested.connect(self._handle_shared_clear_nodes_requested)
+        self.node_status_section.robot_power_requested.connect(self._handle_shared_robot_power_requested)
+        center_layout.addWidget(self.node_status_section, 0)
 
         self.page_stack = WorkspacePageStack()
         self.page_stack.setObjectName("PageStack")
@@ -115,7 +127,7 @@ class ProjectWorkspaceWindow(QMainWindow):
 
         self._pages = {
             ROUTE_PROJECT_CONFIG: ProjectConfigPage(self._bridge, self._handle_action, initial_state),
-            ROUTE_PRODUCTION: ProductionPage(self._bridge),
+            ROUTE_PRODUCTION: ProductionPage(self._bridge, node_status_section=self.node_status_section),
             ROUTE_FIRMWARE: FirmwarePage(self._bridge),
             ROUTE_MECHANICAL: MechanicalPage(self._bridge),
             ROUTE_APPLICATION: ApplicationProductionPage(self._bridge),
@@ -149,6 +161,7 @@ class ProjectWorkspaceWindow(QMainWindow):
             page.refresh(session_state)
         else:
             page.refresh()
+        self._refresh_shared_node_status()
         self._refresh_live_session_panel()
 
         if log_route_change:
@@ -214,6 +227,65 @@ class ProjectWorkspaceWindow(QMainWindow):
             route_label = get_route_label(self._navigation_items, self._current_route_id)
             session_state = self._bridge.get_session_state(route_label)
         self.live_session_panel.update_state(session_state)
+
+    def _refresh_shared_node_status(self) -> None:
+        communication_model = self._bridge.get_runtime_communication_model(create_if_missing=False)
+        self.node_status_section.set_connected(bool(communication_model.get("connected", False)))
+        self.node_status_section.set_robot_power_state(
+            self._bridge.get_runtime_robot_power_state(create_if_missing=False)
+        )
+        self.node_status_section.set_nodes(self._bridge.get_runtime_robot_nodes(create_if_missing=False))
+
+    def _handle_shared_update_nodes_requested(self) -> None:
+        requested = False
+        request_scan = getattr(self._bridge, "request_runtime_node_scan", None)
+        if callable(request_scan):
+            requested = bool(request_scan())
+        self.node_status_section.begin_visual_update(
+            self._bridge.get_runtime_robot_nodes(create_if_missing=False)
+        )
+        if requested:
+            self.console_panel.append_line("[Production] Requested runtime node scan update.")
+        else:
+            self.console_panel.append_line(
+                "[Production] Update Nodes requested, but no runtime scan hook is available yet (TODO backend hook)."
+            )
+        self._refresh_shared_node_status()
+
+    def _handle_shared_clear_nodes_requested(self) -> None:
+        self.node_status_section.clear_node_states()
+        self.console_panel.append_line("Cleared displayed node states to unknown")
+
+    def _handle_shared_robot_power_requested(self) -> None:
+        self.console_panel.append_line("Robot power command requested.")
+        message_box = QMessageBox(self)
+        message_box.setIcon(QMessageBox.Icon.Question)
+        message_box.setWindowTitle("Robot Power")
+        message_box.setText("Choose robot power command to send.")
+        power_on_button = message_box.addButton("Power ON", QMessageBox.ButtonRole.AcceptRole)
+        power_off_button = message_box.addButton("Power OFF", QMessageBox.ButtonRole.DestructiveRole)
+        cancel_button = message_box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        message_box.exec()
+        clicked_button = message_box.clickedButton()
+        if clicked_button is cancel_button:
+            self.console_panel.append_line("Robot power command cancelled.")
+            return
+        if clicked_button is power_on_button:
+            target_power_on = True
+            action_label = "ON"
+        elif clicked_button is power_off_button:
+            target_power_on = False
+            action_label = "OFF"
+        else:
+            self.console_panel.append_line("Robot power command cancelled.")
+            return
+        try:
+            self._bridge.send_runtime_robot_power(target_power_on)
+        except Exception as exc:
+            self.console_panel.append_line(f"Robot power command failed: {exc}")
+            return
+        self.node_status_section.set_robot_power_state(target_power_on)
+        self.console_panel.append_line(f"Robot power {action_label} command sent.")
 
     def _resolve_available_route(self, preferred_route: str | None) -> str:
         """Resolve the best enabled route by preference: requested, Production, Firmware, then first enabled."""

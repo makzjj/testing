@@ -7,12 +7,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from PyQt6.QtWidgets import QApplication, QDialog, QLabel
+from PyQt6.QtWidgets import QApplication, QDialog, QLabel, QPushButton
 
 from gui.workspace.models import SessionState
 from gui.workspace.pages.production_page import ProductionPage
 from gui.workspace.shell.project_workspace_window import ProjectWorkspaceWindow
-from gui.workspace.constants import ROUTE_PRODUCTION, ROUTE_PROJECT_CONFIG
+from gui.workspace.constants import ROUTE_FIRMWARE, ROUTE_MECHANICAL, ROUTE_PRODUCTION, ROUTE_PROJECT_CONFIG
 from gui.workspace.widgets import LiveSessionPanel
 from myconfig.project_models import ProjectDefinition, ProjectFeatures, ProjectUiConfig
 
@@ -46,6 +46,9 @@ class _FakeBridge:
         return {"connected_nodes": [], "rows": []}
 
     def get_runtime_window(self, *, create_if_missing: bool = False):
+        return None
+
+    def get_runtime_robot_power_state(self, *, create_if_missing: bool = False) -> bool | None:
         return None
 
     def get_session_state(self, active_page: str) -> SessionState:
@@ -85,6 +88,204 @@ class WorkspaceSessionPanelTests(unittest.TestCase):
         self.assertEqual(panel.page_value.text(), "Production")
         self.assertTrue(panel.edit_button.isEnabled())
         self.assertEqual(panel.findChild(QLabel, "LiveSessionTitle").text(), "Session")
+
+    @staticmethod
+    def _build_project_definition(config_path: Path) -> ProjectDefinition:
+        return ProjectDefinition(
+            name="demo",
+            display_name="Demo",
+            config_path=config_path,
+            features=ProjectFeatures(firmware_tools=True),
+            ui=ProjectUiConfig(workspace="phase2_shell"),
+        )
+
+    def _build_workspace_window(self) -> ProjectWorkspaceWindow:
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        config_path = Path(tmpdir.name) / "demo.yaml"
+        config_path.write_text(
+            """
+project:
+  name: demo
+  display_name: Demo
+features:
+  firmware_tools: true
+ui:
+  workspace: phase2_shell
+""".strip(),
+            encoding="utf-8",
+        )
+        return ProjectWorkspaceWindow(self._build_project_definition(config_path))
+
+    def test_production_communication_card_no_longer_shows_firmware_version_labels(self) -> None:
+        page = ProductionPage(_FakeBridge())
+
+        label_texts = {label.text() for label in page.communication_section.findChildren(QLabel)}
+        self.assertNotIn("MCU Firmware Version: -", label_texts)
+        self.assertNotIn("Nodes Firmware Version: -", label_texts)
+        self.assertNotIn("MCU Firmware Version", " ".join(label_texts))
+        self.assertNotIn("Nodes Firmware Version", " ".join(label_texts))
+
+    def test_robot_node_status_widget_is_persistent_and_reused_across_tabs(self) -> None:
+        window = self._build_workspace_window()
+        window.show()
+        self._app.processEvents()
+
+        shared_section = window.node_status_section
+        production_page = window._pages[ROUTE_PRODUCTION]
+        self.assertIs(production_page.node_status_section, shared_section)
+        self.assertTrue(shared_section.isVisible())
+
+        window.set_active_page(ROUTE_MECHANICAL, log_route_change=False)
+        self._app.processEvents()
+        self.assertTrue(shared_section.isVisible())
+        self.assertIs(window.node_status_section, shared_section)
+
+        window.set_active_page(ROUTE_FIRMWARE, log_route_change=False)
+        self._app.processEvents()
+        self.assertTrue(shared_section.isVisible())
+        self.assertIs(window._pages[ROUTE_PRODUCTION].node_status_section, shared_section)
+
+    def test_shared_node_status_display_state_requires_update_and_survives_tab_switches(self) -> None:
+        window = self._build_workspace_window()
+        window.show()
+
+        state = {"connected": True, "power_on": True, "connected_nodes": [], "detected_nodes": []}
+        scan_requests: list[str] = []
+
+        window._bridge.get_runtime_communication_model = lambda create_if_missing=False: {
+            "connected": state["connected"],
+            "ports": [],
+            "selected_port": "COM11",
+            "baud_rates": ["115200"],
+            "selected_baud": "115200",
+        }
+        window._bridge.get_runtime_robot_power_state = lambda create_if_missing=False: state["power_on"]
+        window._bridge.get_runtime_robot_nodes = lambda create_if_missing=False: {
+            "connected_nodes": list(state["connected_nodes"]),
+            "detected_nodes": list(state["detected_nodes"]),
+            "rows": [{"node_id": node_id} for node_id in state["connected_nodes"]],
+        }
+        def _request_scan() -> bool:
+            scan_requests.append("scan")
+            state["detected_nodes"] = []
+            return True
+        window._bridge.request_runtime_node_scan = _request_scan
+
+        section = window.node_status_section
+
+        def _is_green(node_id: int) -> bool:
+            return "#7ED957" in section._led_by_node_id[node_id].styleSheet()
+
+        window._refresh_shared_node_status()
+        self._app.processEvents()
+        self.assertFalse(_is_green(3))
+        self.assertFalse(_is_green(6))
+
+        state["connected_nodes"] = [3, 6]
+        window._refresh_shared_node_status()
+        self._app.processEvents()
+        self.assertFalse(_is_green(3))
+        self.assertFalse(_is_green(6))
+
+        section.findChild(QPushButton, "UpdateNodesButton").click()
+        self._app.processEvents()
+        self.assertEqual(scan_requests, ["scan"])
+        self.assertFalse(_is_green(3))
+        self.assertFalse(_is_green(6))
+
+        state["detected_nodes"] = [3]
+        window._refresh_shared_node_status()
+        self._app.processEvents()
+        self.assertTrue(_is_green(3))
+        self.assertFalse(_is_green(6))
+
+        window.set_active_page(ROUTE_MECHANICAL, log_route_change=False)
+        self._app.processEvents()
+        self.assertTrue(_is_green(3))
+        self.assertFalse(_is_green(6))
+
+        state["detected_nodes"] = [3, 6]
+        window._refresh_shared_node_status()
+        self._app.processEvents()
+        self.assertTrue(_is_green(3))
+        self.assertTrue(_is_green(6))
+
+        section.findChild(QPushButton, "ClearNodesButton").click()
+        self._app.processEvents()
+        self.assertFalse(_is_green(3))
+        self.assertFalse(_is_green(6))
+
+        window._refresh_shared_node_status()
+        self._app.processEvents()
+        self.assertFalse(_is_green(3))
+        self.assertFalse(_is_green(6))
+
+        section.findChild(QPushButton, "UpdateNodesButton").click()
+        self._app.processEvents()
+        state["detected_nodes"] = [3]
+        window._refresh_shared_node_status()
+        self._app.processEvents()
+        self.assertTrue(_is_green(3))
+
+        state["power_on"] = False
+        window._refresh_shared_node_status()
+        self._app.processEvents()
+        self.assertFalse(_is_green(3))
+        self.assertFalse(_is_green(6))
+
+        state["power_on"] = True
+        state["detected_nodes"] = [3, 6]
+        window._refresh_shared_node_status()
+        self._app.processEvents()
+        self.assertFalse(_is_green(3))
+        self.assertFalse(_is_green(6))
+
+    def test_shared_node_status_marks_only_detected_nodes_green_during_active_cycle(self) -> None:
+        window = self._build_workspace_window()
+        window.show()
+
+        state = {
+            "connected": True,
+            "power_on": True,
+            "connected_nodes": [5, 8, 9, 12],
+            "detected_nodes": [],
+        }
+
+        window._bridge.get_runtime_communication_model = lambda create_if_missing=False: {
+            "connected": state["connected"],
+            "ports": [],
+            "selected_port": "COM11",
+            "baud_rates": ["115200"],
+            "selected_baud": "115200",
+        }
+        window._bridge.get_runtime_robot_power_state = lambda create_if_missing=False: state["power_on"]
+        window._bridge.get_runtime_robot_nodes = lambda create_if_missing=False: {
+            "connected_nodes": list(state["connected_nodes"]),
+            "detected_nodes": list(state["detected_nodes"]),
+            "rows": [{"node_id": node_id} for node_id in state["connected_nodes"]],
+        }
+        window._bridge.request_runtime_node_scan = lambda: state.__setitem__("detected_nodes", []) or True
+
+        section = window.node_status_section
+
+        def _is_green(node_id: int) -> bool:
+            return "#7ED957" in section._led_by_node_id[node_id].styleSheet()
+
+        window._refresh_shared_node_status()
+        self._app.processEvents()
+        for node_id in (5, 8, 9, 12):
+            self.assertFalse(_is_green(node_id))
+
+        section.findChild(QPushButton, "UpdateNodesButton").click()
+        self._app.processEvents()
+
+        for reply_node in (5, 8, 9, 12):
+            state["detected_nodes"] = [*state["detected_nodes"], reply_node]
+            window._refresh_shared_node_status()
+            self._app.processEvents()
+            for node_id in (5, 8, 9, 12):
+                self.assertEqual(_is_green(node_id), node_id in state["detected_nodes"])
 
     def test_workspace_session_edit_button_routes_to_active_production_page(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

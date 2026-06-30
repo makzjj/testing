@@ -97,13 +97,14 @@ class ProductionPage(BaseWorkspacePage):
     console_message = pyqtSignal(str)
     session_state_changed = pyqtSignal(object)
 
-    def __init__(self, bridge: WorkspaceRuntimeBridge) -> None:
+    def __init__(self, bridge: WorkspaceRuntimeBridge, node_status_section: "_NodeStatusSection | None" = None) -> None:
         super().__init__("Production", "Simple node-based quality control testing.")
         self._bridge = bridge
 
         self.communication_section = _CommunicationSection()
         self.info_section = self.communication_section
-        self.robot_nodes_section = _NodeStatusSection()
+        self.robot_nodes_section = node_status_section or _NodeStatusSection()
+        self._owns_node_status_section = node_status_section is None
         self.test_control_section = self.communication_section
         self.uuid_section = _UuidCsvSection()
         self.stage_section = _TestStagesSection()
@@ -133,9 +134,10 @@ class ProductionPage(BaseWorkspacePage):
         self.uuid_section.save_requested.connect(self._handle_save_completed_workbook)
         self.communication_section.connect_requested.connect(self._handle_connect_requested)
         self.communication_section.disconnect_requested.connect(self._handle_disconnect_requested)
-        self.node_status_section.update_nodes_requested.connect(self._handle_update_nodes_requested)
-        self.node_status_section.robot_power_requested.connect(self._handle_robot_power_requested)
-        self.node_status_section.clear_nodes_requested.connect(self._handle_clear_nodes_requested)
+        if self._owns_node_status_section:
+            self.node_status_section.update_nodes_requested.connect(self._handle_update_nodes_requested)
+            self.node_status_section.robot_power_requested.connect(self._handle_robot_power_requested)
+            self.node_status_section.clear_nodes_requested.connect(self._handle_clear_nodes_requested)
         self._test_controller.log_message.connect(self.console_message.emit)
         self._test_controller.test_started.connect(self._handle_test_started)
         self._test_controller.test_passed.connect(self._handle_test_passed)
@@ -186,7 +188,8 @@ class ProductionPage(BaseWorkspacePage):
         self._workbook_eeprom_settle_active = False
 
         self.add_weighted_row((self.communication_section, 1), (self.stage_section, 1))
-        self.add_full_width(self.node_status_section)
+        if self._owns_node_status_section:
+            self.add_full_width(self.node_status_section)
         self.add_full_width(self.uuid_section)
         self.add_full_width(self.progress_section)
 
@@ -323,13 +326,18 @@ class ProductionPage(BaseWorkspacePage):
         self.node_status_section.set_nodes(nodes_model)
 
     def _refresh_robot_power_controls(self) -> None:
-        return
+        self.node_status_section.set_robot_power_state(
+            self._bridge.get_runtime_robot_power_state(create_if_missing=False)
+        )
 
     def _handle_update_nodes_requested(self) -> None:
         requested = False
         request_scan = getattr(self._bridge, "request_runtime_node_scan", None)
         if callable(request_scan):
             requested = bool(request_scan())
+        self.node_status_section.begin_visual_update(
+            self._bridge.get_runtime_robot_nodes(create_if_missing=False)
+        )
         if requested:
             self.console_message.emit("[Production] Requested runtime node scan update.")
             self.progress_section.append_step("Requested runtime node scan update")
@@ -1994,8 +2002,6 @@ class _CommunicationSection(PanelFrame):
         self._status_label = QLabel("○ Disconnected")
         self._status_label.setObjectName("DetailValue")
         self._connected = False
-        self._firmware_value = "-"
-        self._nodes_firmware_value = "-"
 
         self._combo = QComboBox()
         self._combo.setObjectName("AxisSelectorCombo")
@@ -2019,16 +2025,8 @@ class _CommunicationSection(PanelFrame):
         button_row.addWidget(self._status_label, 1)
         self.body_layout.addLayout(button_row)
 
-        self._firmware_label = QLabel("MCU Firmware Version: -")
-        self._firmware_label.setObjectName("DetailValue")
-        self.body_layout.addWidget(self._firmware_label)
-
-        self._nodes_firmware_label = QLabel("Nodes Firmware Version: -")
-        self._nodes_firmware_label.setObjectName("DetailValue")
-        self.body_layout.addWidget(self._nodes_firmware_label)
-
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self.setMinimumHeight(190)
+        self.setMinimumHeight(150)
 
     def set_model(self, model: dict) -> None:
         current_port = str(self._port_combo.currentData() or "")
@@ -2069,16 +2067,7 @@ class _CommunicationSection(PanelFrame):
             self._status_label.setStyleSheet("color: #808080; font-weight: bold;")
 
     def set_nodes(self, nodes_model: dict) -> None:
-        rows = list(nodes_model.get("rows", []))
-        firmware_values = [str(row.get("firmware", "")).strip() for row in rows if str(row.get("firmware", "")).strip()]
-        self._firmware_value = firmware_values[0] if firmware_values else "-"
-        if firmware_values:
-            unique_versions = sorted({value for value in firmware_values if value})
-            self._nodes_firmware_value = ", ".join(unique_versions)
-        else:
-            self._nodes_firmware_value = "-"
-        self._firmware_label.setText(f"MCU Firmware Version: {self._firmware_value}")
-        self._nodes_firmware_label.setText(f"Nodes Firmware Version: {self._nodes_firmware_value}")
+        return
 
     def selected_node(self) -> tuple[int, str]:
         selected = self._combo.currentData()
@@ -2472,8 +2461,13 @@ class _NodeStatusSection(PanelFrame):
 
     def __init__(self) -> None:
         super().__init__("Robot Arm Node Status", "")
+        self.setObjectName("SharedRobotNodeStatusPanel")
         self._led_by_node_id: dict[int, QLabel] = {}
         self._connected = False
+        self._robot_power_on: bool | None = None
+        self._backend_connected_nodes: set[int] = set()
+        self._displayed_connected_nodes: set[int] = set()
+        self._update_in_progress = False
 
         button_row = QHBoxLayout()
         button_row.setContentsMargins(0, 0, 0, 0)
@@ -2520,18 +2514,38 @@ class _NodeStatusSection(PanelFrame):
     def set_connected(self, connected: bool) -> None:
         self._connected = bool(connected)
         self._robot_power_button.setEnabled(self._connected)
+        if not self._connected:
+            self._invalidate_display_state()
 
     def set_robot_power_state(self, power_on: bool | None) -> None:
-        return
+        previous = self._robot_power_on
+        self._robot_power_on = power_on
+        if power_on is False:
+            self._invalidate_display_state()
+            return
+        if previous is False and power_on is True:
+            self._invalidate_display_state()
 
     def set_nodes(self, nodes_model: dict) -> None:
-        connected_nodes = {int(node_id) for node_id in nodes_model.get("connected_nodes", [])}
-        for node_id in self._led_by_node_id:
-            self._set_led_state(node_id, node_id in connected_nodes)
+        self._backend_connected_nodes = {int(node_id) for node_id in nodes_model.get("connected_nodes", [])}
+        if not self._update_in_progress or self._robot_power_on is False or not self._connected:
+            return
+        if "detected_nodes" in nodes_model:
+            visible_nodes = {int(node_id) for node_id in nodes_model.get("detected_nodes", [])}
+        else:
+            visible_nodes = set(self._backend_connected_nodes)
+        self._displayed_connected_nodes = visible_nodes
+        self._render_leds()
 
     def clear_node_states(self) -> None:
-        for node_id in self._led_by_node_id:
-            self._set_led_state(node_id, False)
+        self._invalidate_display_state()
+
+    def begin_visual_update(self, nodes_model: dict | None = None) -> None:
+        if nodes_model is not None:
+            self._backend_connected_nodes = {int(node_id) for node_id in nodes_model.get("connected_nodes", [])}
+        self._displayed_connected_nodes.clear()
+        self._update_in_progress = True
+        self._render_leds()
 
     def _handle_robot_power_clicked(self) -> None:
         self.robot_power_requested.emit()
@@ -2542,6 +2556,20 @@ class _NodeStatusSection(PanelFrame):
             return
         color = "#7ED957" if connected else "#1E5E20"
         led.setStyleSheet(f"border-radius: 7px; background: {color};")
+
+    def _invalidate_display_state(self) -> None:
+        self._displayed_connected_nodes.clear()
+        self._update_in_progress = False
+        self._render_leds()
+
+    def _render_leds(self) -> None:
+        for node_id in self._led_by_node_id:
+            self._set_led_state(node_id, node_id in self._displayed_connected_nodes)
+
+
+def build_shared_node_status_section() -> _NodeStatusSection:
+    """Create the shared Robot Arm Node Status panel for the workspace shell."""
+    return _NodeStatusSection()
 
 
 class _TestControlSection(PanelFrame):
