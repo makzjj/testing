@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QFrame, QLabel, QScrollArea, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QFrame, QScrollArea, QVBoxLayout, QWidget
 
 from ..widgets import ResponsiveRow
 
 
 class BaseWorkspacePage(QScrollArea):
-    """Base page scaffold with a compact intro and stacked rows of sections."""
+    """Base page scaffold with stacked rows of sections."""
 
     def __init__(self, title: str, subtitle: str) -> None:
         super().__init__()
@@ -25,17 +25,6 @@ class BaseWorkspacePage(QScrollArea):
         root = QVBoxLayout(container)
         root.setContentsMargins(8, 6, 8, 8)
         root.setSpacing(3)
-
-        if title:
-            title_label = QLabel(title)
-            title_label.setObjectName("PageTitle")
-            root.addWidget(title_label)
-
-        if subtitle:
-            subtitle_label = QLabel(subtitle)
-            subtitle_label.setObjectName("PageSubtitle")
-            subtitle_label.setWordWrap(True)
-            root.addWidget(subtitle_label)
 
         self.content_layout = QVBoxLayout()
         self.content_layout.setContentsMargins(0, 0, 0, 0)

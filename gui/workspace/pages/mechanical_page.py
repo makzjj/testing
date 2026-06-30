@@ -34,7 +34,7 @@ from data.binary_cmd_builders import (
     build_nodeconfig_query_payload,
     build_rflag_query_payload,
 )
-from data.binary_cmd_parser import decode_command, decode_nodeconfig_motion_polarity, decode_sensor_flags
+from data.binary_cmd_parser import decode_command, decode_nodeconfig_motion_polarity
 from services.functional_transport_adapter import FunctionalTransportAdapter
 
 from ..bridges import WorkspaceRuntimeBridge
@@ -77,10 +77,20 @@ COUNTS_PER_REV = 88064
 
 
 @dataclass
-class _PendingMechanicalRead:
-    name: str
+class _PendingMechanicalRequest:
+    family: str
+    action: str
     node_id: int
-    expected_cmd: int
+    timeout_owner: str
+    button: QPushButton | None = None
+    idle_button_text: str | None = None
+    pending_button_text: str | None = None
+    expected_cmd: int | None = None
+    definitions: list[Any] | None = None
+    requests: list[ParameterRequest] | None = None
+    index: int = 0
+    results: list[Any] | None = None
+    enable_eeprom: bool = False
 
 
 class _MechanicalParameterController(ProductionParameterController):
@@ -313,13 +323,14 @@ class MechanicalPage(BaseWorkspacePage):
         self._transport_adapter: FunctionalTransportAdapter | None = None
         self._transport_runtime_window: object | None = None
         self._transport_node_id: int | None = None
-        self._pending_read: _PendingMechanicalRead | None = None
-        self._busy = False
-        self._busy_context: dict[str, Any] | None = None
+        self._pending_request: _PendingMechanicalRequest | None = None
         self._persistent_write_pending = False
         self._parameter_actual_texts: dict[str, str] = {}
         self._sensor_state_cache: dict[str, int | None] = {"left": None, "right": None}
         self._sensor_state_node_id: int | None = None
+        self._sensor_interrupt_cache: dict[str, bool] = {"left": False, "right": False}
+        self._sensor_interrupt_node_id: int | None = None
+        self._runtime_packet_window: QObject | None = None
         self._parameter_definitions = {
             definition.name: definition
             for definition in default_workbook_parameter_definitions()
@@ -337,35 +348,31 @@ class MechanicalPage(BaseWorkspacePage):
         self.refresh()
 
     def _build_ui(self) -> None:
-        action_row = QHBoxLayout()
-        action_row.setContentsMargins(0, 0, 0, 0)
-        action_row.setSpacing(8)
         self.open_popup_button = QPushButton("Motor Movement Control")
         self.open_popup_button.setObjectName("MechanicalOpenMotorMovementControlButton")
         self.open_popup_button.clicked.connect(self._open_motor_movement_popup)
-        popup_min_width = self.open_popup_button.fontMetrics().horizontalAdvance(self.open_popup_button.text()) + 42
-        self.open_popup_button.setMinimumWidth(max(260, popup_min_width))
-        self.open_popup_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        popup_min_width = self.open_popup_button.fontMetrics().horizontalAdvance(self.open_popup_button.text()) + 30
+        self.open_popup_button.setMinimumWidth(max(184, popup_min_width))
+        self.open_popup_button.setMaximumWidth(232)
+        self.open_popup_button.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         self._style_enabled_button(self.open_popup_button)
-        action_row.addStretch(1)
-        action_row.addWidget(self.open_popup_button)
-        self.content_layout.addLayout(action_row)
 
-        self.row_one = ResponsiveRow(stack_below_width=860)
+        self.row_one = ResponsiveRow(stack_below_width=760)
         self.row_one.setObjectName("MechanicalRowOne")
         self.node_header_panel = self._build_node_header_group()
         self.sensor_panel = self._build_sensor_group()
-        self.row_one.add_panel(self.node_header_panel, stretch=6)
-        self.row_one.add_panel(self.sensor_panel, stretch=4)
+        self.row_one.add_panel(self.node_header_panel, stretch=49)
+        self.row_one.add_panel(self.sensor_panel, stretch=51)
+        self._align_top_card_heights()
 
-        self.row_two = ResponsiveRow(stack_below_width=1120)
+        self.row_two = ResponsiveRow(stack_below_width=820)
         self.row_two.setObjectName("MechanicalRowTwo")
         self.velocity_panel = self._build_velocity_group()
         self.ramp_panel = self._build_ramp_group()
         self.pid_panel = self._build_pid_group()
-        self.row_two.add_panel(self.velocity_panel, stretch=4)
-        self.row_two.add_panel(self.ramp_panel, stretch=3)
-        self.row_two.add_panel(self.pid_panel, stretch=3)
+        self.row_two.add_panel(self.velocity_panel, stretch=1)
+        self.row_two.add_panel(self.ramp_panel, stretch=1)
+        self.row_two.add_panel(self.pid_panel, stretch=1)
 
         self.row_three = ResponsiveRow(stack_below_width=1120)
         self.row_three.setObjectName("MechanicalRowThree")
@@ -411,19 +418,19 @@ class MechanicalPage(BaseWorkspacePage):
     def _build_node_header_group(self) -> PanelFrame:
         group = PanelFrame("Node Header")
         group.setObjectName("MechanicalNodeHeaderPanel")
-        self._configure_module_panel(group, min_width=320)
+        self._configure_module_panel(group, min_width=340)
         layout = QGridLayout()
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setHorizontalSpacing(8)
-        layout.setVerticalSpacing(6)
+        layout.setHorizontalSpacing(10)
+        layout.setVerticalSpacing(8)
 
         self.node_combo = QComboBox()
         self.node_combo.setObjectName("MechanicalNodeCombo")
-        self.node_combo.setMinimumWidth(180)
+        self.node_combo.setMinimumWidth(144)
         self._style_combo_box(self.node_combo)
         self.node_combo.currentIndexChanged.connect(self._handle_selected_node_changed)
 
-        self.axis_type_value = self._readonly_line("n/a", "MechanicalAxisTypeValue", width=110)
+        self.axis_type_value = self._readonly_line("n/a", "MechanicalAxisTypeValue", width=92)
         layout.addWidget(LabeledControl("Node", self.node_combo), 0, 0)
         layout.addWidget(LabeledControl("Axis Type", self.axis_type_value), 0, 1)
 
@@ -431,41 +438,52 @@ class MechanicalPage(BaseWorkspacePage):
         nodeconfig_section.setObjectName("MechanicalNodeConfigPanel")
         nodeconfig_layout = QGridLayout(nodeconfig_section)
         nodeconfig_layout.setContentsMargins(0, 2, 0, 0)
-        nodeconfig_layout.setHorizontalSpacing(8)
-        nodeconfig_layout.setVerticalSpacing(6)
+        nodeconfig_layout.setHorizontalSpacing(10)
+        nodeconfig_layout.setVerticalSpacing(8)
+
+        self.nodeconfig_row = QWidget()
+        self.nodeconfig_row.setObjectName("MechanicalNodeHeaderNodeConfigRow")
+        self.flag_selector_row = QWidget()
+        self.flag_selector_row.setObjectName("MechanicalNodeHeaderFlagSelectorRow")
+        self.polarity_row = QWidget()
+        self.polarity_row.setObjectName("MechanicalNodeHeaderPolarityRow")
+        self.nodeconfig_button_row = QWidget()
+        self.nodeconfig_button_row.setObjectName("MechanicalNodeHeaderButtonRow")
 
         self.current_nodeconfig_value = self._readonly_line("n/a", "MechanicalCurrentNodeconfigValue", width=96)
         self.polarity_selector = QComboBox()
         self.polarity_selector.setObjectName("MechanicalPolaritySelector")
         self.polarity_selector.addItems(["n/a", "Normal", "Reversed"])
         self.polarity_selector.setEnabled(False)
-        self.polarity_selector.setMinimumWidth(120)
+        self.polarity_selector.setMinimumWidth(92)
+        self.polarity_selector.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._style_combo_box(self.polarity_selector)
         self.flag_selector_selector = QComboBox()
         self.flag_selector_selector.setObjectName("MechanicalFlagSelector")
         self.flag_selector_selector.addItems(["n/a", "INT0", "INT1", "Both"])
         self.flag_selector_selector.setEnabled(False)
-        self.flag_selector_selector.setMinimumWidth(120)
+        self.flag_selector_selector.setMinimumWidth(92)
+        self.flag_selector_selector.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._style_combo_box(self.flag_selector_selector)
         self.read_nodeconfig_button = self._disabled_button("Read", "MechanicalReadNodeConfigButton")
         self.write_nodeconfig_button = self._disabled_button("Write", "MechanicalWriteNodeConfigButton")
         self.read_nodeconfig_button.clicked.connect(self._handle_read_nodeconfig_clicked)
 
         nodeconfig_layout.addWidget(LabeledControl("Current NODECONFIG", self.current_nodeconfig_value), 0, 0)
-        nodeconfig_layout.addWidget(LabeledControl("Polarity", self.polarity_selector), 0, 1)
         nodeconfig_layout.addWidget(LabeledControl("Flag Selector", self.flag_selector_selector), 1, 0)
-        button_row = QHBoxLayout()
+        nodeconfig_layout.addWidget(LabeledControl("Polarity", self.polarity_selector), 2, 0)
+        button_row = QHBoxLayout(self.nodeconfig_button_row)
         button_row.setContentsMargins(0, 0, 0, 0)
         button_row.setSpacing(8)
         self._equalize_button_widths(self.read_nodeconfig_button, self.write_nodeconfig_button)
         button_row.addWidget(self.read_nodeconfig_button)
         button_row.addWidget(self.write_nodeconfig_button)
         button_row.addStretch(1)
-        nodeconfig_layout.addLayout(button_row, 1, 1)
+        nodeconfig_layout.addWidget(self.nodeconfig_button_row, 3, 0)
 
         layout.addWidget(nodeconfig_section, 1, 0, 1, 2)
-        layout.setColumnStretch(0, 3)
-        layout.setColumnStretch(1, 2)
+        layout.setColumnStretch(0, 1)
+        layout.setColumnStretch(1, 1)
         group.body_layout.addLayout(layout)
         return group
 
@@ -473,26 +491,45 @@ class MechanicalPage(BaseWorkspacePage):
         group = PanelFrame("Sensor Status")
         group.setObjectName("MechanicalSensorPanel")
         self._configure_module_panel(group, min_width=360)
+        header_layout = group.layout()
+        title_item = header_layout.takeAt(0)
+        title_label = title_item.widget() if title_item is not None else None
+        sensor_header_row = QWidget()
+        sensor_header_row.setObjectName("MechanicalSensorHeaderRow")
+        sensor_header_row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        sensor_header_layout = QHBoxLayout(sensor_header_row)
+        sensor_header_layout.setContentsMargins(0, 0, 0, 0)
+        sensor_header_layout.setSpacing(8)
+        sensor_header_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        if isinstance(title_label, QLabel):
+            sensor_header_layout.addWidget(title_label, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        sensor_header_layout.addStretch(1)
+        sensor_header_layout.addWidget(self.open_popup_button, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
+        header_layout.insertWidget(0, sensor_header_row)
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(10)
 
         self.left_flag_led = self._build_led("MechanicalLeftFlagLed")
-        self.left_flag_state_value = self._readonly_line("unknown", "MechanicalLeftFlagStateValue", width=90)
+        self.left_flag_state_value = self._readonly_display_label("unknown", "MechanicalLeftFlagStateValue", width=92)
         self.left_flag_setting_selector = QComboBox()
         self.left_flag_setting_selector.setObjectName("MechanicalLeftFlagSettingSelector")
         self.left_flag_setting_selector.addItems(["1", "9", "11"])
         self.left_flag_setting_selector.setEnabled(False)
-        self.left_flag_setting_selector.setMinimumWidth(96)
+        self.left_flag_setting_selector.setMinimumWidth(76)
+        self.left_flag_setting_selector.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._style_combo_box(self.left_flag_setting_selector)
+        self.left_flag_write_button = self._disabled_button("Write", "MechanicalLeftFlagWriteButton")
         self.right_flag_led = self._build_led("MechanicalRightFlagLed")
-        self.right_flag_state_value = self._readonly_line("unknown", "MechanicalRightFlagStateValue", width=90)
+        self.right_flag_state_value = self._readonly_display_label("unknown", "MechanicalRightFlagStateValue", width=92)
         self.right_flag_setting_selector = QComboBox()
         self.right_flag_setting_selector.setObjectName("MechanicalRightFlagSettingSelector")
         self.right_flag_setting_selector.addItems(["1", "9", "11"])
         self.right_flag_setting_selector.setEnabled(False)
-        self.right_flag_setting_selector.setMinimumWidth(96)
+        self.right_flag_setting_selector.setMinimumWidth(76)
+        self.right_flag_setting_selector.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._style_combo_box(self.right_flag_setting_selector)
+        self.right_flag_write_button = self._disabled_button("Write", "MechanicalRightFlagWriteButton")
         self.read_lflag_button = self._disabled_button("Read LFLAG", "MechanicalReadLFlagButton")
         self.read_rflag_button = self._disabled_button("Read RFLAG", "MechanicalReadRFlagButton")
         self.read_lflag_button.clicked.connect(self._handle_read_lflag_clicked)
@@ -504,6 +541,8 @@ class MechanicalPage(BaseWorkspacePage):
                 self.left_flag_led,
                 self.left_flag_state_value,
                 self.left_flag_setting_selector,
+                self.left_flag_write_button,
+                row_object_name="MechanicalLeftFlagRow",
             )
         )
         layout.addWidget(
@@ -512,6 +551,8 @@ class MechanicalPage(BaseWorkspacePage):
                 self.right_flag_led,
                 self.right_flag_state_value,
                 self.right_flag_setting_selector,
+                self.right_flag_write_button,
+                row_object_name="MechanicalRightFlagRow",
             )
         )
 
@@ -529,7 +570,7 @@ class MechanicalPage(BaseWorkspacePage):
     def _build_velocity_group(self) -> PanelFrame:
         group = PanelFrame("Velocity / Motion Control")
         group.setObjectName("MechanicalVelocityPanel")
-        self._configure_module_panel(group, min_width=280)
+        self._configure_module_panel(group, min_width=220)
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
@@ -543,27 +584,29 @@ class MechanicalPage(BaseWorkspacePage):
         self.drive_mode_group.addButton(self.pwm_mode_radio)
         self.drive_mode_group.addButton(self.rpm_mode_radio)
 
-        self.current_pwm_value = self._readonly_line("0", "MechanicalCurrentPwmValue", width=72)
-        self.current_rpm_value = self._readonly_line("n/a", "MechanicalCurrentRpmValue", width=84)
+        self.current_pwm_value = self._readonly_line("0", "MechanicalCurrentPwmValue", width=64)
+        self.current_rpm_value = self._readonly_line("n/a", "MechanicalCurrentRpmValue", width=76)
         self.read_pwm_button = self._disabled_button("Read PWM", "MechanicalReadPwmButton")
         self.read_rpm_button = self._disabled_button("Read RPM", "MechanicalReadRpmButton")
         self.selected_pwm_combo = QComboBox()
         self.selected_pwm_combo.setObjectName("MechanicalPwmSelectionCombo")
         self.selected_pwm_combo.addItems([str(value) for value in range(-100, 101, 10)])
         self.selected_pwm_combo.setCurrentText("0")
-        self.selected_pwm_combo.setMinimumWidth(92)
+        self.selected_pwm_combo.setMinimumWidth(76)
+        self.selected_pwm_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._style_combo_box(self.selected_pwm_combo)
         self.set_pwm_row_button = self._disabled_button("Set PWM", "MechanicalSetPwmRowButton")
         self.rpm_selector = QComboBox()
         self.rpm_selector.setObjectName("MechanicalRpmSelectionCombo")
         self.rpm_selector.addItems(["n/a"])
         self.rpm_selector.setEnabled(False)
-        self.rpm_selector.setMinimumWidth(92)
+        self.rpm_selector.setMinimumWidth(76)
+        self.rpm_selector.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._style_combo_box(self.rpm_selector)
         self.set_rpm_button = self._disabled_button("Set RPM", "MechanicalSetRpmButton")
         self.home_hunt_button = self._disabled_button("Hunt for Zero", "MechanicalHomeHuntButton")
         self.velocity_stop_motor_button = self._disabled_button("Stop Motor", "MechanicalVelocityStopMotorButton")
-        self.current_position_value = self._readonly_line("n/a", "MechanicalCurrentPositionValue", width=110)
+        self.current_position_value = self._readonly_line("n/a", "MechanicalCurrentPositionValue", width=88)
         self.get_position_button = self._disabled_button("Get Position", "MechanicalGetPositionButton")
         self.read_pwm_button.clicked.connect(self._handle_read_pwm_clicked)
         self.set_pwm_row_button.clicked.connect(self._handle_set_pwm_clicked)
@@ -578,7 +621,8 @@ class MechanicalPage(BaseWorkspacePage):
         pwm_row.addWidget(self.read_pwm_button, 0, 2)
         pwm_row.addWidget(self.selected_pwm_combo, 1, 1)
         pwm_row.addWidget(self.set_pwm_row_button, 1, 2)
-        pwm_row.setColumnStretch(3, 1)
+        pwm_row.setColumnStretch(1, 1)
+        pwm_row.setColumnStretch(2, 0)
         layout.addLayout(pwm_row)
 
         rpm_row = QGridLayout()
@@ -590,7 +634,8 @@ class MechanicalPage(BaseWorkspacePage):
         rpm_row.addWidget(self.read_rpm_button, 0, 2)
         rpm_row.addWidget(self.rpm_selector, 1, 1)
         rpm_row.addWidget(self.set_rpm_button, 1, 2)
-        rpm_row.setColumnStretch(3, 1)
+        rpm_row.setColumnStretch(1, 1)
+        rpm_row.setColumnStretch(2, 0)
         layout.addLayout(rpm_row)
 
         position_row = QHBoxLayout()
@@ -617,7 +662,7 @@ class MechanicalPage(BaseWorkspacePage):
     def _build_pid_group(self) -> PanelFrame:
         group = PanelFrame("Position & Speed PID")
         group.setObjectName("MechanicalPidPanel")
-        self._configure_module_panel(group, min_width=280)
+        self._configure_module_panel(group, min_width=220)
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
@@ -627,9 +672,9 @@ class MechanicalPage(BaseWorkspacePage):
         fields_grid.setHorizontalSpacing(8)
         fields_grid.setVerticalSpacing(8)
 
-        self.pid_p_value = self._editable_line("n/a", "MechanicalPidPValue", width=100)
-        self.pid_i_value = self._editable_line("n/a", "MechanicalPidIValue", width=100)
-        self.pid_d_value = self._editable_line("n/a", "MechanicalPidDValue", width=100)
+        self.pid_p_value = self._editable_line("n/a", "MechanicalPidPValue", width=82)
+        self.pid_i_value = self._editable_line("n/a", "MechanicalPidIValue", width=82)
+        self.pid_d_value = self._editable_line("n/a", "MechanicalPidDValue", width=82)
         self.pid_read_button = self._disabled_button("Read", "MechanicalPidReadButton")
         self.pid_write_button = self._disabled_button("Write", "MechanicalPidWriteButton")
         self.pid_read_button.clicked.connect(self._handle_pid_read_clicked)
@@ -659,17 +704,17 @@ class MechanicalPage(BaseWorkspacePage):
     def _build_ramp_group(self) -> PanelFrame:
         group = PanelFrame("Ramp Down Profile")
         group.setObjectName("MechanicalRampPanel")
-        self._configure_module_panel(group, min_width=280)
+        self._configure_module_panel(group, min_width=220)
         layout = QGridLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setHorizontalSpacing(8)
         layout.setVerticalSpacing(8)
 
-        self.ramp_slope_value = self._editable_line("n/a", "MechanicalRampSlopeValue", width=100)
-        self.ramp_step_value = self._editable_line("n/a", "MechanicalRampStepValue", width=100)
-        self.ramp_min_velocity_value = self._editable_line("n/a", "MechanicalRampMinVelocityValue", width=100)
-        self.ramp_target_offset_value = self._editable_line("n/a", "MechanicalRampTargetOffsetValue", width=100)
-        self.ramp_region_value = self._editable_line("n/a", "MechanicalRampRegionValue", width=100)
+        self.ramp_slope_value = self._editable_line("n/a", "MechanicalRampSlopeValue", width=82)
+        self.ramp_step_value = self._editable_line("n/a", "MechanicalRampStepValue", width=82)
+        self.ramp_min_velocity_value = self._editable_line("n/a", "MechanicalRampMinVelocityValue", width=82)
+        self.ramp_target_offset_value = self._editable_line("n/a", "MechanicalRampTargetOffsetValue", width=82)
+        self.ramp_region_value = self._editable_line("n/a", "MechanicalRampRegionValue", width=82)
         self.ramp_read_button = self._disabled_button("Read", "MechanicalRampReadButton")
         self.ramp_write_button = self._disabled_button("Write", "MechanicalRampWriteButton")
         self.ramp_read_button.clicked.connect(self._handle_ramp_read_clicked)
@@ -699,6 +744,7 @@ class MechanicalPage(BaseWorkspacePage):
         return group
 
     def refresh(self) -> None:
+        self._attach_runtime_packet_listener()
         raw_config = getattr(self._bridge, "raw_config", {}) or {}
         self._node_entries = self._collect_node_entries(raw_config)
         self._populate_node_combo()
@@ -838,19 +884,48 @@ class MechanicalPage(BaseWorkspacePage):
         self.log_output.appendPlainText(f"[{timestamp}] {message}")
 
     def _handle_get_position_clicked(self) -> None:
-        self._start_simple_read("Get Position", build_getpos(), expected_cmd=0x82)
+        self._start_simple_read(
+            "Get Position",
+            build_getpos(),
+            expected_cmd=0x82,
+            button=self.get_position_button,
+            pending_button_text="Reading...",
+        )
 
     def _handle_read_nodeconfig_clicked(self) -> None:
-        self._start_simple_read("Read NODECONFIG", build_nodeconfig_query_payload(), expected_cmd=0xC4)
+        self._start_simple_read(
+            "Read NODECONFIG",
+            build_nodeconfig_query_payload(),
+            expected_cmd=0xC4,
+            button=self.read_nodeconfig_button,
+            pending_button_text="Reading...",
+        )
 
     def _handle_read_lflag_clicked(self) -> None:
-        self._start_simple_read("Read LFLAG", build_lflag_query_payload(), expected_cmd=0xC9)
+        self._start_simple_read(
+            "Read LFLAG",
+            build_lflag_query_payload(),
+            expected_cmd=0xC9,
+            button=self.read_lflag_button,
+            pending_button_text="Reading...",
+        )
 
     def _handle_read_rflag_clicked(self) -> None:
-        self._start_simple_read("Read RFLAG", build_rflag_query_payload(), expected_cmd=0xCA)
+        self._start_simple_read(
+            "Read RFLAG",
+            build_rflag_query_payload(),
+            expected_cmd=0xCA,
+            button=self.read_rflag_button,
+            pending_button_text="Reading...",
+        )
 
     def _handle_read_pwm_clicked(self) -> None:
-        self._start_parameter_read("Read PWM", [self._parameter_definitions["PWM"]])
+        self._start_parameter_read(
+            "Read PWM",
+            [self._parameter_definitions["PWM"]],
+            button=self.read_pwm_button,
+            pending_button_text="Reading...",
+        )
 
     def _handle_set_pwm_clicked(self) -> None:
         selected_text = self.selected_pwm_combo.currentText().strip()
@@ -861,7 +936,13 @@ class MechanicalPage(BaseWorkspacePage):
             return
         definition = self._parameter_definitions["PWM"]
         request = self._build_parameter_request(definition, str(parsed))
-        self._start_parameter_write("Set PWM", [request], enable_eeprom=False)
+        self._start_parameter_write(
+            "Set PWM",
+            [request],
+            enable_eeprom=False,
+            button=self.set_pwm_row_button,
+            pending_button_text="Writing...",
+        )
 
     def _handle_pid_read_clicked(self) -> None:
         self._start_parameter_read(
@@ -871,6 +952,8 @@ class MechanicalPage(BaseWorkspacePage):
                 self._parameter_definitions["PID_I"],
                 self._parameter_definitions["PID_D"],
             ],
+            button=self.pid_read_button,
+            pending_button_text="Reading...",
         )
 
     def _handle_pid_write_clicked(self) -> None:
@@ -882,7 +965,13 @@ class MechanicalPage(BaseWorkspacePage):
         if not requests:
             self._append_log("[Mechanical] PID write skipped: no values differ from current read-back.")
             return
-        self._start_parameter_write("Write PID", requests, enable_eeprom=True)
+        self._start_parameter_write(
+            "Write PID",
+            requests,
+            enable_eeprom=True,
+            button=self.pid_write_button,
+            pending_button_text="Writing...",
+        )
 
     def _handle_ramp_read_clicked(self) -> None:
         self._start_parameter_read(
@@ -894,6 +983,8 @@ class MechanicalPage(BaseWorkspacePage):
                 self._parameter_definitions["RampDown_TargetOffset"],
                 self._parameter_definitions["RampDown_Region"],
             ],
+            button=self.ramp_read_button,
+            pending_button_text="Reading...",
         )
 
     def _handle_ramp_write_clicked(self) -> None:
@@ -905,84 +996,119 @@ class MechanicalPage(BaseWorkspacePage):
         if not requests:
             self._append_log("[Mechanical] Ramp Down write skipped: no values differ from current read-back.")
             return
-        self._start_parameter_write("Write Ramp Down", requests, enable_eeprom=True)
+        self._start_parameter_write(
+            "Write Ramp Down",
+            requests,
+            enable_eeprom=True,
+            button=self.ramp_write_button,
+            pending_button_text="Writing...",
+        )
 
     def _handle_save_to_eeprom_clicked(self) -> None:
-        if self._busy:
-            self._append_log("[Mechanical] Save to EEPROM ignored: another request is already in progress.")
-            return
         if not self._persistent_write_pending:
             self._append_log("[Mechanical] Save to EEPROM ignored: no persistent writes are pending.")
+            return
+        if self._pending_request is not None:
+            self._append_log("Another Mechanical request is still pending.")
             return
         node_id = self._selected_node_id()
         node_name = self._selected_node_label()
         if node_id is None or node_name is None:
             self._append_log("[Mechanical] Save to EEPROM failed: no valid node is selected.")
             return
-        self._set_busy({"kind": "eeprom_save", "node_id": node_id}, message="[Mechanical] Save to EEPROM started.")
+        self._set_pending_request(
+            _PendingMechanicalRequest(
+                family="eeprom",
+                action="save",
+                node_id=node_id,
+                timeout_owner="eeprom",
+                button=self.save_to_eeprom_button,
+                idle_button_text=self.save_to_eeprom_button.text(),
+                pending_button_text="Saving...",
+            ),
+            message="[Mechanical] Save to EEPROM started.",
+        )
         started = self._parameter_controller.save_parameters_to_eeprom(node_id, node_name)
         if not started:
             self._append_log("[Mechanical] Save to EEPROM failed to start.")
-            self._clear_busy()
+            self._clear_pending_request(family="eeprom", action="save")
 
-    def _start_simple_read(self, name: str, payload: list[int], *, expected_cmd: int) -> None:
-        if self._busy:
-            self._append_log(f"[Mechanical] {name} ignored: another request is already in progress.")
+    def _start_simple_read(
+        self,
+        name: str,
+        payload: list[int],
+        *,
+        expected_cmd: int,
+        button: QPushButton,
+        pending_button_text: str,
+    ) -> None:
+        if self._pending_request is not None:
+            self._append_log("Another Mechanical request is still pending.")
             return
         node_id = self._selected_node_id()
         if node_id is None or not self._has_supported_live_node():
             self._append_log(f"[Mechanical] {name} failed: no valid connected Mechanical node is selected.")
-            self._update_control_states()
             return
         adapter = self._ensure_transport_adapter(node_id)
         if adapter is None:
             self._append_log(f"[Mechanical] {name} failed: serial transport is unavailable.")
-            self._update_control_states()
             return
-        self._pending_read = _PendingMechanicalRead(name=name, node_id=node_id, expected_cmd=expected_cmd)
-        self._set_busy({"kind": "simple_read", "name": name, "node_id": node_id}, message=f"[Mechanical] {name} started.")
+        self._set_pending_request(
+            _PendingMechanicalRequest(
+                family="simple_read",
+                action=name,
+                node_id=node_id,
+                timeout_owner=name,
+                button=button,
+                idle_button_text=button.text(),
+                pending_button_text=pending_button_text,
+                expected_cmd=expected_cmd,
+            ),
+            message=f"[Mechanical] {name} started.",
+        )
         adapter.send(payload)
         self._simple_request_timer.start(UUID_VERIFY_TIMEOUT_MS)
 
     def _handle_transport_payload(self, payload: list[int]) -> None:
         if not payload:
             return
-        context = self._busy_context or {}
-        kind = context.get("kind")
-        if kind == "simple_read":
+        pending = self._pending_request
+        if pending is None:
+            return
+        if pending.family == "simple_read":
             self._handle_simple_read_payload(payload)
             return
-        if kind in {"parameter_read", "parameter_write", "parameter_verify_after_write"}:
+        if pending.family == "parameter":
             self._handle_parameter_payload(payload)
             return
 
     def _handle_simple_read_payload(self, payload: list[int]) -> None:
-        pending = self._pending_read
-        if pending is None:
+        pending = self._pending_request
+        if pending is None or pending.family != "simple_read" or pending.expected_cmd is None:
             return
         cmd = int(payload[0]) & 0xFF
         if cmd != pending.expected_cmd:
             return
         self._simple_request_timer.stop()
         decoded_type, decoded_value = decode_command(cmd, payload[1:])
-        if pending.name == "Get Position":
+        if pending.action == "Get Position":
             self._handle_get_position_response(decoded_type, decoded_value, payload)
-        elif pending.name == "Read NODECONFIG":
+        elif pending.action == "Read NODECONFIG":
             self._handle_nodeconfig_response(decoded_type, decoded_value, payload)
-        elif pending.name == "Read LFLAG":
+        elif pending.action == "Read LFLAG":
             self._handle_flag_response(decoded_type, decoded_value, payload, side="left")
-        elif pending.name == "Read RFLAG":
+        elif pending.action == "Read RFLAG":
             self._handle_flag_response(decoded_type, decoded_value, payload, side="right")
-        self._pending_read = None
-        self._clear_busy()
+        self._clear_pending_request(family="simple_read", action=pending.action)
 
     def _handle_parameter_payload(self, payload: list[int]) -> None:
-        context = self._busy_context or {}
-        kind = context.get("kind")
+        pending = self._pending_request
+        if pending is None or pending.family != "parameter":
+            return
         cmd = int(payload[0]) & 0xFF
-        if kind == "parameter_read":
-            definitions = list(context.get("definitions", []))
-            index = int(context.get("index", 0))
+        if pending.action == "read":
+            definitions = list(pending.definitions or [])
+            index = int(pending.index)
             if index >= len(definitions):
                 return
             definition = definitions[index]
@@ -998,21 +1124,20 @@ class MechanicalPage(BaseWorkspacePage):
             self._append_log(
                 f"[Mechanical] Parsed {definition.label} RX: {self._hex_payload(payload)} -> {actual_text}."
             )
-            context_results = list(context.get("results", []))
-            context_results.append((definition.name, True, "", actual_text))
-            context["results"] = context_results
-            context["index"] = index + 1
-            adapter = self._ensure_transport_adapter(self._selected_node_id() or 0)
-            if context["index"] >= len(definitions):
-                self._append_log(f"[Mechanical] {context.get('label')} completed.")
-                self._clear_busy()
+            pending.results = list(pending.results or [])
+            pending.results.append((definition.name, True, "", actual_text))
+            pending.index = index + 1
+            adapter = self._ensure_transport_adapter(pending.node_id)
+            if pending.index >= len(definitions):
+                self._append_log(f"[Mechanical] {self._parameter_label(pending)} completed.")
+                self._clear_pending_request(family="parameter", action="read")
                 return
             if adapter is not None:
                 self._send_next_parameter_read(adapter)
             return
 
-        requests = list(context.get("requests", []))
-        index = int(context.get("index", 0))
+        requests = list(pending.requests or [])
+        index = int(pending.index)
         if index >= len(requests):
             return
         request = requests[index]
@@ -1024,16 +1149,18 @@ class MechanicalPage(BaseWorkspacePage):
             return
         self._simple_request_timer.stop()
         actual_text = definition.format_actual(actual_value, request.expected_text)
-        if kind == "parameter_write":
+        normalized_expected_value = request.expected_value
+        normalized_actual_value = actual_value
+        if pending.action == "write":
             self._append_log(
                 f"[Mechanical] {definition.label} write ACK: {self._hex_payload(payload)}."
             )
-            context["index"] = index + 1
-            adapter = self._ensure_transport_adapter(self._selected_node_id() or 0)
-            if context["index"] >= len(requests):
-                self._append_log(f"[Mechanical] {context.get('label')} write ACKs completed.")
-                context["kind"] = "parameter_verify_after_write"
-                context["index"] = 0
+            pending.index = index + 1
+            adapter = self._ensure_transport_adapter(pending.node_id)
+            if pending.index >= len(requests):
+                self._append_log(f"[Mechanical] {self._parameter_label(pending)} write ACKs completed.")
+                pending.action = "verify_after_write"
+                pending.index = 0
                 if adapter is not None:
                     self._send_next_parameter_verify(adapter)
                 return
@@ -1041,27 +1168,20 @@ class MechanicalPage(BaseWorkspacePage):
                 self._send_next_parameter_write(adapter)
             return
 
-        normalized_expected_value = request.expected_value
-        normalized_actual_value = actual_value
         if definition.parse_expected is not None:
             try:
                 normalized_actual_value = definition.parse_expected(actual_text)
             except Exception:
                 normalized_actual_value = actual_value
-        passed = definition.compare(
-            normalized_expected_value,
-            request.expected_text,
-            normalized_actual_value,
-            actual_text,
-        )
+        passed = definition.compare(normalized_expected_value, request.expected_text, normalized_actual_value, actual_text)
         self._parameter_actual_texts[definition.name] = actual_text
         self._apply_parameter_actual_text(definition.name, actual_text)
         self._append_log(
             f"[Mechanical] {definition.label}: requested {request.expected_text}, read-back {actual_text}, "
             f"{'PASS' if passed else 'FAIL'}."
         )
-        context_results = list(context.get("results", []))
-        context_results.append(
+        pending.results = list(pending.results or [])
+        pending.results.append(
             ParameterVerificationResult(
                 definition=definition,
                 expected_text=request.expected_text,
@@ -1074,17 +1194,17 @@ class MechanicalPage(BaseWorkspacePage):
                 ),
             )
         )
-        context["results"] = context_results
-        context["index"] = index + 1
-        adapter = self._ensure_transport_adapter(self._selected_node_id() or 0)
-        if context["index"] >= len(requests):
-            all_passed = all(result.passed for result in context_results if isinstance(result, ParameterVerificationResult))
-            if all_passed and context.get("enable_eeprom"):
+        pending.index = index + 1
+        adapter = self._ensure_transport_adapter(pending.node_id)
+        if pending.index >= len(requests):
+            all_passed = all(result.passed for result in (pending.results or []) if isinstance(result, ParameterVerificationResult))
+            if all_passed and pending.enable_eeprom:
                 self._persistent_write_pending = True
+                self.save_to_eeprom_button.setEnabled(self._has_supported_live_node())
             self._append_log(
-                f"[Mechanical] {context.get('label')} {'completed' if all_passed else 'completed with verification failures'}."
+                f"[Mechanical] {self._parameter_label(pending)} {'completed' if all_passed else 'completed with verification failures'}."
             )
-            self._clear_busy()
+            self._clear_pending_request(family="parameter", action="verify_after_write")
             return
         if adapter is not None:
             self._send_next_parameter_verify(adapter)
@@ -1110,7 +1230,7 @@ class MechanicalPage(BaseWorkspacePage):
             self._append_log(f"[Mechanical] Read {side.upper()}FLAG failed: unexpected response {self._hex_payload(payload)}.")
             return
         selected_node_id = self._selected_node_id()
-        pending_node_id = self._pending_read.node_id if self._pending_read is not None else None
+        pending_node_id = self._pending_request.node_id if self._pending_request is not None else None
         if pending_node_id is None or selected_node_id != pending_node_id:
             self._append_log(f"[Mechanical] Ignored Read {side.upper()}FLAG RX for stale node context {pending_node_id!r}.")
             return
@@ -1122,118 +1242,143 @@ class MechanicalPage(BaseWorkspacePage):
         )
 
     def _handle_simple_request_timeout(self) -> None:
-        pending = self._pending_read
-        if pending is not None:
-            self._append_log(f"[Mechanical] {pending.name} timed out waiting for Node {pending.node_id:02d}.")
-            self._pending_read = None
-            self._clear_busy()
+        pending = self._pending_request
+        if pending is None:
             return
-        context = self._busy_context or {}
-        if context.get("kind") in {"parameter_read", "parameter_write", "parameter_verify_after_write"}:
-            label = str(context.get("label", "Parameter operation"))
+        if pending.family == "simple_read":
+            self._append_log(f"[Mechanical] {pending.action} timed out waiting for Node {pending.node_id:02d}.")
+            self._clear_pending_request(family="simple_read", action=pending.action)
+            return
+        if pending.family == "parameter":
+            label = self._parameter_label(pending)
             self._append_log(f"[Mechanical] {label} timed out waiting for a response.")
-        self._clear_busy()
+            self._clear_pending_request(family="parameter", action=pending.action)
 
     def _send_next_parameter_read(self, adapter: FunctionalTransportAdapter) -> None:
-        context = self._busy_context or {}
-        definitions = list(context.get("definitions", []))
-        index = int(context.get("index", 0))
+        pending = self._pending_request
+        if pending is None or pending.family != "parameter":
+            return
+        definitions = list(pending.definitions or [])
+        index = int(pending.index)
         if index >= len(definitions):
-            self._clear_busy()
+            self._clear_pending_request(family="parameter")
             return
         definition = definitions[index]
         payload = definition.build_read_command() if definition.build_read_command is not None else []
         if not payload:
             self._append_log(f"[Mechanical] {definition.label} read is unavailable.")
-            context["index"] = index + 1
+            pending.index = index + 1
             self._send_next_parameter_read(adapter)
             return
         adapter.send(payload)
         self._simple_request_timer.start(UUID_VERIFY_TIMEOUT_MS)
 
     def _send_next_parameter_write(self, adapter: FunctionalTransportAdapter) -> None:
-        context = self._busy_context or {}
-        requests = list(context.get("requests", []))
-        index = int(context.get("index", 0))
+        pending = self._pending_request
+        if pending is None or pending.family != "parameter":
+            return
+        requests = list(pending.requests or [])
+        index = int(pending.index)
         if index >= len(requests):
-            self._clear_busy()
+            self._clear_pending_request(family="parameter")
             return
         request = requests[index]
         definition = request.definition
         payload = definition.build_write_command(request.expected_value) if definition.build_write_command is not None else []
         if not payload:
             self._append_log(f"[Mechanical] {definition.label} write is unavailable.")
-            self._clear_busy()
+            self._clear_pending_request(family="parameter")
             return
         adapter.send(payload)
         self._simple_request_timer.start(UUID_VERIFY_TIMEOUT_MS)
 
     def _send_next_parameter_verify(self, adapter: FunctionalTransportAdapter) -> None:
-        context = self._busy_context or {}
-        requests = list(context.get("requests", []))
-        index = int(context.get("index", 0))
+        pending = self._pending_request
+        if pending is None or pending.family != "parameter":
+            return
+        requests = list(pending.requests or [])
+        index = int(pending.index)
         if index >= len(requests):
-            self._clear_busy()
+            self._clear_pending_request(family="parameter")
             return
         request = requests[index]
         definition = request.definition
         payload = definition.build_read_command() if definition.build_read_command is not None else []
         if not payload:
             self._append_log(f"[Mechanical] {definition.label} read-back is unavailable.")
-            self._clear_busy()
+            self._clear_pending_request(family="parameter")
             return
         adapter.send(payload)
         self._simple_request_timer.start(UUID_VERIFY_TIMEOUT_MS)
 
-    def _start_parameter_read(self, label: str, definitions: list[Any]) -> None:
-        if self._busy:
-            self._append_log(f"[Mechanical] {label} ignored: another request is already in progress.")
+    def _start_parameter_read(
+        self,
+        label: str,
+        definitions: list[Any],
+        *,
+        button: QPushButton,
+        pending_button_text: str,
+    ) -> None:
+        if self._pending_request is not None:
+            self._append_log("Another Mechanical request is still pending.")
             return
         if not self._has_supported_live_node():
             self._append_log(f"[Mechanical] {label} failed: no valid connected Mechanical node is selected.")
-            self._update_control_states()
             return
         node_id = self._selected_node_id()
         adapter = self._ensure_transport_adapter(node_id) if node_id is not None else None
         if adapter is None:
             self._append_log(f"[Mechanical] {label} failed: serial transport is unavailable.")
-            self._update_control_states()
             return
-        self._set_busy(
-            {
-                "kind": "parameter_read",
-                "label": label,
-                "definitions": definitions,
-                "index": 0,
-                "results": [],
-            },
+        self._set_pending_request(
+            _PendingMechanicalRequest(
+                family="parameter",
+                action="read",
+                node_id=int(node_id),
+                timeout_owner=label,
+                button=button,
+                idle_button_text=button.text(),
+                pending_button_text=pending_button_text,
+                definitions=list(definitions),
+                results=[],
+            ),
             message=f"[Mechanical] {label} started.",
         )
         self._send_next_parameter_read(adapter)
 
-    def _start_parameter_write(self, label: str, requests: list[ParameterRequest], *, enable_eeprom: bool) -> None:
-        if self._busy:
-            self._append_log(f"[Mechanical] {label} ignored: another request is already in progress.")
+    def _start_parameter_write(
+        self,
+        label: str,
+        requests: list[ParameterRequest],
+        *,
+        enable_eeprom: bool,
+        button: QPushButton,
+        pending_button_text: str,
+    ) -> None:
+        if self._pending_request is not None:
+            self._append_log("Another Mechanical request is still pending.")
             return
         if not self._has_supported_live_node():
             self._append_log(f"[Mechanical] {label} failed: no valid connected Mechanical node is selected.")
-            self._update_control_states()
             return
         node_id = self._selected_node_id()
         adapter = self._ensure_transport_adapter(node_id) if node_id is not None else None
         if adapter is None:
             self._append_log(f"[Mechanical] {label} failed: serial transport is unavailable.")
-            self._update_control_states()
             return
-        self._set_busy(
-            {
-                "kind": "parameter_write",
-                "label": label,
-                "requests": requests,
-                "enable_eeprom": enable_eeprom,
-                "index": 0,
-                "results": [],
-            },
+        self._set_pending_request(
+            _PendingMechanicalRequest(
+                family="parameter",
+                action="write",
+                node_id=int(node_id),
+                timeout_owner=label,
+                button=button,
+                idle_button_text=button.text(),
+                pending_button_text=pending_button_text,
+                requests=list(requests),
+                results=[],
+                enable_eeprom=enable_eeprom,
+            ),
             message=f"[Mechanical] {label} started.",
         )
         self._send_next_parameter_write(adapter)
@@ -1253,10 +1398,8 @@ class MechanicalPage(BaseWorkspacePage):
         self._append_log(f"[Mechanical] {message}")
         if success:
             self._persistent_write_pending = False
-        if (self._busy_context or {}).get("kind") == "eeprom_save":
-            self._clear_busy()
-        else:
-            self._update_control_states()
+        if self._pending_request is not None and self._pending_request.family == "eeprom":
+            self._clear_pending_request(family="eeprom", action="save")
 
     def _build_pid_requests(self) -> list[ParameterRequest]:
         return [
@@ -1333,12 +1476,17 @@ class MechanicalPage(BaseWorkspacePage):
     def _reset_sensor_state(self) -> None:
         self._sensor_state_node_id = self._selected_node_id()
         self._sensor_state_cache = {"left": None, "right": None}
+        self._sensor_interrupt_node_id = self._selected_node_id()
+        self._sensor_interrupt_cache = {"left": False, "right": False}
 
     def _render_sensor_state(self) -> None:
         selected_node_id = self._selected_node_id()
         if self._sensor_state_node_id != selected_node_id:
             self._sensor_state_cache = {"left": None, "right": None}
             self._sensor_state_node_id = selected_node_id
+        if self._sensor_interrupt_node_id != selected_node_id:
+            self._sensor_interrupt_cache = {"left": False, "right": False}
+            self._sensor_interrupt_node_id = selected_node_id
         self._apply_sensor_value("left", self.left_flag_led, self.left_flag_state_value, self.left_flag_setting_selector)
         self._apply_sensor_value("right", self.right_flag_led, self.right_flag_state_value, self.right_flag_setting_selector)
 
@@ -1350,23 +1498,72 @@ class MechanicalPage(BaseWorkspacePage):
         setting_selector: QComboBox,
     ) -> None:
         raw_value = self._sensor_state_cache.get(side)
-        sensor_state = self._sensor_state_from_raw(raw_value)
+        sensor_state = self._sensor_display_from_raw(raw_value)
+        led_state = self._sensor_led_state(side)
         state_value.setText(sensor_state["text"])
-        led.setStyleSheet(f"border-radius: 6px; background: {sensor_state['color']};")
+        led.setStyleSheet(f"border-radius: 6px; background: {led_state['color']};")
         if raw_value is not None and str(raw_value) in {"1", "9", "11"}:
             setting_selector.setCurrentText(str(raw_value))
 
     @staticmethod
-    def _sensor_state_from_raw(raw_value: int | None) -> dict[str, Any]:
+    def _sensor_display_from_raw(raw_value: int | None) -> dict[str, Any]:
         if raw_value is None:
-            return {"text": "unknown", "color": "#777777", "active": False}
-        flags = decode_sensor_flags(raw_value)
-        is_active = bool(flags["send_response"] and flags["stop_motor"])
+            return {"text": "unknown"}
+        return {"text": f"0x{int(raw_value) & 0xFF:02X}"}
+
+    def _sensor_led_state(self, side: str) -> dict[str, Any]:
+        is_active = bool(self._sensor_interrupt_cache.get(side, False))
         return {
-            "text": f"0x{int(raw_value) & 0xFF:02X}",
             "color": "#F39C12" if is_active else "#777777",
             "active": is_active,
         }
+
+    def _attach_runtime_packet_listener(self) -> None:
+        runtime_window = self._bridge.get_runtime_window(create_if_missing=False)
+        if runtime_window is self._runtime_packet_window:
+            return
+        if self._runtime_packet_window is not None:
+            try:
+                self._runtime_packet_window.packet_received.disconnect(self._handle_runtime_packet_event)
+            except (TypeError, RuntimeError):
+                pass
+        self._runtime_packet_window = runtime_window
+        if runtime_window is not None and hasattr(runtime_window, "packet_received"):
+            runtime_window.packet_received.connect(self._handle_runtime_packet_event)
+
+    def _handle_runtime_packet_event(self, packet: object) -> None:
+        if not isinstance(packet, dict):
+            return
+        if packet.get("type") != "can_over_uart":
+            return
+        selected_node_id = self._selected_node_id()
+        sender = packet.get("sender")
+        if selected_node_id is None or sender is None or int(sender) != selected_node_id:
+            return
+        key, value = decode_command(int(packet.get("cmd", 0)) & 0xFF, list(packet.get("params") or []))
+        if key != "tpos_status" or not isinstance(value, dict):
+            return
+        event = value.get("event")
+        if event == "L":
+            self._set_sensor_interrupt_state("left", True)
+        elif event == "R":
+            self._set_sensor_interrupt_state("right", True)
+        elif event == "Z":
+            cleared_by = value.get("by")
+            if cleared_by == "L":
+                self._set_sensor_interrupt_state("left", False)
+            elif cleared_by == "R":
+                self._set_sensor_interrupt_state("right", False)
+
+    def _set_sensor_interrupt_state(self, side: str, is_active: bool) -> None:
+        self._sensor_interrupt_node_id = self._selected_node_id()
+        self._sensor_interrupt_cache[side] = bool(is_active)
+        self._render_sensor_state()
+
+    def _align_top_card_heights(self) -> None:
+        equal_height = max(self.node_header_panel.sizeHint().height(), self.sensor_panel.sizeHint().height())
+        self.node_header_panel.setMinimumHeight(equal_height)
+        self.sensor_panel.setMinimumHeight(equal_height)
 
     def _ensure_transport_adapter(self, node_id: int) -> FunctionalTransportAdapter | None:
         runtime_window = self._bridge.get_runtime_window(create_if_missing=True)
@@ -1410,34 +1607,82 @@ class MechanicalPage(BaseWorkspacePage):
             return None
         return str(entry.get("label", f"Node {entry.get('node_id', '?')}"))
 
-    def _set_busy(self, context: dict[str, Any], *, message: str) -> None:
-        self._busy = True
-        self._busy_context = context
-        self._append_log(message)
-        self._update_control_states()
+    def _parameter_label(self, pending: _PendingMechanicalRequest) -> str:
+        if pending.family != "parameter":
+            return pending.timeout_owner
+        requests = pending.requests or []
+        definitions = pending.definitions or []
+        if requests:
+            names = {request.definition.name for request in requests}
+        else:
+            names = {definition.name for definition in definitions}
+        if names == {"PWM"}:
+            return "Set PWM" if pending.action in {"write", "verify_after_write"} else "Read PWM"
+        if names == {"PID_P", "PID_I", "PID_D"}:
+            return "Write PID" if pending.action in {"write", "verify_after_write"} else "Read PID"
+        if names == {"RampDown_Slope", "RampDown_Step", "RampDown_MinVel", "RampDown_TargetOffset", "RampDown_Region"}:
+            return "Write Ramp Down" if pending.action in {"write", "verify_after_write"} else "Read Ramp Down"
+        return pending.timeout_owner
 
-    def _clear_busy(self) -> None:
+    def _set_pending_request(self, pending: _PendingMechanicalRequest, *, message: str) -> None:
+        self._pending_request = pending
+        self._apply_pending_button_state(pending, is_pending=True)
+        self._append_log(message)
+
+    def _clear_pending_request(self, *, family: str | None = None, action: str | None = None) -> None:
+        pending = self._pending_request
+        if pending is None:
+            return
+        if family is not None and pending.family != family:
+            return
+        if action is not None and pending.action != action:
+            return
         self._simple_request_timer.stop()
-        self._busy = False
-        self._busy_context = None
-        self._update_control_states()
+        self._apply_pending_button_state(pending, is_pending=False)
+        self._pending_request = None
 
     def _update_control_states(self) -> None:
         supported_live_node = self._has_supported_live_node()
-        command_enabled = supported_live_node
-        self.node_combo.setEnabled(not self._busy)
-        self.read_lflag_button.setEnabled(command_enabled)
-        self.read_rflag_button.setEnabled(command_enabled)
-        self.read_nodeconfig_button.setEnabled(command_enabled)
-        self.read_pwm_button.setEnabled(command_enabled)
-        self.selected_pwm_combo.setEnabled(command_enabled)
-        self.set_pwm_row_button.setEnabled(command_enabled)
-        self.get_position_button.setEnabled(command_enabled)
-        self.pid_read_button.setEnabled(command_enabled)
-        self.pid_write_button.setEnabled(command_enabled)
-        self.ramp_read_button.setEnabled(command_enabled)
-        self.ramp_write_button.setEnabled(command_enabled)
-        self.save_to_eeprom_button.setEnabled(command_enabled and self._persistent_write_pending and not self._busy)
+        pending_button = self._pending_request.button if self._pending_request is not None else None
+        if self.read_lflag_button is not pending_button:
+            self.read_lflag_button.setEnabled(supported_live_node)
+        if self.read_rflag_button is not pending_button:
+            self.read_rflag_button.setEnabled(supported_live_node)
+        if self.read_nodeconfig_button is not pending_button:
+            self.read_nodeconfig_button.setEnabled(supported_live_node)
+        if self.read_pwm_button is not pending_button:
+            self.read_pwm_button.setEnabled(supported_live_node)
+        self.selected_pwm_combo.setEnabled(supported_live_node)
+        if self.set_pwm_row_button is not pending_button:
+            self.set_pwm_row_button.setEnabled(supported_live_node)
+        if self.get_position_button is not pending_button:
+            self.get_position_button.setEnabled(supported_live_node)
+        if self.pid_read_button is not pending_button:
+            self.pid_read_button.setEnabled(supported_live_node)
+        if self.pid_write_button is not pending_button:
+            self.pid_write_button.setEnabled(supported_live_node)
+        if self.ramp_read_button is not pending_button:
+            self.ramp_read_button.setEnabled(supported_live_node)
+        if self.ramp_write_button is not pending_button:
+            self.ramp_write_button.setEnabled(supported_live_node)
+        if self.save_to_eeprom_button is not pending_button:
+            self.save_to_eeprom_button.setEnabled(supported_live_node and self._persistent_write_pending)
+
+    def _apply_pending_button_state(self, pending: _PendingMechanicalRequest, *, is_pending: bool) -> None:
+        button = pending.button
+        if button is None:
+            return
+        if is_pending:
+            if pending.pending_button_text:
+                button.setText(pending.pending_button_text)
+            button.setEnabled(False)
+            return
+        if pending.idle_button_text is not None:
+            button.setText(pending.idle_button_text)
+        if button is self.save_to_eeprom_button:
+            button.setEnabled(self._has_supported_live_node() and self._persistent_write_pending)
+        else:
+            button.setEnabled(self._has_supported_live_node())
 
     @staticmethod
     def _hex_payload(payload: list[int]) -> str:
@@ -1543,25 +1788,42 @@ class MechanicalPage(BaseWorkspacePage):
         )
 
     @staticmethod
-    def _build_sensor_row(title: str, led: QLabel, state_value: QLineEdit, setting_selector: QComboBox) -> QWidget:
+    def _build_sensor_row(
+        title: str,
+        led: QLabel,
+        state_value: QLabel,
+        setting_selector: QComboBox,
+        write_button: QPushButton,
+        *,
+        row_object_name: str,
+    ) -> QWidget:
         row_widget = QWidget()
+        row_widget.setObjectName(row_object_name)
         row_layout = QGridLayout(row_widget)
         row_layout.setContentsMargins(0, 0, 0, 0)
-        row_layout.setHorizontalSpacing(8)
-        row_layout.setVerticalSpacing(0)
+        row_layout.setHorizontalSpacing(6)
+        row_layout.setVerticalSpacing(4)
         title_label = QLabel(title)
-        title_label.setMinimumWidth(132)
+        title_label.setObjectName(f"{row_object_name}Title")
+        title_label.setMinimumWidth(92)
+        title_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
         state_label = QLabel("State:")
-        state_label.setMinimumWidth(42)
+        state_label.setObjectName(f"{row_object_name}StateLabel")
+        state_label.setMinimumWidth(34)
         setting_label = QLabel("Flag Setting:")
-        setting_label.setMinimumWidth(78)
-        row_layout.addWidget(led, 0, 0, Qt.AlignmentFlag.AlignVCenter)
-        row_layout.addWidget(title_label, 0, 1, Qt.AlignmentFlag.AlignVCenter)
-        row_layout.addWidget(state_label, 0, 2, Qt.AlignmentFlag.AlignVCenter)
-        row_layout.addWidget(state_value, 0, 3, Qt.AlignmentFlag.AlignVCenter)
-        row_layout.addWidget(setting_label, 0, 4, Qt.AlignmentFlag.AlignVCenter)
-        row_layout.addWidget(setting_selector, 0, 5, Qt.AlignmentFlag.AlignVCenter)
-        row_layout.setColumnStretch(6, 1)
+        setting_label.setObjectName(f"{row_object_name}SettingLabel")
+        setting_label.setMinimumWidth(68)
+        write_button.setMinimumWidth(max(write_button.minimumWidth(), 62))
+        write_button.setMaximumWidth(74)
+        write_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        row_layout.addWidget(led, 0, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        row_layout.addWidget(title_label, 0, 1, 1, 5, Qt.AlignmentFlag.AlignVCenter)
+        row_layout.addWidget(state_label, 1, 1, Qt.AlignmentFlag.AlignVCenter)
+        row_layout.addWidget(state_value, 1, 2, Qt.AlignmentFlag.AlignVCenter)
+        row_layout.addWidget(setting_label, 1, 3, Qt.AlignmentFlag.AlignVCenter)
+        row_layout.addWidget(setting_selector, 1, 4, Qt.AlignmentFlag.AlignVCenter)
+        row_layout.addWidget(write_button, 1, 5, Qt.AlignmentFlag.AlignVCenter)
+        row_layout.setColumnStretch(4, 1)
         return row_widget
 
     @staticmethod
@@ -1607,6 +1869,24 @@ class MechanicalPage(BaseWorkspacePage):
         line.setMinimumWidth(width)
         line.setMaximumWidth(width + 24)
         return line
+
+    @staticmethod
+    def _readonly_display_label(text: str, object_name: str, *, width: int) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName(object_name)
+        label.setMinimumWidth(width)
+        label.setMaximumWidth(width + 28)
+        label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        label.setStyleSheet(
+            "background: #F6F8FB;"
+            " color: #463A33;"
+            " border: 1px solid #DCE3EC;"
+            " border-radius: 12px;"
+            " padding: 6px 10px;"
+        )
+        return label
 
     @staticmethod
     def _editable_line(text: str, object_name: str, *, width: int) -> QLineEdit:

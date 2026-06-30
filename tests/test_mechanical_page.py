@@ -114,6 +114,19 @@ class MechanicalPageTests(unittest.TestCase):
         self._app.processEvents()
         return page, runtime_window
 
+    def _build_center_viewport_page(self, *, connected: bool = False) -> tuple[MechanicalPage, _FakeRuntimeWindow | None]:
+        runtime_window = _FakeRuntimeWindow(connected=True) if connected else None
+        page = MechanicalPage(_FakeBridge(runtime_window))
+        page.resize(1070, 940)
+        page.show()
+        self._app.processEvents()
+        if connected:
+            node_combo = page.findChild(QComboBox, "MechanicalNodeCombo")
+            assert node_combo is not None
+            node_combo.setCurrentIndex(5)
+            self._app.processEvents()
+        return page, runtime_window
+
     def test_mechanical_page_renders_without_qt_warnings_and_replaces_placeholder_sections(self) -> None:
         messages: list[str] = []
 
@@ -146,6 +159,8 @@ class MechanicalPageTests(unittest.TestCase):
         self.assertIsNotNone(page.findChild(QWidget, "MechanicalPidPanel"))
         self.assertIsNotNone(page.findChild(QWidget, "MechanicalRampPanel"))
         self.assertIn("Mechanical Log", labels)
+        self.assertIsNone(page.findChild(QLabel, "PageTitle"))
+        self.assertIsNone(page.findChild(QLabel, "PageSubtitle"))
 
     def test_mechanical_page_exposes_required_sections_and_local_control_states(self) -> None:
         bridge = _FakeBridge()
@@ -248,9 +263,10 @@ class MechanicalPageTests(unittest.TestCase):
         button = page.findChild(QPushButton, "MechanicalOpenMotorMovementControlButton")
         assert button is not None
         self.assertEqual(button.text(), "Motor Movement Control")
-        self.assertGreaterEqual(button.minimumWidth(), 250)
-        self.assertGreaterEqual(button.width() or button.sizeHint().width(), button.minimumWidth())
         self.assertTrue(button.isVisible())
+        sensor_panel = page.findChild(QWidget, "MechanicalSensorPanel")
+        assert sensor_panel is not None
+        self.assertTrue(sensor_panel.isAncestorOf(button))
 
         log_output = page.findChild(type(page.log_output), "MechanicalLogOutput")
         assert log_output is not None
@@ -266,7 +282,6 @@ class MechanicalPageTests(unittest.TestCase):
         self.assertIn("Stop Motor", button_texts)
 
         node_panel = page.findChild(QWidget, "MechanicalNodeHeaderPanel")
-        sensor_panel = page.findChild(QWidget, "MechanicalSensorPanel")
         config_panel = page.findChild(QWidget, "MechanicalNodeConfigPanel")
         velocity_panel = page.findChild(QWidget, "MechanicalVelocityPanel")
         ramp_panel = page.findChild(QWidget, "MechanicalRampPanel")
@@ -294,6 +309,40 @@ class MechanicalPageTests(unittest.TestCase):
         self.assertTrue(node_panel.isAncestorOf(config_panel))
         self.assertGreaterEqual(log_panel.width(), velocity_panel.width())
 
+    def test_sensor_status_header_keeps_button_inside_card_and_aligned_with_node_header(self) -> None:
+        page = MechanicalPage(_FakeBridge())
+        page.resize(1440, 980)
+        page.show()
+        self._app.processEvents()
+
+        node_panel = page.findChild(QWidget, "MechanicalNodeHeaderPanel")
+        sensor_panel = page.findChild(QWidget, "MechanicalSensorPanel")
+        button = page.findChild(QPushButton, "MechanicalOpenMotorMovementControlButton")
+        header_row = page.findChild(QWidget, "MechanicalSensorHeaderRow")
+        assert node_panel is not None
+        assert sensor_panel is not None
+        assert button is not None
+        assert header_row is not None
+
+        node_title = next(
+            label for label in page.findChildren(QLabel)
+            if label.text() == "Node Header" and node_panel.isAncestorOf(label)
+        )
+        sensor_title = next(
+            label for label in page.findChildren(QLabel)
+            if label.text() == "Sensor Status" and sensor_panel.isAncestorOf(label)
+        )
+
+        self.assertTrue(sensor_panel.isAncestorOf(button))
+        self.assertTrue(sensor_panel.isAncestorOf(header_row))
+        self.assertLess(abs(sensor_title.mapTo(page, QPoint(0, 0)).y() - node_title.mapTo(page, QPoint(0, 0)).y()), 4)
+        self.assertLess(abs(sensor_title.mapTo(page, QPoint(0, 0)).y() - button.mapTo(page, QPoint(0, 0)).y()), 12)
+        self.assertGreater(button.mapTo(page, QPoint(0, 0)).x(), sensor_title.mapTo(page, QPoint(0, 0)).x())
+        sensor_right = sensor_panel.mapTo(page, QPoint(0, 0)).x() + sensor_panel.width()
+        button_right = button.mapTo(page, QPoint(0, 0)).x() + button.width()
+        self.assertLessEqual(button_right, sensor_right + 1)
+        self.assertLessEqual(abs(node_panel.height() - sensor_panel.height()), 1)
+
         node_combo = page.findChild(QComboBox, "MechanicalNodeCombo")
         assert node_combo is not None
         self.assertEqual(node_combo.count(), 14)
@@ -309,6 +358,8 @@ class MechanicalPageTests(unittest.TestCase):
         assert right_flag_selector is not None
         self.assertEqual([left_flag_selector.itemText(i) for i in range(left_flag_selector.count())], ["1", "9", "11"])
         self.assertEqual([right_flag_selector.itemText(i) for i in range(right_flag_selector.count())], ["1", "9", "11"])
+        self.assertIsNotNone(page.findChild(QPushButton, "MechanicalLeftFlagWriteButton"))
+        self.assertIsNotNone(page.findChild(QPushButton, "MechanicalRightFlagWriteButton"))
 
         pwm_radio = page.findChild(QRadioButton, "MechanicalPwmModeRadio")
         rpm_radio = page.findChild(QRadioButton, "MechanicalRpmModeRadio")
@@ -345,6 +396,245 @@ class MechanicalPageTests(unittest.TestCase):
         self._app.processEvents()
         self.assertEqual(axis_value.text(), "RZ")
         self.assertEqual(page.findChild(QLineEdit, "MechanicalCurrentNodeconfigValue").text(), "0010")
+
+    def test_node_header_layout_uses_required_vertical_order(self) -> None:
+        page = MechanicalPage(_FakeBridge())
+        page.resize(1440, 980)
+        page.show()
+        self._app.processEvents()
+
+        node_combo = page.findChild(QComboBox, "MechanicalNodeCombo")
+        axis_value = page.findChild(QLineEdit, "MechanicalAxisTypeValue")
+        current_nodeconfig = page.findChild(QLineEdit, "MechanicalCurrentNodeconfigValue")
+        flag_selector = page.findChild(QComboBox, "MechanicalFlagSelector")
+        polarity_selector = page.findChild(QComboBox, "MechanicalPolaritySelector")
+        read_button = page.findChild(QPushButton, "MechanicalReadNodeConfigButton")
+        write_button = page.findChild(QPushButton, "MechanicalWriteNodeConfigButton")
+        assert node_combo is not None
+        assert axis_value is not None
+        assert current_nodeconfig is not None
+        assert flag_selector is not None
+        assert polarity_selector is not None
+        assert read_button is not None
+        assert write_button is not None
+
+        node_pos = node_combo.mapTo(page, QPoint(0, 0))
+        axis_pos = axis_value.mapTo(page, QPoint(0, 0))
+        config_pos = current_nodeconfig.mapTo(page, QPoint(0, 0))
+        flag_pos = flag_selector.mapTo(page, QPoint(0, 0))
+        polarity_pos = polarity_selector.mapTo(page, QPoint(0, 0))
+        read_pos = read_button.mapTo(page, QPoint(0, 0))
+        write_pos = write_button.mapTo(page, QPoint(0, 0))
+
+        self.assertLess(abs(node_pos.y() - axis_pos.y()), 24)
+        self.assertGreater(flag_pos.y(), config_pos.y())
+        self.assertGreater(polarity_pos.y(), flag_pos.y())
+        self.assertGreater(read_pos.y(), polarity_pos.y())
+        self.assertLess(abs(read_pos.y() - write_pos.y()), 20)
+
+    def test_sensor_status_rows_show_state_selector_and_write_controls_without_clipping(self) -> None:
+        page = MechanicalPage(_FakeBridge())
+        page.resize(1440, 980)
+        page.show()
+        self._app.processEvents()
+
+        left_row = page.findChild(QWidget, "MechanicalLeftFlagRow")
+        right_row = page.findChild(QWidget, "MechanicalRightFlagRow")
+        left_value = page.findChild(QLabel, "MechanicalLeftFlagStateValue")
+        right_value = page.findChild(QLabel, "MechanicalRightFlagStateValue")
+        left_selector = page.findChild(QComboBox, "MechanicalLeftFlagSettingSelector")
+        right_selector = page.findChild(QComboBox, "MechanicalRightFlagSettingSelector")
+        left_write = page.findChild(QPushButton, "MechanicalLeftFlagWriteButton")
+        right_write = page.findChild(QPushButton, "MechanicalRightFlagWriteButton")
+        assert left_row is not None
+        assert right_row is not None
+        assert left_value is not None
+        assert right_value is not None
+        assert left_selector is not None
+        assert right_selector is not None
+        assert left_write is not None
+        assert right_write is not None
+
+        for widget, row in (
+            (left_value, left_row),
+            (right_value, right_row),
+            (left_selector, left_row),
+            (right_selector, right_row),
+            (left_write, left_row),
+            (right_write, right_row),
+        ):
+            self.assertTrue(row.isAncestorOf(widget))
+            self.assertGreater(widget.width() or widget.sizeHint().width(), 0)
+
+    def test_sensor_status_rows_use_two_line_structure(self) -> None:
+        page = MechanicalPage(_FakeBridge())
+        page.resize(1440, 980)
+        page.show()
+        self._app.processEvents()
+
+        for prefix in ("Left", "Right"):
+            row = page.findChild(QWidget, f"Mechanical{prefix}FlagRow")
+            led = page.findChild(QLabel, f"Mechanical{prefix}FlagLed")
+            title = page.findChild(QLabel, f"Mechanical{prefix}FlagRowTitle")
+            state_label = page.findChild(QLabel, f"Mechanical{prefix}FlagRowStateLabel")
+            setting_label = page.findChild(QLabel, f"Mechanical{prefix}FlagRowSettingLabel")
+            selector = page.findChild(QComboBox, f"Mechanical{prefix}FlagSettingSelector")
+            write_button = page.findChild(QPushButton, f"Mechanical{prefix}FlagWriteButton")
+            assert row is not None
+            assert led is not None
+            assert title is not None
+            assert state_label is not None
+            assert setting_label is not None
+            assert selector is not None
+            assert write_button is not None
+
+            title_pos = title.mapTo(page, QPoint(0, 0))
+            led_pos = led.mapTo(page, QPoint(0, 0))
+            state_pos = state_label.mapTo(page, QPoint(0, 0))
+            setting_pos = setting_label.mapTo(page, QPoint(0, 0))
+            selector_pos = selector.mapTo(page, QPoint(0, 0))
+            write_pos = write_button.mapTo(page, QPoint(0, 0))
+
+            self.assertLess(led_pos.y(), state_pos.y())
+            self.assertLess(title_pos.y(), state_pos.y())
+            self.assertGreater(state_pos.y(), title_pos.y())
+            self.assertGreater(setting_pos.y(), title_pos.y())
+            self.assertGreater(selector_pos.y(), title_pos.y())
+            self.assertGreater(write_pos.y(), title_pos.y())
+            self.assertGreater(state_pos.x(), led_pos.x())
+
+    def test_clicking_node_header_read_does_not_focus_or_highlight_sensor_status_display(self) -> None:
+        page, runtime_window = self._build_connected_page()
+
+        read_lflag_button = page.findChild(QPushButton, "MechanicalReadLFlagButton")
+        read_nodeconfig_button = page.findChild(QPushButton, "MechanicalReadNodeConfigButton")
+        left_value = page.findChild(QLabel, "MechanicalLeftFlagStateValue")
+        assert read_lflag_button is not None
+        assert read_nodeconfig_button is not None
+        assert left_value is not None
+
+        read_lflag_button.click()
+        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": 0xC9, "params": [0x3A, 0x09]})
+        self._app.processEvents()
+        self.assertEqual(left_value.text(), "0x09")
+        self.assertEqual(left_value.focusPolicy(), left_value.focusPolicy().NoFocus)
+
+        read_nodeconfig_button.click()
+        self._app.processEvents()
+        self.assertFalse(left_value.hasFocus())
+        self.assertIsNot(page.focusWidget(), left_value)
+        self.assertEqual(left_value.text(), "0x09")
+
+    def test_mechanical_top_row_and_lower_utility_row_stay_side_by_side(self) -> None:
+        page = MechanicalPage(_FakeBridge())
+        page.resize(1440, 980)
+        page.show()
+        self._app.processEvents()
+
+        node_panel = page.findChild(QWidget, "MechanicalNodeHeaderPanel")
+        sensor_panel = page.findChild(QWidget, "MechanicalSensorPanel")
+        velocity_panel = page.findChild(QWidget, "MechanicalVelocityPanel")
+        ramp_panel = page.findChild(QWidget, "MechanicalRampPanel")
+        pid_panel = page.findChild(QWidget, "MechanicalPidPanel")
+        log_panel = page.findChild(QWidget, "MechanicalLogPanel")
+        assert node_panel is not None
+        assert sensor_panel is not None
+        assert velocity_panel is not None
+        assert ramp_panel is not None
+        assert pid_panel is not None
+        assert log_panel is not None
+
+        node_pos = node_panel.mapTo(page, QPoint(0, 0))
+        sensor_pos = sensor_panel.mapTo(page, QPoint(0, 0))
+        velocity_pos = velocity_panel.mapTo(page, QPoint(0, 0))
+        ramp_pos = ramp_panel.mapTo(page, QPoint(0, 0))
+        pid_pos = pid_panel.mapTo(page, QPoint(0, 0))
+        log_pos = log_panel.mapTo(page, QPoint(0, 0))
+
+        self.assertLess(abs(node_pos.y() - sensor_pos.y()), 20)
+        self.assertLess(abs(velocity_pos.y() - ramp_pos.y()), 20)
+        self.assertLess(abs(ramp_pos.y() - pid_pos.y()), 20)
+        self.assertGreater(log_pos.y(), velocity_pos.y())
+
+    def test_mechanical_layout_fits_center_viewport_without_horizontal_overflow(self) -> None:
+        page, _runtime_window = self._build_center_viewport_page()
+        viewport_width = page.viewport().width()
+
+        widgets = [
+            page.findChild(QWidget, "MechanicalNodeHeaderPanel"),
+            page.findChild(QWidget, "MechanicalSensorPanel"),
+            page.findChild(QWidget, "MechanicalVelocityPanel"),
+            page.findChild(QWidget, "MechanicalRampPanel"),
+            page.findChild(QWidget, "MechanicalPidPanel"),
+            page.findChild(QWidget, "MechanicalLogPanel"),
+        ]
+        for widget in widgets:
+            assert widget is not None
+            pos = widget.mapTo(page.viewport(), QPoint(0, 0))
+            self.assertGreaterEqual(pos.x(), 0)
+            self.assertLessEqual(pos.x() + widget.width(), viewport_width + 1, widget.objectName())
+
+    def test_sensor_status_controls_fit_within_card_bounds_at_center_viewport(self) -> None:
+        page, _runtime_window = self._build_center_viewport_page()
+        sensor_panel = page.findChild(QWidget, "MechanicalSensorPanel")
+        assert sensor_panel is not None
+        panel_pos = sensor_panel.mapTo(page.viewport(), QPoint(0, 0))
+        panel_right = panel_pos.x() + sensor_panel.width()
+
+        for object_name in (
+            "MechanicalOpenMotorMovementControlButton",
+            "MechanicalLeftFlagSettingSelector",
+            "MechanicalRightFlagSettingSelector",
+            "MechanicalLeftFlagWriteButton",
+            "MechanicalRightFlagWriteButton",
+        ):
+            widget = page.findChild(QWidget, object_name)
+            assert widget is not None
+            pos = widget.mapTo(page.viewport(), QPoint(0, 0))
+            self.assertLessEqual(pos.x() + widget.width(), panel_right + 1, object_name)
+
+    def test_lower_utility_cards_share_same_row_and_fit_viewport_at_center_width(self) -> None:
+        page, _runtime_window = self._build_center_viewport_page()
+        viewport_width = page.viewport().width()
+        velocity_panel = page.findChild(QWidget, "MechanicalVelocityPanel")
+        ramp_panel = page.findChild(QWidget, "MechanicalRampPanel")
+        pid_panel = page.findChild(QWidget, "MechanicalPidPanel")
+        assert velocity_panel is not None
+        assert ramp_panel is not None
+        assert pid_panel is not None
+
+        velocity_pos = velocity_panel.mapTo(page.viewport(), QPoint(0, 0))
+        ramp_pos = ramp_panel.mapTo(page.viewport(), QPoint(0, 0))
+        pid_pos = pid_panel.mapTo(page.viewport(), QPoint(0, 0))
+
+        self.assertLess(abs(velocity_pos.y() - ramp_pos.y()), 20)
+        self.assertLess(abs(ramp_pos.y() - pid_pos.y()), 20)
+        for widget, pos in ((velocity_panel, velocity_pos), (ramp_panel, ramp_pos), (pid_panel, pid_pos)):
+            self.assertLessEqual(pos.x() + widget.width(), viewport_width + 1, widget.objectName())
+
+    def test_velocity_controls_keep_label_value_action_alignment_at_center_width(self) -> None:
+        page, _runtime_window = self._build_center_viewport_page()
+        pwm_radio = page.findChild(QRadioButton, "MechanicalPwmModeRadio")
+        current_pwm = page.findChild(QLineEdit, "MechanicalCurrentPwmValue")
+        read_pwm = page.findChild(QPushButton, "MechanicalReadPwmButton")
+        selected_pwm = page.findChild(QComboBox, "MechanicalPwmSelectionCombo")
+        set_pwm = page.findChild(QPushButton, "MechanicalSetPwmRowButton")
+        assert pwm_radio is not None
+        assert current_pwm is not None
+        assert read_pwm is not None
+        assert selected_pwm is not None
+        assert set_pwm is not None
+
+        pwm_radio_pos = pwm_radio.mapTo(page.viewport(), QPoint(0, 0))
+        current_pwm_pos = current_pwm.mapTo(page.viewport(), QPoint(0, 0))
+        read_pwm_pos = read_pwm.mapTo(page.viewport(), QPoint(0, 0))
+        selected_pwm_pos = selected_pwm.mapTo(page.viewport(), QPoint(0, 0))
+        set_pwm_pos = set_pwm.mapTo(page.viewport(), QPoint(0, 0))
+
+        self.assertLess(abs(current_pwm_pos.x() - selected_pwm_pos.x()), 20)
+        self.assertLess(abs(read_pwm_pos.x() - set_pwm_pos.x()), 20)
+        self.assertLess(pwm_radio_pos.x(), current_pwm_pos.x())
+        self.assertLess(current_pwm_pos.x(), read_pwm_pos.x())
 
     def test_safe_reads_send_existing_commands_and_update_ui(self) -> None:
         page, runtime_window = self._build_connected_page()
@@ -384,13 +674,13 @@ class MechanicalPageTests(unittest.TestCase):
         self.assertEqual(runtime_window.backend_client.sent_commands[-1], (8, [0xC9, 0x3F]))
         runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": 0xC9, "params": [0x3A, 0x09]})
         self._app.processEvents()
-        self.assertEqual(page.findChild(QLineEdit, "MechanicalLeftFlagStateValue").text(), "0x09")
+        self.assertEqual(page.findChild(QLabel, "MechanicalLeftFlagStateValue").text(), "0x09")
 
         read_rflag_button.click()
         self.assertEqual(runtime_window.backend_client.sent_commands[-1], (8, [0xCA, 0x3F]))
         runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": 0xCA, "params": [0x3A, 0x0B]})
         self._app.processEvents()
-        self.assertEqual(page.findChild(QLineEdit, "MechanicalRightFlagStateValue").text(), "0x0B")
+        self.assertEqual(page.findChild(QLabel, "MechanicalRightFlagStateValue").text(), "0x0B")
 
     def test_wrong_node_packets_are_ignored_and_timeouts_are_logged(self) -> None:
         page, runtime_window = self._build_connected_page()
@@ -444,14 +734,156 @@ class MechanicalPageTests(unittest.TestCase):
         self.assertTrue(read_rflag_button.isEnabled())
         self.assertEqual(read_rflag_button.styleSheet(), before_style)
         self.assertIn("QPushButton:pressed", read_lflag_button.styleSheet())
+        self.assertNotIn("ignored: another request is already in progress", page.log_output.toPlainText())
+
+    def test_read_pwm_changes_only_its_local_pending_state(self) -> None:
+        page, runtime_window = self._build_connected_page()
+
+        read_pwm_button = page.findChild(QPushButton, "MechanicalReadPwmButton")
+        read_lflag_button = page.findChild(QPushButton, "MechanicalReadLFlagButton")
+        read_nodeconfig_button = page.findChild(QPushButton, "MechanicalReadNodeConfigButton")
+        save_button = page.findChild(QPushButton, "MechanicalSaveToEepromButton")
+        assert read_pwm_button is not None
+        assert read_lflag_button is not None
+        assert read_nodeconfig_button is not None
+        assert save_button is not None
+
+        before_lflag_style = read_lflag_button.styleSheet()
+        before_nodeconfig_style = read_nodeconfig_button.styleSheet()
+        before_save_style = save_button.styleSheet()
+        read_pwm_button.click()
+        self._app.processEvents()
+
+        pending = page._pending_request
+        assert pending is not None
+        self.assertEqual(pending.family, "parameter")
+        self.assertEqual(pending.action, "read")
+        self.assertEqual(runtime_window.backend_client.sent_commands[-1], (8, [0x85]))
+        self.assertFalse(read_pwm_button.isEnabled())
+        self.assertEqual(read_pwm_button.text(), "Reading...")
+        self.assertTrue(read_lflag_button.isEnabled())
+        self.assertTrue(read_nodeconfig_button.isEnabled())
+        self.assertEqual(read_lflag_button.styleSheet(), before_lflag_style)
+        self.assertEqual(read_nodeconfig_button.styleSheet(), before_nodeconfig_style)
+        self.assertEqual(save_button.styleSheet(), before_save_style)
+
+    def test_read_pwm_response_restores_only_read_pwm(self) -> None:
+        page, runtime_window = self._build_connected_page()
+
+        read_pwm_button = page.findChild(QPushButton, "MechanicalReadPwmButton")
+        read_lflag_button = page.findChild(QPushButton, "MechanicalReadLFlagButton")
+        assert read_pwm_button is not None
+        assert read_lflag_button is not None
+
+        read_pwm_button.click()
+        self._app.processEvents()
+        self.assertFalse(read_pwm_button.isEnabled())
+        self.assertTrue(read_lflag_button.isEnabled())
+
+        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": 0x85, "params": [0x00, 0x14]})
+        self._app.processEvents()
+
+        self.assertTrue(read_pwm_button.isEnabled())
+        self.assertEqual(read_pwm_button.text(), "Read PWM")
+        self.assertTrue(read_lflag_button.isEnabled())
+        self.assertEqual(page.findChild(QLineEdit, "MechanicalCurrentPwmValue").text(), "20")
+
+    def test_blocked_second_click_does_not_visually_alter_unrelated_controls(self) -> None:
+        page, runtime_window = self._build_connected_page()
+
+        read_lflag_button = page.findChild(QPushButton, "MechanicalReadLFlagButton")
+        read_rflag_button = page.findChild(QPushButton, "MechanicalReadRFlagButton")
+        pid_read_button = page.findChild(QPushButton, "MechanicalPidReadButton")
+        assert read_lflag_button is not None
+        assert read_rflag_button is not None
+        assert pid_read_button is not None
+
+        before_rflag_style = read_rflag_button.styleSheet()
+        before_pid_style = pid_read_button.styleSheet()
+        read_lflag_button.click()
+        self._app.processEvents()
+        command_count = len(runtime_window.backend_client.sent_commands)
+        read_rflag_button.click()
+        self._app.processEvents()
+
+        self.assertEqual(len(runtime_window.backend_client.sent_commands), command_count)
+        self.assertTrue(read_rflag_button.isEnabled())
+        self.assertTrue(pid_read_button.isEnabled())
+        self.assertEqual(read_rflag_button.styleSheet(), before_rflag_style)
+        self.assertEqual(pid_read_button.styleSheet(), before_pid_style)
+        self.assertIn("Another Mechanical request is still pending.", page.log_output.toPlainText())
+
+    def test_timeout_clears_only_matching_pending_action(self) -> None:
+        page, runtime_window = self._build_connected_page()
+
+        read_nodeconfig_button = page.findChild(QPushButton, "MechanicalReadNodeConfigButton")
+        read_rflag_button = page.findChild(QPushButton, "MechanicalReadRFlagButton")
+        left_value = page.findChild(QLabel, "MechanicalLeftFlagStateValue")
+        right_value = page.findChild(QLabel, "MechanicalRightFlagStateValue")
+        assert read_nodeconfig_button is not None
+        assert read_rflag_button is not None
+        assert left_value is not None
+        assert right_value is not None
+
+        page.read_lflag_button.click()
+        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": 0xC9, "params": [0x3A, 0x09]})
+        self._app.processEvents()
+        self.assertEqual(left_value.text(), "0x09")
+        self.assertEqual(right_value.text(), "unknown")
+
+        read_nodeconfig_button.click()
+        self._app.processEvents()
+        self.assertIsNotNone(page._pending_request)
+
+        page._handle_simple_request_timeout()
+        self._app.processEvents()
+
+        self.assertIsNone(page._pending_request)
+        self.assertTrue(read_nodeconfig_button.isEnabled())
+        self.assertEqual(read_nodeconfig_button.text(), "Read")
+        self.assertTrue(read_rflag_button.isEnabled())
+        self.assertEqual(left_value.text(), "0x09")
+        self.assertEqual(right_value.text(), "unknown")
+        self.assertIn("Read NODECONFIG timed out", page.log_output.toPlainText())
+
+    def test_read_lflag_does_not_alter_other_button_state_or_style(self) -> None:
+        page, _runtime_window = self._build_connected_page()
+
+        read_lflag_button = page.findChild(QPushButton, "MechanicalReadLFlagButton")
+        read_rflag_button = page.findChild(QPushButton, "MechanicalReadRFlagButton")
+        read_nodeconfig_button = page.findChild(QPushButton, "MechanicalReadNodeConfigButton")
+        pid_read_button = page.findChild(QPushButton, "MechanicalPidReadButton")
+        ramp_read_button = page.findChild(QPushButton, "MechanicalRampReadButton")
+        save_button = page.findChild(QPushButton, "MechanicalSaveToEepromButton")
+        assert read_lflag_button is not None
+        assert read_rflag_button is not None
+        assert read_nodeconfig_button is not None
+        assert pid_read_button is not None
+        assert ramp_read_button is not None
+        assert save_button is not None
+
+        before = {
+            read_rflag_button: (read_rflag_button.styleSheet(), read_rflag_button.isEnabled()),
+            read_nodeconfig_button: (read_nodeconfig_button.styleSheet(), read_nodeconfig_button.isEnabled()),
+            pid_read_button: (pid_read_button.styleSheet(), pid_read_button.isEnabled()),
+            ramp_read_button: (ramp_read_button.styleSheet(), ramp_read_button.isEnabled()),
+            save_button: (save_button.styleSheet(), save_button.isEnabled()),
+        }
+
+        read_lflag_button.click()
+        self._app.processEvents()
+
+        for button, (style, enabled) in before.items():
+            self.assertEqual(button.isEnabled(), enabled)
+            self.assertEqual(button.styleSheet(), style)
 
     def test_sensor_reads_keep_independent_left_and_right_state(self) -> None:
         page, runtime_window = self._build_connected_page()
 
         read_lflag_button = page.findChild(QPushButton, "MechanicalReadLFlagButton")
         read_rflag_button = page.findChild(QPushButton, "MechanicalReadRFlagButton")
-        left_value = page.findChild(QLineEdit, "MechanicalLeftFlagStateValue")
-        right_value = page.findChild(QLineEdit, "MechanicalRightFlagStateValue")
+        left_value = page.findChild(QLabel, "MechanicalLeftFlagStateValue")
+        right_value = page.findChild(QLabel, "MechanicalRightFlagStateValue")
         assert read_lflag_button is not None
         assert read_rflag_button is not None
         assert left_value is not None
@@ -474,8 +906,8 @@ class MechanicalPageTests(unittest.TestCase):
 
         read_lflag_button = page.findChild(QPushButton, "MechanicalReadLFlagButton")
         read_rflag_button = page.findChild(QPushButton, "MechanicalReadRFlagButton")
-        left_value = page.findChild(QLineEdit, "MechanicalLeftFlagStateValue")
-        right_value = page.findChild(QLineEdit, "MechanicalRightFlagStateValue")
+        left_value = page.findChild(QLabel, "MechanicalLeftFlagStateValue")
+        right_value = page.findChild(QLabel, "MechanicalRightFlagStateValue")
         assert read_lflag_button is not None
         assert read_rflag_button is not None
         assert left_value is not None
@@ -498,8 +930,8 @@ class MechanicalPageTests(unittest.TestCase):
 
         read_lflag_button = page.findChild(QPushButton, "MechanicalReadLFlagButton")
         node_combo = page.findChild(QComboBox, "MechanicalNodeCombo")
-        left_value = page.findChild(QLineEdit, "MechanicalLeftFlagStateValue")
-        right_value = page.findChild(QLineEdit, "MechanicalRightFlagStateValue")
+        left_value = page.findChild(QLabel, "MechanicalLeftFlagStateValue")
+        right_value = page.findChild(QLabel, "MechanicalRightFlagStateValue")
         assert read_lflag_button is not None
         assert node_combo is not None
         assert left_value is not None
@@ -521,21 +953,85 @@ class MechanicalPageTests(unittest.TestCase):
         self.assertEqual(left_value.text(), "unknown")
         self.assertEqual(right_value.text(), "unknown")
 
-    def test_sensor_led_mapping_uses_orange_for_active_and_grey_for_inactive_or_unknown(self) -> None:
-        page = MechanicalPage(_FakeBridge())
-        active = page._sensor_state_from_raw(0x09)
-        inactive = page._sensor_state_from_raw(0x01)
-        unknown = page._sensor_state_from_raw(None)
+    def test_sensor_readbacks_update_state_without_lighting_leds_orange(self) -> None:
+        page, runtime_window = self._build_connected_page()
 
-        self.assertTrue(active["active"])
-        self.assertEqual(active["color"], "#F39C12")
-        self.assertEqual(active["text"], "0x09")
-        self.assertFalse(inactive["active"])
-        self.assertEqual(inactive["color"], "#777777")
-        self.assertEqual(inactive["text"], "0x01")
-        self.assertFalse(unknown["active"])
-        self.assertEqual(unknown["color"], "#777777")
-        self.assertEqual(unknown["text"], "unknown")
+        read_lflag_button = page.findChild(QPushButton, "MechanicalReadLFlagButton")
+        read_rflag_button = page.findChild(QPushButton, "MechanicalReadRFlagButton")
+        left_value = page.findChild(QLabel, "MechanicalLeftFlagStateValue")
+        right_value = page.findChild(QLabel, "MechanicalRightFlagStateValue")
+        left_selector = page.findChild(QComboBox, "MechanicalLeftFlagSettingSelector")
+        right_selector = page.findChild(QComboBox, "MechanicalRightFlagSettingSelector")
+        left_led = page.findChild(QLabel, "MechanicalLeftFlagLed")
+        right_led = page.findChild(QLabel, "MechanicalRightFlagLed")
+        assert read_lflag_button is not None
+        assert read_rflag_button is not None
+        assert left_value is not None
+        assert right_value is not None
+        assert left_selector is not None
+        assert right_selector is not None
+        assert left_led is not None
+        assert right_led is not None
+
+        read_lflag_button.click()
+        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": 0xC9, "params": [0x3A, 0x09]})
+        self._app.processEvents()
+        read_rflag_button.click()
+        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": 0xCA, "params": [0x3A, 0x0B]})
+        self._app.processEvents()
+
+        self.assertEqual(left_value.text(), "0x09")
+        self.assertEqual(right_value.text(), "0x0B")
+        self.assertEqual(left_selector.currentText(), "9")
+        self.assertEqual(right_selector.currentText(), "11")
+        self.assertIn("#777777", left_led.styleSheet())
+        self.assertIn("#777777", right_led.styleSheet())
+
+    def test_sensor_led_mapping_uses_runtime_interrupt_state_only(self) -> None:
+        page = MechanicalPage(_FakeBridge())
+        self.assertEqual(page._sensor_display_from_raw(0x09)["text"], "0x09")
+        self.assertEqual(page._sensor_display_from_raw(0x01)["text"], "0x01")
+        self.assertEqual(page._sensor_display_from_raw(None)["text"], "unknown")
+        self.assertFalse(page._sensor_led_state("left")["active"])
+        self.assertEqual(page._sensor_led_state("left")["color"], "#777777")
+
+        page._sensor_interrupt_cache["left"] = True
+        self.assertTrue(page._sensor_led_state("left")["active"])
+        self.assertEqual(page._sensor_led_state("left")["color"], "#F39C12")
+
+    def test_runtime_left_interrupt_event_lights_only_left_led_and_reset_clears_it(self) -> None:
+        page, runtime_window = self._build_connected_page()
+        left_led = page.findChild(QLabel, "MechanicalLeftFlagLed")
+        right_led = page.findChild(QLabel, "MechanicalRightFlagLed")
+        assert left_led is not None
+        assert right_led is not None
+
+        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": 0x81, "params": [ord("L")]})
+        self._app.processEvents()
+        self.assertIn("#F39C12", left_led.styleSheet())
+        self.assertIn("#777777", right_led.styleSheet())
+
+        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": 0x81, "params": [ord("Z"), ord("L")]})
+        self._app.processEvents()
+        self.assertIn("#777777", left_led.styleSheet())
+        self.assertIn("#777777", right_led.styleSheet())
+
+    def test_runtime_right_interrupt_event_lights_only_right_led_and_reset_clears_it(self) -> None:
+        page, runtime_window = self._build_connected_page()
+        left_led = page.findChild(QLabel, "MechanicalLeftFlagLed")
+        right_led = page.findChild(QLabel, "MechanicalRightFlagLed")
+        assert left_led is not None
+        assert right_led is not None
+
+        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": 0x81, "params": [ord("R")]})
+        self._app.processEvents()
+        self.assertIn("#777777", left_led.styleSheet())
+        self.assertIn("#F39C12", right_led.styleSheet())
+
+        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": 0x81, "params": [ord("Z"), ord("R")]})
+        self._app.processEvents()
+        self.assertIn("#777777", left_led.styleSheet())
+        self.assertIn("#777777", right_led.styleSheet())
 
     def test_pwm_write_performs_ack_then_readback_without_enabling_eeprom(self) -> None:
         page, runtime_window = self._build_connected_page()
@@ -559,6 +1055,91 @@ class MechanicalPageTests(unittest.TestCase):
         self.assertEqual(page.findChild(QLineEdit, "MechanicalCurrentPwmValue").text(), "20")
         self.assertFalse(save_button.isEnabled())
         self.assertNotIn((8, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]), runtime_window.backend_client.sent_commands)
+
+    def test_save_to_eeprom_remains_untouched_during_other_requests_and_only_pending_during_its_own_flow(self) -> None:
+        page, runtime_window = self._build_connected_page()
+
+        save_button = page.findChild(QPushButton, "MechanicalSaveToEepromButton")
+        read_lflag_button = page.findChild(QPushButton, "MechanicalReadLFlagButton")
+        assert save_button is not None
+        assert read_lflag_button is not None
+
+        page._persistent_write_pending = True
+        page._update_control_states()
+        self.assertTrue(save_button.isEnabled())
+        save_style = save_button.styleSheet()
+
+        read_lflag_button.click()
+        self._app.processEvents()
+        self.assertTrue(save_button.isEnabled())
+        self.assertEqual(save_button.styleSheet(), save_style)
+        self.assertEqual(page._pending_request.family, "simple_read")
+
+        save_button.click()
+        self._app.processEvents()
+        self.assertEqual(page._pending_request.family, "simple_read")
+        self.assertEqual(save_button.styleSheet(), save_style)
+        self.assertIn("Another Mechanical request is still pending.", page.log_output.toPlainText())
+
+        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": 0xC9, "params": [0x3A, 0x09]})
+        self._app.processEvents()
+        self.assertTrue(save_button.isEnabled())
+
+        save_button.click()
+        self._app.processEvents()
+        pending = page._pending_request
+        assert pending is not None
+        self.assertEqual(pending.family, "eeprom")
+        self.assertEqual(runtime_window.backend_client.sent_commands[-1], (8, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]))
+        self.assertFalse(save_button.isEnabled())
+        self.assertEqual(save_button.text(), "Saving...")
+
+        page._on_eeprom_save_finished(True, "EEPROM save ACK received.")
+        self._app.processEvents()
+        self.assertIsNone(page._pending_request)
+        self.assertFalse(save_button.isEnabled())
+        self.assertEqual(save_button.text(), "Save to EEPROM")
+
+    def test_request_lifecycle_does_not_invoke_page_wide_control_state_update(self) -> None:
+        page, runtime_window = self._build_connected_page()
+        read_pwm_button = page.findChild(QPushButton, "MechanicalReadPwmButton")
+        assert read_pwm_button is not None
+
+        calls: list[str] = []
+        original = page._update_control_states
+
+        def _tracked() -> None:
+            calls.append("update")
+            original()
+
+        page._update_control_states = _tracked  # type: ignore[method-assign]
+        read_pwm_button.click()
+        self._app.processEvents()
+        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": 0x85, "params": [0xFF, 0xF6]})
+        self._app.processEvents()
+
+        self.assertEqual(calls, [])
+
+    def test_live_readback_is_not_overwritten_by_generic_refresh_during_read_pwm_response(self) -> None:
+        page, runtime_window = self._build_connected_page()
+        read_pwm_button = page.findChild(QPushButton, "MechanicalReadPwmButton")
+        assert read_pwm_button is not None
+
+        refresh_calls: list[str] = []
+        original_refresh = page._refresh_from_selected_node
+
+        def _tracked_refresh() -> None:
+            refresh_calls.append("refresh")
+            original_refresh()
+
+        page._refresh_from_selected_node = _tracked_refresh  # type: ignore[method-assign]
+        read_pwm_button.click()
+        self._app.processEvents()
+        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": 0x85, "params": [0x00, 0x14]})
+        self._app.processEvents()
+
+        self.assertEqual(refresh_calls, [])
+        self.assertEqual(page.findChild(QLineEdit, "MechanicalCurrentPwmValue").text(), "20")
 
     def test_pid_and_ramp_read_write_reuse_parameter_definitions_and_gate_eeprom(self) -> None:
         page, runtime_window = self._build_connected_page()
@@ -641,6 +1222,107 @@ class MechanicalPageTests(unittest.TestCase):
         self._app.processEvents()
         self.assertFalse(save_button.isEnabled())
 
+    def test_pid_write_invalid_input_rejects_locally_without_touching_other_controls(self) -> None:
+        page, runtime_window = self._build_connected_page()
+        pid_write_button = page.findChild(QPushButton, "MechanicalPidWriteButton")
+        pid_read_button = page.findChild(QPushButton, "MechanicalPidReadButton")
+        ramp_read_button = page.findChild(QPushButton, "MechanicalRampReadButton")
+        assert pid_write_button is not None
+        assert pid_read_button is not None
+        assert ramp_read_button is not None
+
+        page.findChild(QLineEdit, "MechanicalPidPValue").setText("bad")
+        before_sent = list(runtime_window.backend_client.sent_commands)
+        before_pid_read = (pid_read_button.isEnabled(), pid_read_button.styleSheet())
+        before_ramp_read = (ramp_read_button.isEnabled(), ramp_read_button.styleSheet())
+
+        pid_write_button.click()
+        self._app.processEvents()
+
+        self.assertEqual(runtime_window.backend_client.sent_commands, before_sent)
+        self.assertIsNone(page._pending_request)
+        self.assertTrue(pid_write_button.isEnabled())
+        self.assertEqual((pid_read_button.isEnabled(), pid_read_button.styleSheet()), before_pid_read)
+        self.assertEqual((ramp_read_button.isEnabled(), ramp_read_button.styleSheet()), before_ramp_read)
+        self.assertIn("[Mechanical] Write PID rejected:", page.log_output.toPlainText())
+
+    def test_ramp_write_invalid_input_rejects_locally_without_touching_other_controls(self) -> None:
+        page, runtime_window = self._build_connected_page()
+        ramp_write_button = page.findChild(QPushButton, "MechanicalRampWriteButton")
+        pid_read_button = page.findChild(QPushButton, "MechanicalPidReadButton")
+        assert ramp_write_button is not None
+        assert pid_read_button is not None
+
+        page.findChild(QLineEdit, "MechanicalRampStepValue").setText("256")
+        before_sent = list(runtime_window.backend_client.sent_commands)
+        before_pid_read = (pid_read_button.isEnabled(), pid_read_button.styleSheet())
+
+        ramp_write_button.click()
+        self._app.processEvents()
+
+        self.assertEqual(runtime_window.backend_client.sent_commands, before_sent)
+        self.assertIsNone(page._pending_request)
+        self.assertTrue(ramp_write_button.isEnabled())
+        self.assertEqual((pid_read_button.isEnabled(), pid_read_button.styleSheet()), before_pid_read)
+        self.assertIn("[Mechanical] Write Ramp Down rejected:", page.log_output.toPlainText())
+
+    def test_pid_write_failed_verification_restores_only_initiating_button_and_does_not_enable_eeprom(self) -> None:
+        page, runtime_window = self._build_connected_page()
+        pid_write_button = page.findChild(QPushButton, "MechanicalPidWriteButton")
+        save_button = page.findChild(QPushButton, "MechanicalSaveToEepromButton")
+        read_lflag_button = page.findChild(QPushButton, "MechanicalReadLFlagButton")
+        assert pid_write_button is not None
+        assert save_button is not None
+        assert read_lflag_button is not None
+
+        page.findChild(QLineEdit, "MechanicalPidPValue").setText("1.5")
+        page.findChild(QLineEdit, "MechanicalPidIValue").setText("0.5")
+        page.findChild(QLineEdit, "MechanicalPidDValue").setText("0.25")
+        before_lflag = (read_lflag_button.isEnabled(), read_lflag_button.styleSheet())
+
+        pid_write_button.click()
+        self._app.processEvents()
+        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": PID_P_COMMAND, "params": [PARAM_RESPONSE, PID_P_SUB_ID, 0x00, 0x16, 0xE3, 0x60]})
+        self._app.processEvents()
+        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": PID_I_COMMAND, "params": [PARAM_RESPONSE, PID_I_SUB_ID, 0x00, 0x07, 0xA1, 0x20]})
+        self._app.processEvents()
+        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": PID_D_COMMAND, "params": [PARAM_RESPONSE, PID_D_SUB_ID, 0x00, 0x03, 0xD0, 0x90]})
+        self._app.processEvents()
+        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": PID_P_COMMAND, "params": [PARAM_RESPONSE, PID_P_SUB_ID, 0x00, 0x0F, 0x42, 0x40]})
+        self._app.processEvents()
+        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": PID_I_COMMAND, "params": [PARAM_RESPONSE, PID_I_SUB_ID, 0x00, 0x07, 0xA1, 0x20]})
+        self._app.processEvents()
+        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": PID_D_COMMAND, "params": [PARAM_RESPONSE, PID_D_SUB_ID, 0x00, 0x03, 0xD0, 0x90]})
+        self._app.processEvents()
+
+        self.assertIsNone(page._pending_request)
+        self.assertTrue(pid_write_button.isEnabled())
+        self.assertEqual(pid_write_button.text(), "Write")
+        self.assertFalse(save_button.isEnabled())
+        self.assertEqual((read_lflag_button.isEnabled(), read_lflag_button.styleSheet()), before_lflag)
+        self.assertIn("requested 1.5, read-back 1, FAIL", page.log_output.toPlainText())
+
+    def test_parameter_timeout_restores_only_initiating_button(self) -> None:
+        page, _runtime_window = self._build_connected_page()
+        pid_read_button = page.findChild(QPushButton, "MechanicalPidReadButton")
+        read_lflag_button = page.findChild(QPushButton, "MechanicalReadLFlagButton")
+        assert pid_read_button is not None
+        assert read_lflag_button is not None
+
+        before_lflag = (read_lflag_button.isEnabled(), read_lflag_button.styleSheet())
+        pid_read_button.click()
+        self._app.processEvents()
+        self.assertFalse(pid_read_button.isEnabled())
+
+        page._handle_simple_request_timeout()
+        self._app.processEvents()
+
+        self.assertIsNone(page._pending_request)
+        self.assertTrue(pid_read_button.isEnabled())
+        self.assertEqual(pid_read_button.text(), "Read")
+        self.assertEqual((read_lflag_button.isEnabled(), read_lflag_button.styleSheet()), before_lflag)
+        self.assertIn("Read PID timed out", page.log_output.toPlainText())
+
     def test_manual_and_unverified_controls_remain_disabled_when_connected(self) -> None:
         page, _runtime_window = self._build_connected_page()
         for object_name in (
@@ -649,6 +1331,8 @@ class MechanicalPageTests(unittest.TestCase):
             "MechanicalReadRpmButton",
             "MechanicalSetRpmButton",
             "MechanicalWriteNodeConfigButton",
+            "MechanicalLeftFlagWriteButton",
+            "MechanicalRightFlagWriteButton",
         ):
             button = page.findChild(QPushButton, object_name)
             assert button is not None

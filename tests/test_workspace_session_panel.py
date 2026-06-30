@@ -125,6 +125,19 @@ ui:
         self.assertNotIn("Nodes Firmware Version: -", label_texts)
         self.assertNotIn("MCU Firmware Version", " ".join(label_texts))
         self.assertNotIn("Nodes Firmware Version", " ".join(label_texts))
+        self.assertIsNone(page.findChild(QLabel, "PageTitle"))
+        self.assertIsNone(page.findChild(QLabel, "PageSubtitle"))
+
+    def test_workspace_pages_no_longer_render_dynamic_page_titles_or_subtitles(self) -> None:
+        window = self._build_workspace_window()
+        window.show()
+        self._app.processEvents()
+
+        for route, page in window._pages.items():
+            if page is None:
+                continue
+            self.assertIsNone(page.findChild(QLabel, "PageTitle"), route)
+            self.assertIsNone(page.findChild(QLabel, "PageSubtitle"), route)
 
     def test_robot_node_status_widget_is_persistent_and_reused_across_tabs(self) -> None:
         window = self._build_workspace_window()
