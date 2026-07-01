@@ -77,6 +77,18 @@ class RuntimePacketHandler:
             if decoded_value:
                 message += f" -> {decoded_value}"
 
+        if node_id == 0x01 and command == 0xD8:
+            emergency_state = self._decode_emergency_stop_state(params)
+            if emergency_state is not None:
+                events.append(RuntimePacketEvent("emergency_stop", node_id=node_id, value=emergency_state))
+                state_text = "active" if emergency_state else "released"
+                events.append(
+                    RuntimePacketEvent(
+                        "log",
+                        message=f"Emergency stop {state_text} from MCU Master interrupt-status event.",
+                    )
+                )
+
         if 2 <= node_id <= 17:
             events.append(RuntimePacketEvent("node_activity", node_id=node_id))
             node_record = ensure_node_status(node_status, node_id)
@@ -187,4 +199,20 @@ class RuntimePacketHandler:
         if packet.get("mcu_version_response"):
             events.append(RuntimePacketEvent("mcu_version", value=packet.get("mcu_version", "Unknown")))
 
+        if command == 0xD8:
+            emergency_state = self._decode_emergency_stop_state(params)
+            if emergency_state is not None:
+                events.append(RuntimePacketEvent("emergency_stop", node_id=0x01, value=emergency_state))
+
         return events
+
+    @staticmethod
+    def _decode_emergency_stop_state(params: list[int]) -> bool | None:
+        """Decode the observed MCU Master interrupt packets into a global emergency state."""
+        if len(params) < 3 or params[0] != 0x3A:
+            return None
+        if params[1] == 0x00 and params[2] == 0x00:
+            return True
+        if params[1] == 0x00 and params[2] == 0x01:
+            return False
+        return None

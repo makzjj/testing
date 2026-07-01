@@ -84,6 +84,28 @@ class RuntimePacketHandlerTests(unittest.TestCase):
         self.assertEqual(comm_stats_event.value["uart_rx"], 9)
         self.assertEqual(mcu_version_event.value, "v1.2.3.4")
 
+    def test_mcu_master_interrupt_packet_emits_emergency_stop_active_and_release_events(self) -> None:
+        active_packet = {
+            "status": "ok",
+            "type": "can_over_uart",
+            "sender": 1,
+            "cmd": 0xD8,
+            "params": [0x3A, 0x00, 0x00],
+        }
+        released_packet = {
+            "status": "ok",
+            "type": "can_over_uart",
+            "sender": 1,
+            "cmd": 0xD8,
+            "params": [0x3A, 0x00, 0x01],
+        }
+
+        active_events = self.handler.handle_packet(active_packet, self.node_status)
+        released_events = self.handler.handle_packet(released_packet, self.node_status)
+
+        self.assertTrue(any(event.kind == "emergency_stop" and event.value is True for event in active_events))
+        self.assertTrue(any(event.kind == "emergency_stop" and event.value is False for event in released_events))
+
 
 class RxLogWriterTests(unittest.TestCase):
     """Covers the reusable runtime RX log writer."""

@@ -2465,6 +2465,7 @@ class _NodeStatusSection(PanelFrame):
         self._led_by_node_id: dict[int, QLabel] = {}
         self._connected = False
         self._robot_power_on: bool | None = None
+        self._emergency_stop_active: bool | None = None
         self._backend_connected_nodes: set[int] = set()
         self._displayed_connected_nodes: set[int] = set()
         self._update_in_progress = False
@@ -2473,6 +2474,13 @@ class _NodeStatusSection(PanelFrame):
         button_row.setContentsMargins(0, 0, 0, 0)
         button_row.setSpacing(8)
         button_row.addStretch(1)
+        self._emergency_badge = QLabel("")
+        self._emergency_badge.setObjectName("EmergencyStopBadge")
+        self._emergency_badge.setFixedWidth(80)
+        self._emergency_badge.setMinimumHeight(36)
+        self._emergency_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._emergency_badge.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        button_row.addWidget(self._emergency_badge, 0)
         self._robot_power_button = QPushButton("Robot Power ON/OFF")
         self._robot_power_button.setObjectName("RobotPowerButton")
         self._robot_power_button.setProperty("tone", "secondary")
@@ -2491,6 +2499,7 @@ class _NodeStatusSection(PanelFrame):
         self._clear_button.clicked.connect(self.clear_nodes_requested.emit)
         button_row.addWidget(self._clear_button)
         self.body_layout.addLayout(button_row)
+        self.set_emergency_stop_state(None)
 
         node_grid = QGridLayout()
         node_grid.setContentsMargins(0, 0, 0, 0)
@@ -2525,6 +2534,21 @@ class _NodeStatusSection(PanelFrame):
             return
         if previous is False and power_on is True:
             self._invalidate_display_state()
+
+    def set_emergency_stop_state(self, active: bool | None) -> None:
+        self._emergency_stop_active = active
+        if active is True:
+            self._emergency_badge.setText("STOP")
+            self._emergency_badge.setStyleSheet(
+                "background: #D92D20; color: white; border: 1px solid #B42318; "
+                "border-radius: 16px; font-weight: 700; padding: 8px 14px;"
+            )
+            return
+        self._emergency_badge.setText("Stop")
+        self._emergency_badge.setStyleSheet(
+            "background: #2E9F58; color: white; border: 1px solid #247A45; "
+            "border-radius: 16px; font-weight: 600; padding: 8px 14px;"
+        )
 
     def set_nodes(self, nodes_model: dict) -> None:
         self._backend_connected_nodes = {int(node_id) for node_id in nodes_model.get("connected_nodes", [])}

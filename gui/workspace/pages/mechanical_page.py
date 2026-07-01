@@ -34,7 +34,7 @@ from data.binary_cmd_builders import (
     build_nodeconfig_query_payload,
     build_rflag_query_payload,
 )
-from data.binary_cmd_parser import decode_command, decode_nodeconfig_motion_polarity
+from data.binary_cmd_parser import decode_command
 from services.functional_transport_adapter import FunctionalTransportAdapter
 
 from ..bridges import WorkspaceRuntimeBridge
@@ -330,6 +330,9 @@ class MechanicalPage(BaseWorkspacePage):
         self._sensor_state_node_id: int | None = None
         self._sensor_interrupt_cache: dict[str, bool] = {"left": False, "right": False}
         self._sensor_interrupt_node_id: int | None = None
+        self._actual_nodeconfig_value: int | None = None
+        self._pending_nodeconfig_value: int | None = None
+        self._updating_nodeconfig_editor = False
         self._runtime_packet_window: QObject | None = None
         self._parameter_definitions = {
             definition.name: definition
@@ -451,27 +454,51 @@ class MechanicalPage(BaseWorkspacePage):
         self.nodeconfig_button_row.setObjectName("MechanicalNodeHeaderButtonRow")
 
         self.current_nodeconfig_value = self._readonly_line("n/a", "MechanicalCurrentNodeconfigValue", width=96)
+        self.pending_nodeconfig_value = self._readonly_line("n/a", "MechanicalPendingNodeconfigValue", width=96)
+        self.pending_nodeconfig_value.setEnabled(False)
+        self.nodeconfig_unsaved_indicator = QLabel("Unsaved")
+        self.nodeconfig_unsaved_indicator.setObjectName("MechanicalNodeconfigUnsavedIndicator")
+        self.nodeconfig_unsaved_indicator.setStyleSheet(
+            "background: #FFF1E3;"
+            "color: #C46A12;"
+            "border: 1px solid #F3C79E;"
+            "border-radius: 10px;"
+            "padding: 4px 8px;"
+            "font-weight: 600;"
+        )
+        self.nodeconfig_unsaved_indicator.hide()
         self.polarity_selector = QComboBox()
         self.polarity_selector.setObjectName("MechanicalPolaritySelector")
-        self.polarity_selector.addItems(["n/a", "Normal", "Reversed"])
-        self.polarity_selector.setEnabled(False)
+        self.polarity_selector.addItems(["Negative", "Positive"])
+        self.polarity_selector.setEnabled(True)
         self.polarity_selector.setMinimumWidth(92)
         self.polarity_selector.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._style_combo_box(self.polarity_selector)
         self.flag_selector_selector = QComboBox()
         self.flag_selector_selector.setObjectName("MechanicalFlagSelector")
-        self.flag_selector_selector.addItems(["n/a", "INT0", "INT1", "Both"])
-        self.flag_selector_selector.setEnabled(False)
+        self.flag_selector_selector.addItems(["Left / INT0", "Right / INT1"])
+        self.flag_selector_selector.setEnabled(True)
         self.flag_selector_selector.setMinimumWidth(92)
         self.flag_selector_selector.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._style_combo_box(self.flag_selector_selector)
         self.read_nodeconfig_button = self._disabled_button("Read", "MechanicalReadNodeConfigButton")
         self.write_nodeconfig_button = self._disabled_button("Write", "MechanicalWriteNodeConfigButton")
         self.read_nodeconfig_button.clicked.connect(self._handle_read_nodeconfig_clicked)
+        self.flag_selector_selector.currentIndexChanged.connect(self._handle_nodeconfig_editor_changed)
+        self.polarity_selector.currentIndexChanged.connect(self._handle_nodeconfig_editor_changed)
 
-        nodeconfig_layout.addWidget(LabeledControl("Current NODECONFIG", self.current_nodeconfig_value), 0, 0)
-        nodeconfig_layout.addWidget(LabeledControl("Flag Selector", self.flag_selector_selector), 1, 0)
-        nodeconfig_layout.addWidget(LabeledControl("Polarity", self.polarity_selector), 2, 0)
+        nodeconfig_layout.addWidget(LabeledControl("Actual NODECONFIG", self.current_nodeconfig_value), 0, 0)
+        pending_row = QWidget()
+        pending_row.setObjectName("MechanicalPendingNodeconfigRow")
+        pending_layout = QHBoxLayout(pending_row)
+        pending_layout.setContentsMargins(0, 0, 0, 0)
+        pending_layout.setSpacing(8)
+        pending_layout.addWidget(self.pending_nodeconfig_value, 0, Qt.AlignmentFlag.AlignVCenter)
+        pending_layout.addWidget(self.nodeconfig_unsaved_indicator, 0, Qt.AlignmentFlag.AlignVCenter)
+        pending_layout.addStretch(1)
+        nodeconfig_layout.addWidget(LabeledControl("Pending NODECONFIG", pending_row), 1, 0)
+        nodeconfig_layout.addWidget(LabeledControl("Flag Selector", self.flag_selector_selector), 2, 0)
+        nodeconfig_layout.addWidget(LabeledControl("Polarity", self.polarity_selector), 3, 0)
         button_row = QHBoxLayout(self.nodeconfig_button_row)
         button_row.setContentsMargins(0, 0, 0, 0)
         button_row.setSpacing(8)
@@ -479,7 +506,7 @@ class MechanicalPage(BaseWorkspacePage):
         button_row.addWidget(self.read_nodeconfig_button)
         button_row.addWidget(self.write_nodeconfig_button)
         button_row.addStretch(1)
-        nodeconfig_layout.addWidget(self.nodeconfig_button_row, 3, 0)
+        nodeconfig_layout.addWidget(self.nodeconfig_button_row, 4, 0)
 
         layout.addWidget(nodeconfig_section, 1, 0, 1, 2)
         layout.setColumnStretch(0, 1)
@@ -1709,19 +1736,44 @@ class MechanicalPage(BaseWorkspacePage):
 
     def _apply_nodeconfig_display(self, value: Any) -> None:
         normalized = self._normalize_nodeconfig_value(value)
-        self.current_nodeconfig_value.setText(self._format_nodeconfig_bits(value))
-        polarity_text = "n/a"
-        flag_selector_text = "n/a"
-        if normalized is not None:
-            try:
-                polarity = decode_nodeconfig_motion_polarity(normalized)
-            except ValueError:
-                polarity = None
-            if polarity is not None:
-                polarity_text = "Normal" if polarity.positive_run_sensor == "R" else "Reversed"
-                flag_selector_text = "INT0" if polarity.home_sensor == "L" else "INT1"
-        self.polarity_selector.setCurrentText(polarity_text)
-        self.flag_selector_selector.setCurrentText(flag_selector_text)
+        self._actual_nodeconfig_value = normalized
+        self._pending_nodeconfig_value = normalized
+        self._sync_nodeconfig_editor_widgets()
+
+    def _handle_nodeconfig_editor_changed(self) -> None:
+        if self._updating_nodeconfig_editor:
+            return
+        baseline = self._actual_nodeconfig_value
+        if baseline is None:
+            baseline = self._pending_nodeconfig_value if self._pending_nodeconfig_value is not None else 0
+        pending = int(baseline) & 0x0C
+        if self.flag_selector_selector.currentIndex() == 1:
+            pending |= 0x01
+        if self.polarity_selector.currentIndex() == 1:
+            pending |= 0x02
+        self._pending_nodeconfig_value = pending & 0x0F
+        self._sync_nodeconfig_editor_widgets(update_selectors=False)
+
+    def _sync_nodeconfig_editor_widgets(self, *, update_selectors: bool = True) -> None:
+        self.current_nodeconfig_value.setText(self._format_nodeconfig_bits(self._actual_nodeconfig_value))
+        self.pending_nodeconfig_value.setText(self._format_nodeconfig_bits(self._pending_nodeconfig_value))
+        is_unsaved = (
+            self._actual_nodeconfig_value is not None
+            and self._pending_nodeconfig_value is not None
+            and self._actual_nodeconfig_value != self._pending_nodeconfig_value
+        )
+        self.nodeconfig_unsaved_indicator.setVisible(is_unsaved)
+        if not update_selectors:
+            return
+        baseline = self._pending_nodeconfig_value
+        if baseline is None:
+            baseline = self._actual_nodeconfig_value if self._actual_nodeconfig_value is not None else 0
+        self._updating_nodeconfig_editor = True
+        try:
+            self.flag_selector_selector.setCurrentIndex(1 if (int(baseline) & 0x01) else 0)
+            self.polarity_selector.setCurrentIndex(1 if (int(baseline) & 0x02) else 0)
+        finally:
+            self._updating_nodeconfig_editor = False
 
     @staticmethod
     def _build_selector_row(title: str, selector: QComboBox) -> QHBoxLayout:

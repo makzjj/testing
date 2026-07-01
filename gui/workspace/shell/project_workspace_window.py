@@ -234,6 +234,9 @@ class ProjectWorkspaceWindow(QMainWindow):
         self.node_status_section.set_robot_power_state(
             self._bridge.get_runtime_robot_power_state(create_if_missing=False)
         )
+        self.node_status_section.set_emergency_stop_state(
+            self._bridge.get_runtime_emergency_stop_state(create_if_missing=False)
+        )
         self.node_status_section.set_nodes(self._bridge.get_runtime_robot_nodes(create_if_missing=False))
 
     def _handle_shared_update_nodes_requested(self) -> None:

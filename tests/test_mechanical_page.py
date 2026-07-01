@@ -228,8 +228,8 @@ class MechanicalPageTests(unittest.TestCase):
         self.assertIsNone(page.findChild(QPushButton, "MechanicalSpeedPidButton"))
         self.assertFalse(page.findChild(QComboBox, "MechanicalLeftFlagSettingSelector").isEnabled())
         self.assertFalse(page.findChild(QComboBox, "MechanicalRightFlagSettingSelector").isEnabled())
-        self.assertFalse(page.findChild(QComboBox, "MechanicalPolaritySelector").isEnabled())
-        self.assertFalse(page.findChild(QComboBox, "MechanicalFlagSelector").isEnabled())
+        self.assertTrue(page.findChild(QComboBox, "MechanicalPolaritySelector").isEnabled())
+        self.assertTrue(page.findChild(QComboBox, "MechanicalFlagSelector").isEnabled())
         self.assertFalse(page.findChild(QComboBox, "MechanicalPwmSelectionCombo").isEnabled())
         self.assertFalse(page.findChild(QComboBox, "MechanicalRpmSelectionCombo").isEnabled())
 
@@ -251,7 +251,8 @@ class MechanicalPageTests(unittest.TestCase):
         labels = {label.text() for label in page.findChildren(QLabel)}
         self.assertIn("Left Flag (INT0)", labels)
         self.assertIn("Right Flag (INT1)", labels)
-        self.assertIn("Current NODECONFIG", labels)
+        self.assertIn("Actual NODECONFIG", labels)
+        self.assertIn("Pending NODECONFIG", labels)
         self.assertIn("Polarity", labels)
         self.assertIn("Flag Selector", labels)
         self.assertNotIn("Status", labels)
@@ -351,13 +352,20 @@ class MechanicalPageTests(unittest.TestCase):
         node_combo.setCurrentIndex(3)
         self._app.processEvents()
         self.assertEqual(page.findChild(QLineEdit, "MechanicalCurrentNodeconfigValue").text(), "0000")
+        self.assertEqual(page.findChild(QLineEdit, "MechanicalPendingNodeconfigValue").text(), "0000")
 
         left_flag_selector = page.findChild(QComboBox, "MechanicalLeftFlagSettingSelector")
         right_flag_selector = page.findChild(QComboBox, "MechanicalRightFlagSettingSelector")
+        nodeconfig_flag_selector = page.findChild(QComboBox, "MechanicalFlagSelector")
+        nodeconfig_polarity_selector = page.findChild(QComboBox, "MechanicalPolaritySelector")
         assert left_flag_selector is not None
         assert right_flag_selector is not None
+        assert nodeconfig_flag_selector is not None
+        assert nodeconfig_polarity_selector is not None
         self.assertEqual([left_flag_selector.itemText(i) for i in range(left_flag_selector.count())], ["1", "9", "11"])
         self.assertEqual([right_flag_selector.itemText(i) for i in range(right_flag_selector.count())], ["1", "9", "11"])
+        self.assertEqual([nodeconfig_flag_selector.itemText(i) for i in range(nodeconfig_flag_selector.count())], ["Left / INT0", "Right / INT1"])
+        self.assertEqual([nodeconfig_polarity_selector.itemText(i) for i in range(nodeconfig_polarity_selector.count())], ["Negative", "Positive"])
         self.assertIsNotNone(page.findChild(QPushButton, "MechanicalLeftFlagWriteButton"))
         self.assertIsNotNone(page.findChild(QPushButton, "MechanicalRightFlagWriteButton"))
 
@@ -431,6 +439,146 @@ class MechanicalPageTests(unittest.TestCase):
         self.assertGreater(polarity_pos.y(), flag_pos.y())
         self.assertGreater(read_pos.y(), polarity_pos.y())
         self.assertLess(abs(read_pos.y() - write_pos.y()), 20)
+
+    def test_nodeconfig_selectors_are_enabled_and_write_remains_disabled(self) -> None:
+        page = MechanicalPage(_FakeBridge())
+        page.resize(1440, 980)
+        page.show()
+        self._app.processEvents()
+
+        flag_selector = page.findChild(QComboBox, "MechanicalFlagSelector")
+        polarity_selector = page.findChild(QComboBox, "MechanicalPolaritySelector")
+        write_button = page.findChild(QPushButton, "MechanicalWriteNodeConfigButton")
+        assert flag_selector is not None
+        assert polarity_selector is not None
+        assert write_button is not None
+
+        self.assertTrue(flag_selector.isEnabled())
+        self.assertTrue(polarity_selector.isEnabled())
+        self.assertFalse(write_button.isEnabled())
+
+    def test_nodeconfig_pending_updates_only_bit_zero_for_flag_selector(self) -> None:
+        page = MechanicalPage(_FakeBridge())
+        page.resize(1440, 980)
+        page.show()
+        self._app.processEvents()
+        node_combo = page.findChild(QComboBox, "MechanicalNodeCombo")
+        assert node_combo is not None
+        node_combo.setCurrentIndex(5)  # Node 8 -> 0010 baseline
+        self._app.processEvents()
+
+        actual = page.findChild(QLineEdit, "MechanicalCurrentNodeconfigValue")
+        pending = page.findChild(QLineEdit, "MechanicalPendingNodeconfigValue")
+        flag_selector = page.findChild(QComboBox, "MechanicalFlagSelector")
+        polarity_selector = page.findChild(QComboBox, "MechanicalPolaritySelector")
+        unsaved = page.findChild(QLabel, "MechanicalNodeconfigUnsavedIndicator")
+        assert actual is not None
+        assert pending is not None
+        assert flag_selector is not None
+        assert polarity_selector is not None
+        assert unsaved is not None
+
+        self.assertEqual(actual.text(), "0010")
+        self.assertEqual(pending.text(), "0010")
+        self.assertFalse(unsaved.isVisible())
+
+        flag_selector.setCurrentIndex(1)
+        self._app.processEvents()
+        self.assertEqual(actual.text(), "0010")
+        self.assertEqual(pending.text(), "0011")
+        self.assertEqual(polarity_selector.currentText(), "Positive")
+        self.assertTrue(unsaved.isVisible())
+
+    def test_nodeconfig_pending_updates_only_bit_one_for_polarity(self) -> None:
+        page = MechanicalPage(_FakeBridge())
+        page.resize(1440, 980)
+        page.show()
+        self._app.processEvents()
+
+        actual = page.findChild(QLineEdit, "MechanicalCurrentNodeconfigValue")
+        pending = page.findChild(QLineEdit, "MechanicalPendingNodeconfigValue")
+        polarity_selector = page.findChild(QComboBox, "MechanicalPolaritySelector")
+        assert actual is not None
+        assert pending is not None
+        assert polarity_selector is not None
+
+        node_combo = page.findChild(QComboBox, "MechanicalNodeCombo")
+        assert node_combo is not None
+        node_combo.setCurrentIndex(3)  # Node 6 -> 0000 baseline
+        self._app.processEvents()
+        self.assertEqual(actual.text(), "0000")
+
+        polarity_selector.setCurrentIndex(1)
+        self._app.processEvents()
+        self.assertEqual(actual.text(), "0000")
+        self.assertEqual(pending.text(), "0010")
+
+    def test_nodeconfig_pending_preserves_bits_two_and_three_from_actual(self) -> None:
+        page = MechanicalPage(_FakeBridge())
+        page._apply_nodeconfig_display(0x0C)
+        flag_selector = page.findChild(QComboBox, "MechanicalFlagSelector")
+        polarity_selector = page.findChild(QComboBox, "MechanicalPolaritySelector")
+        pending = page.findChild(QLineEdit, "MechanicalPendingNodeconfigValue")
+        assert flag_selector is not None
+        assert polarity_selector is not None
+        assert pending is not None
+
+        flag_selector.setCurrentIndex(1)
+        polarity_selector.setCurrentIndex(1)
+        self._app.processEvents()
+        self.assertEqual(pending.text(), "1111")
+
+    def test_nodeconfig_pending_changes_do_not_send_commands_or_change_unrelated_button_state(self) -> None:
+        page, runtime_window = self._build_connected_page()
+        flag_selector = page.findChild(QComboBox, "MechanicalFlagSelector")
+        polarity_selector = page.findChild(QComboBox, "MechanicalPolaritySelector")
+        read_lflag_button = page.findChild(QPushButton, "MechanicalReadLFlagButton")
+        pid_read_button = page.findChild(QPushButton, "MechanicalPidReadButton")
+        assert flag_selector is not None
+        assert polarity_selector is not None
+        assert read_lflag_button is not None
+        assert pid_read_button is not None
+
+        before_sent = list(runtime_window.backend_client.sent_commands)
+        before_lflag = (read_lflag_button.isEnabled(), read_lflag_button.styleSheet())
+        before_pid = (pid_read_button.isEnabled(), pid_read_button.styleSheet())
+
+        flag_selector.setCurrentIndex(1)
+        polarity_selector.setCurrentIndex(1)
+        self._app.processEvents()
+
+        self.assertEqual(runtime_window.backend_client.sent_commands, before_sent)
+        self.assertEqual((read_lflag_button.isEnabled(), read_lflag_button.styleSheet()), before_lflag)
+        self.assertEqual((pid_read_button.isEnabled(), pid_read_button.styleSheet()), before_pid)
+
+    def test_read_nodeconfig_resets_pending_to_actual_and_clears_unsaved_state(self) -> None:
+        page, runtime_window = self._build_connected_page()
+        read_button = page.findChild(QPushButton, "MechanicalReadNodeConfigButton")
+        flag_selector = page.findChild(QComboBox, "MechanicalFlagSelector")
+        polarity_selector = page.findChild(QComboBox, "MechanicalPolaritySelector")
+        actual = page.findChild(QLineEdit, "MechanicalCurrentNodeconfigValue")
+        pending = page.findChild(QLineEdit, "MechanicalPendingNodeconfigValue")
+        unsaved = page.findChild(QLabel, "MechanicalNodeconfigUnsavedIndicator")
+        assert read_button is not None
+        assert flag_selector is not None
+        assert polarity_selector is not None
+        assert actual is not None
+        assert pending is not None
+        assert unsaved is not None
+
+        flag_selector.setCurrentIndex(1)
+        self._app.processEvents()
+        self.assertTrue(unsaved.isVisible())
+
+        read_button.click()
+        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": 0xC4, "params": [0x3A, 0x02]})
+        self._app.processEvents()
+
+        self.assertEqual(actual.text(), "0010")
+        self.assertEqual(pending.text(), "0010")
+        self.assertEqual(flag_selector.currentText(), "Left / INT0")
+        self.assertEqual(polarity_selector.currentText(), "Positive")
+        self.assertFalse(unsaved.isVisible())
 
     def test_sensor_status_rows_show_state_selector_and_write_controls_without_clipping(self) -> None:
         page = MechanicalPage(_FakeBridge())
@@ -667,8 +815,8 @@ class MechanicalPageTests(unittest.TestCase):
         runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": 0xC4, "params": [0x3A, 0x02]})
         self._app.processEvents()
         self.assertEqual(page.findChild(QLineEdit, "MechanicalCurrentNodeconfigValue").text(), "0010")
-        self.assertEqual(page.findChild(QComboBox, "MechanicalPolaritySelector").currentText(), "Reversed")
-        self.assertEqual(page.findChild(QComboBox, "MechanicalFlagSelector").currentText(), "INT0")
+        self.assertEqual(page.findChild(QComboBox, "MechanicalPolaritySelector").currentText(), "Positive")
+        self.assertEqual(page.findChild(QComboBox, "MechanicalFlagSelector").currentText(), "Left / INT0")
 
         read_lflag_button.click()
         self.assertEqual(runtime_window.backend_client.sent_commands[-1], (8, [0xC9, 0x3F]))

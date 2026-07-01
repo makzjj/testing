@@ -169,12 +169,14 @@ class MainWindow(QMainWindow):
 
         # --- Node scanning initialization ---
         # Node status table
-        # --- Sequential node scanning state ---
+        # --- Node scanning state ---
         self.current_scan_node = 2
         self.detected_nodes = set()
         self.node_scan_timeout_timer = QTimer(self)
         self.node_scan_timeout_timer.setSingleShot(True)
         self.node_scan_timeout_timer.timeout.connect(self.on_node_scan_timeout)
+        self._batch_node_scan_active = False
+        self.emergency_stop_active = None
 
         self.detection_interval = 100 #500  # ms between commands
         self.response_timeout = 100 #1000 #2500  # ms timeout for responses
@@ -1214,6 +1216,34 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.log(f"❌ Communication startup failed: {e}")
 
+    def dispatch_node_scan_batch(self):
+        """Send one full 86 3F node scan batch without waiting between nodes."""
+        if not self.validate_connection_state():
+            self.log("âš ï¸ Serial port not connected, cannot start batch scan")
+            self.scan_active = False
+            return False
+
+        self.scan_active = True
+        self.cancel_scanning = False
+        self.current_scan_node = 2
+        self.detected_nodes.clear()
+        self._batch_node_scan_active = True
+        self.node_scan_timeout_timer.stop()
+        self.log("ðŸ” Starting node ID scan batch (2â€“17)...")
+
+        try:
+            for node_id in range(2, 18):
+                payload = self.backend_client.send_node_id_request(node_id)
+                self.log(f"TX[SCAN] â†’ Node {node_id:02d}: {' '.join(f'{b:02X}' for b in payload)}")
+            self.node_scan_timeout_timer.start(NODE_ADVANCE_DELAY)
+            self.update_node_status_display()
+            return True
+        except Exception as e:
+            self.log(f"âŒ Failed to dispatch node scan batch: {e}")
+            self.scan_active = False
+            self._batch_node_scan_active = False
+            return False
+
     def start_node_scan(self):
         """Start scanning nodes sequentially after COM connected."""
         if not self.validate_connection_state():
@@ -1266,6 +1296,12 @@ class MainWindow(QMainWindow):
     def on_node_scan_timeout(self):
         """Called when a node doesn't respond within timeout."""
         if not self.validate_connection_state():
+            self.scan_active = False
+            return
+
+        if getattr(self, "_batch_node_scan_active", False):
+            self.log("Node scan window elapsed.")
+            self._batch_node_scan_active = False
             self.scan_active = False
             return
 
@@ -1608,7 +1644,8 @@ class MainWindow(QMainWindow):
                 self.node_status[node_id]['connected'] = True
 
             self.detected_nodes.add(node_id)
-            self.node_scan_timeout_timer.stop()
+            if not getattr(self, "_batch_node_scan_active", False):
+                self.node_scan_timeout_timer.stop()
 
             # Initialize node_info_requested if not exists
             if not hasattr(self, 'node_info_requested'):
@@ -1626,14 +1663,16 @@ class MainWindow(QMainWindow):
                 self.log(f"⚠️ Info requests already sent to Node {node_id:02d}, skipping duplicate")
                 # If info already requested, move to next node immediately
 
-            QTimer.singleShot(500, self.advance_to_next_node)
+            if not getattr(self, "_batch_node_scan_active", False):
+                QTimer.singleShot(500, self.advance_to_next_node)
 
             self.update_node_status_display()
 
         except Exception as e:
             self.log(f"❌ Node ID response processing failed: {e}")
             # Even if there's an error, continue scanning
-            QTimer.singleShot(500, self.advance_to_next_node)
+            if not getattr(self, "_batch_node_scan_active", False):
+                QTimer.singleShot(500, self.advance_to_next_node)
 
     def send_node_info_requests(self, node_id):
         """Send node info queries - FIXED VERSION."""
@@ -2428,6 +2467,10 @@ class MainWindow(QMainWindow):
         if event.kind == "sys_mode":
             self.sys_mode = event.value
             self.update_status_ui()
+            return
+
+        if event.kind == "emergency_stop":
+            self.emergency_stop_active = bool(event.value)
             return
 
         if event.kind == "zposs_sample":

@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication, QDialog, QLabel, QPushButton
 
 from gui.workspace.models import SessionState
@@ -14,6 +15,7 @@ from gui.workspace.pages.production_page import ProductionPage
 from gui.workspace.shell.project_workspace_window import ProjectWorkspaceWindow
 from gui.workspace.constants import ROUTE_FIRMWARE, ROUTE_MECHANICAL, ROUTE_PRODUCTION, ROUTE_PROJECT_CONFIG
 from gui.workspace.widgets import LiveSessionPanel
+from gui.main_window import MainWindow
 from myconfig.project_models import ProjectDefinition, ProjectFeatures, ProjectUiConfig
 
 try:
@@ -299,6 +301,164 @@ ui:
             self._app.processEvents()
             for node_id in (5, 8, 9, 12):
                 self.assertEqual(_is_green(node_id), node_id in state["detected_nodes"])
+
+    def test_emergency_stop_badge_is_global_and_does_not_change_node_leds(self) -> None:
+        window = self._build_workspace_window()
+        window.show()
+
+        state = {
+            "connected": True,
+            "power_on": True,
+            "connected_nodes": [5, 8],
+            "detected_nodes": [5],
+            "emergency": None,
+        }
+
+        window._bridge.get_runtime_communication_model = lambda create_if_missing=False: {
+            "connected": state["connected"],
+            "ports": [],
+            "selected_port": "COM11",
+            "baud_rates": ["115200"],
+            "selected_baud": "115200",
+        }
+        window._bridge.get_runtime_robot_power_state = lambda create_if_missing=False: state["power_on"]
+        window._bridge.get_runtime_emergency_stop_state = lambda create_if_missing=False: state["emergency"]
+        window._bridge.get_runtime_robot_nodes = lambda create_if_missing=False: {
+            "connected_nodes": list(state["connected_nodes"]),
+            "detected_nodes": list(state["detected_nodes"]),
+            "rows": [{"node_id": node_id} for node_id in state["connected_nodes"]],
+        }
+
+        section = window.node_status_section
+        badge = section.findChild(QLabel, "EmergencyStopBadge")
+        robot_power = section.findChild(QPushButton, "RobotPowerButton")
+
+        def _is_green(node_id: int) -> bool:
+            return "#7ED957" in section._led_by_node_id[node_id].styleSheet()
+
+        section.begin_visual_update(window._bridge.get_runtime_robot_nodes())
+        window._refresh_shared_node_status()
+        self._app.processEvents()
+        self.assertEqual(badge.text(), "ESTOP")
+        self.assertIn("#2E9F58", badge.styleSheet())
+        self.assertEqual(badge.focusPolicy(), Qt.FocusPolicy.NoFocus)
+        self.assertTrue(_is_green(5))
+        self.assertFalse(_is_green(8))
+        self.assertLess(badge.x(), robot_power.x())
+
+        state["emergency"] = True
+        window._refresh_shared_node_status()
+        self._app.processEvents()
+        self.assertEqual(badge.text(), "EMERGENCY BUTTON")
+        self.assertIn("#D92D20", badge.styleSheet())
+        self.assertTrue(_is_green(5))
+        self.assertFalse(_is_green(8))
+
+        window.set_active_page(ROUTE_MECHANICAL, log_route_change=False)
+        self._app.processEvents()
+        self.assertEqual(badge.text(), "EMERGENCY BUTTON")
+
+        state["emergency"] = False
+        window._refresh_shared_node_status()
+        self._app.processEvents()
+        self.assertEqual(badge.text(), "Emergency Stop")
+        self.assertIn("#2E9F58", badge.styleSheet())
+        self.assertFalse(badge.hasFocus())
+
+    def test_update_nodes_clears_fresh_scan_before_replies_arrive(self) -> None:
+        window = self._build_workspace_window()
+        window.show()
+
+        state = {
+            "connected": True,
+            "power_on": True,
+            "connected_nodes": [5, 8, 9, 12],
+            "detected_nodes": [5, 8, 9, 12],
+        }
+
+        window._bridge.get_runtime_communication_model = lambda create_if_missing=False: {
+            "connected": state["connected"],
+            "ports": [],
+            "selected_port": "COM11",
+            "baud_rates": ["115200"],
+            "selected_baud": "115200",
+        }
+        window._bridge.get_runtime_robot_power_state = lambda create_if_missing=False: state["power_on"]
+        window._bridge.get_runtime_robot_nodes = lambda create_if_missing=False: {
+            "connected_nodes": list(state["connected_nodes"]),
+            "detected_nodes": list(state["detected_nodes"]),
+            "rows": [{"node_id": node_id} for node_id in state["connected_nodes"]],
+        }
+        window._bridge.request_runtime_node_scan = lambda: state.__setitem__("detected_nodes", []) or True
+
+        section = window.node_status_section
+
+        def _is_green(node_id: int) -> bool:
+            return "#7ED957" in section._led_by_node_id[node_id].styleSheet()
+
+        section.begin_visual_update(window._bridge.get_runtime_robot_nodes())
+        window._refresh_shared_node_status()
+        self._app.processEvents()
+        self.assertTrue(_is_green(5))
+
+        section.findChild(QPushButton, "UpdateNodesButton").click()
+        self._app.processEvents()
+        self.assertFalse(_is_green(5))
+        self.assertFalse(_is_green(8))
+        self.assertFalse(_is_green(9))
+        self.assertFalse(_is_green(12))
+
+
+class _FakeScanTimer:
+    def __init__(self) -> None:
+        self.started_with: list[int] = []
+        self.stopped = False
+
+    def start(self, interval: int) -> None:
+        self.started_with.append(interval)
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+class _FakeScanBackend:
+    def __init__(self) -> None:
+        self.sent_nodes: list[int] = []
+
+    def send_node_id_request(self, node_id: int):
+        self.sent_nodes.append(node_id)
+        return bytearray([0x25, 0xA5, 0x01, node_id, 0x31, 0x02, 0x86, 0x3F])
+
+
+class MainWindowNodeScanTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._app = QApplication.instance() or QApplication([])
+
+    def test_dispatch_node_scan_batch_sends_all_node_queries_immediately(self) -> None:
+        logs: list[str] = []
+        updates: list[str] = []
+        window = type("ScanHarness", (), {})()
+        window.backend_client = _FakeScanBackend()
+        window.node_scan_timeout_timer = _FakeScanTimer()
+        window.scan_active = False
+        window.cancel_scanning = False
+        window.current_scan_node = 99
+        window.detected_nodes = {5, 8}
+        window.validate_connection_state = lambda: True
+        window.log = logs.append
+        window.update_node_status_display = lambda: updates.append("refresh")
+
+        result = MainWindow.dispatch_node_scan_batch(window)
+
+        self.assertTrue(result)
+        self.assertTrue(window.scan_active)
+        self.assertTrue(window._batch_node_scan_active)
+        self.assertEqual(window.current_scan_node, 2)
+        self.assertEqual(window.detected_nodes, set())
+        self.assertEqual(window.backend_client.sent_nodes, list(range(2, 18)))
+        self.assertEqual(window.node_scan_timeout_timer.started_with, [500])
+        self.assertEqual(updates, ["refresh"])
 
     def test_workspace_session_edit_button_routes_to_active_production_page(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

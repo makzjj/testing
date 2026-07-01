@@ -326,6 +326,16 @@ class WorkspaceRuntimeBridge:
             return False
         return True
 
+    def get_runtime_emergency_stop_state(self, *, create_if_missing: bool = False) -> bool | None:
+        """Return the current global emergency-stop state from the shared runtime."""
+        runtime_window = self.get_runtime_window(create_if_missing=create_if_missing)
+        if runtime_window is None:
+            return None
+        state = getattr(runtime_window, "emergency_stop_active", None)
+        if isinstance(state, bool):
+            return state
+        return None
+
     def send_runtime_robot_power(self, power_on: bool) -> bytearray:
         """Send the robot power command through the existing runtime backend path."""
         runtime_window = self.get_runtime_window(create_if_missing=True)
@@ -460,6 +470,7 @@ class WorkspaceRuntimeBridge:
         if runtime_window is None:
             return False
         for method_name in (
+            "dispatch_node_scan_batch",
             "start_node_scan",
             "start_node_detection",
             "initialize_node_detection",

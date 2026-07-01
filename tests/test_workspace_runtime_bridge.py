@@ -164,6 +164,18 @@ mcu:
             self.assertEqual(nodes["connected_nodes"], [5, 8, 9, 12])
             self.assertEqual(nodes["detected_nodes"], [5, 8, 9, 12])
 
+    def test_bridge_exposes_runtime_emergency_stop_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "demo.yaml"
+            config_path.write_text("project:\n  name: demo\n", encoding="utf-8")
+
+            project = ProjectDefinition(name="demo", display_name="Demo", config_path=config_path)
+            bridge = WorkspaceRuntimeBridge(project)
+            runtime_window = SimpleNamespace(emergency_stop_active=True)
+
+            with patch.object(bridge, "get_runtime_window", return_value=runtime_window):
+                self.assertTrue(bridge.get_runtime_emergency_stop_state(create_if_missing=False))
+
     def test_bridge_loads_editor_model_from_accuess_style_yaml(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "ACCuESS.yaml"
