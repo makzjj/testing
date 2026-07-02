@@ -1,0 +1,91 @@
+# Architecture And Migration
+
+This document is the lean migration contract for the current codebase. It is not a rewrite plan. It exists to keep ownership clear while `main_window.py` remains active during staged replacement work.
+
+## A. Current known architecture risks
+
+- Raw packet fan-out:
+  - `MainWindow.packet_received` is emitted before shared runtime handling runs.
+  - Multiple pages and controllers subscribe directly to raw packet traffic.
+- Duplicated packet decoding:
+  - Semantic decoding exists in shared helpers, but several controllers/pages decode the same packet classes again locally.
+- Page-local protocol/runtime state:
+  - Some pages keep local sensor, interrupt, parameter, or node-config caches instead of rendering one canonical shared state.
+- Controller exposure to unrelated traffic:
+  - Workflow controllers can still see unrelated packets from the shared runtime stream and may fail or ignore traffic based on local expectations.
+- Legacy `main_window.py` ownership:
+  - `main_window.py` still owns important runtime behavior, state updates, and packet distribution while newer services and workspace pages coexist beside it.
+- Duplicate node discovery/info behavior:
+  - Node connectivity and follow-up info requests are triggered from more than one legacy path.
+- Known parameter-path duplication:
+  - A shared parameter pipeline exists, but legacy UUID-only and PWM-only flows still coexist beside it.
+
+## B. Target ownership model
+
+Protocol
+-> frame parsing and semantic decoding only
+
+Runtime state
+-> shared per-node/system state and unsolicited events
+
+Request/operation routing
+-> only matching packets reach active workflows
+
+Controllers
+-> workflow state only
+
+UI/pages
+-> start operations and render canonical state only
+
+## C. MainWindow migration rule
+
+- `main_window.py` remains active during migration.
+- No responsibility is removed until a replacement owner exists, tests pass, callers migrate, and live validation passes where hardware behavior matters.
+
+## D. Short migration order
+
+1. low-risk pilot responsibility
+2. prove migration pattern
+3. Sampling
+4. Single Axis
+5. unified parameter-pipeline migration
+6. Mechanical utility ownership
+7. remaining `main_window.py` responsibilities
+8. Runtime tab removal after parity
+
+## Pilot update
+
+- Selected Phase 0B pilot:
+  - firmware/version runtime state ownership
+- Why this pilot:
+  - lower risk than Sampling because it is passive status traffic, already uses shared semantic decode, and does not sit on motion timing or workflow timeouts
+- Canonical owner before:
+  - per-node firmware lived in shared `node_status`, but MCU firmware lived as a legacy `MainWindow.mcu_version` attribute and `CommMonitorDialog` kept its own node-version cache for reporting
+- Canonical owner after:
+  - runtime firmware/version state is owned by Runtime packet handling plus runtime state on `MainWindow`
+  - per-node firmware is read from `node_status`
+  - MCU firmware is read from one runtime-owned `runtime_system_state["mcu_version"]` slot exposed through `MainWindow.mcu_version`
+- Legacy path removed/deprecated:
+  - removed active `CommMonitorDialog.node_versions` state cache
+  - retained `comm_monitor.handle_node_version(...)` only as a pre-test workflow signal, not a state owner
+- Tests run:
+  - `python -m pytest tests/test_backend_runtime_services.py tests/test_workspace_runtime_bridge.py tests/test_comm_monitor.py`
+  - `python -m pytest tests/test_workspace_session_panel.py tests/test_single_axis_functional_controller.py tests/test_sampling_controller.py`
+- Remaining deletion condition:
+  - `main_window.py` still remains the legacy runtime shell
+  - direct event delivery to `CommMonitorDialog.handle_node_version(...)` can be removed only after that pre-test workflow has a migrated request/response owner outside raw runtime callbacks
+
+## E. Governing rule
+
+Every touched responsibility must end with fewer owners, fewer active paths, and a clear deletion plan.
+
+## Future implementation report requirements
+
+Architecture impact:
+- Canonical owner:
+- Existing path reused or replaced:
+- Legacy/duplicate path affected:
+- Migration or removal performed:
+- Remaining migration work:
+- Regression tests:
+- Live validation required:
