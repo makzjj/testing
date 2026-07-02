@@ -469,18 +469,10 @@ class WorkspaceRuntimeBridge:
         runtime_window = self.get_runtime_window(create_if_missing=True)
         if runtime_window is None:
             return False
-        for method_name in (
-            "dispatch_node_scan_batch",
-            "start_node_scan",
-            "start_node_detection",
-            "initialize_node_detection",
-            "update_node_status_display",
-        ):
-            callback = getattr(runtime_window, method_name, None)
-            if callable(callback):
-                callback()
-                return True
-        return False
+        callback = getattr(runtime_window, "dispatch_node_scan_batch", None)
+        if not callable(callback):
+            return False
+        return bool(callback())
 
     @property
     def project_definition(self) -> ProjectDefinition:

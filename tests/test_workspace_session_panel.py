@@ -463,22 +463,71 @@ class MainWindowNodeScanTests(unittest.TestCase):
         self.assertEqual(window.node_scan_timeout_timer.started_with, [500])
         self.assertEqual(updates, ["refresh"])
 
+    def test_start_communication_schedules_burst_scan_only(self) -> None:
+        scheduled: list[tuple[int, object]] = []
+        window = type("StartupHarness", (), {})()
+        window.backend_client = type("Backend", (), {"reset_input_buffer": lambda self: None})()
+        window.mcu_version_queried = False
+        window.query_mcu_version = lambda: None
+        window.dispatch_node_scan_batch = lambda: True
+        window.log = lambda message: None
+
+        with patch("gui.main_window.QTimer.singleShot", side_effect=lambda delay, callback: scheduled.append((delay, callback))):
+            MainWindow.start_communication(window)
+
+        self.assertEqual(scheduled, [(200, window.query_mcu_version), (600, window.dispatch_node_scan_batch)])
+
+    def test_dispatch_node_scan_batch_starts_a_fresh_cycle_each_time(self) -> None:
+        window = type("ScanHarness", (), {})()
+        window.backend_client = _FakeScanBackend()
+        window.node_scan_timeout_timer = _FakeScanTimer()
+        window.scan_active = False
+        window.cancel_scanning = False
+        window.current_scan_node = 99
+        window.detected_nodes = {5, 8}
+        window.node_discovery_coordinator = NodeDiscoveryCoordinator()
+        window.validate_connection_state = lambda: True
+        window.log = lambda message: None
+        window.update_node_status_display = lambda: None
+
+        self.assertTrue(MainWindow.dispatch_node_scan_batch(window))
+        window.detected_nodes.add(12)
+
+        self.assertTrue(MainWindow.dispatch_node_scan_batch(window))
+
+        self.assertEqual(window.node_discovery_coordinator.cycle_id, 2)
+        self.assertEqual(window.detected_nodes, set())
+        self.assertEqual(window.backend_client.sent_nodes, list(range(2, 18)) * 2)
+        self.assertEqual(window.node_scan_timeout_timer.started_with, [500, 500])
+
+    def test_node_scan_timeout_finishes_batch_window(self) -> None:
+        logs: list[str] = []
+        window = type("ScanHarness", (), {})()
+        window.scan_active = True
+        window._batch_node_scan_active = True
+        window.validate_connection_state = lambda: True
+        window.log = logs.append
+
+        MainWindow.on_node_scan_timeout(window)
+
+        self.assertFalse(window.scan_active)
+        self.assertFalse(window._batch_node_scan_active)
+        self.assertIn("Node scan window elapsed.", logs)
+
     def test_node_info_scheduling_uses_one_dedup_path_per_cycle(self) -> None:
         logs: list[str] = []
         updates: list[str] = []
-        advances: list[str] = []
         scheduled: list[tuple[int, object]] = []
         sent_info: list[int] = []
         window = type("ScanHarness", (), {})()
         window.node_status = {}
         window.detected_nodes = set()
         window.node_scan_timeout_timer = _FakeScanTimer()
-        window._batch_node_scan_active = False
+        window._batch_node_scan_active = True
         window.node_discovery_coordinator = NodeDiscoveryCoordinator()
         window.node_discovery_coordinator.begin_cycle()
         window.log = logs.append
         window.update_node_status_display = lambda: updates.append("refresh")
-        window.advance_to_next_node = lambda: advances.append("advance")
         window.send_node_info_requests = lambda node_id: sent_info.append(node_id)
         window._dispatch_scheduled_node_info_requests = (
             lambda node_id: MainWindow._dispatch_scheduled_node_info_requests(window, node_id)
@@ -503,13 +552,10 @@ class MainWindowNodeScanTests(unittest.TestCase):
             MainWindow.process_node_id_response(window, 5, [0x3A, 0x05])
 
         self.assertEqual(len([item for item in scheduled if item[0] == 200]), 1)
-        self.assertEqual(len([item for item in scheduled if item[0] == 500]), 1)
         self.assertFalse(window.node_discovery_coordinator.is_pending(5))
         self.assertEqual(window.node_discovery_coordinator.scheduled_nodes(), {5})
         self.assertEqual(window.detected_nodes, {5})
-        self.assertTrue(window.node_scan_timeout_timer.stopped)
         self.assertGreaterEqual(len(updates), 2)
-        self.assertEqual(advances, [])
         self.assertTrue(any("Skipping duplicate node info scheduling" in entry for entry in logs))
 
     def test_new_discovery_cycle_allows_node_info_reschedule(self) -> None:
@@ -524,7 +570,6 @@ class MainWindowNodeScanTests(unittest.TestCase):
         window.node_discovery_coordinator.begin_cycle()
         window.log = lambda message: None
         window.update_node_status_display = lambda: None
-        window.advance_to_next_node = lambda: None
         window.send_node_info_requests = lambda node_id: sent_info.append(node_id)
         window._dispatch_scheduled_node_info_requests = (
             lambda node_id: MainWindow._dispatch_scheduled_node_info_requests(window, node_id)
@@ -544,6 +589,70 @@ class MainWindowNodeScanTests(unittest.TestCase):
             callback()
 
         self.assertEqual(sent_info, [8, 8])
+
+    def test_disconnect_during_active_batch_clears_scan_state_safely(self) -> None:
+        class _FakeWidget:
+            def __init__(self) -> None:
+                self.enabled: bool | None = None
+                self.text: str | None = None
+
+            def setEnabled(self, enabled: bool) -> None:
+                self.enabled = enabled
+
+            def setText(self, text: str) -> None:
+                self.text = text
+
+            def setStyleSheet(self, style: str) -> None:
+                self.style = style
+
+        logs: list[str] = []
+        window = type("DisconnectHarness", (), {})()
+        window.is_connected = True
+        window.cancel_scanning = False
+        window.scan_active = True
+        window._batch_node_scan_active = True
+        window.node_scan_timeout_timer = _FakeScanTimer()
+        window.node_status_timer = _FakeScanTimer()
+        window.sys_mode_timer = _FakeScanTimer()
+        window.update_status_ui = lambda: None
+        window.mcu_version_queried = True
+        window.mcu_version = "1.2.3"
+        window.mcu_version_lbl = _FakeWidget()
+        window.node_discovery_coordinator = NodeDiscoveryCoordinator()
+        window.node_discovery_coordinator.begin_cycle()
+        window.backend_client = type("Backend", (), {"disconnect": lambda self: None})()
+        window.connect_btn = _FakeWidget()
+        window.port_combo = _FakeWidget()
+        window.baud_combo = _FakeWidget()
+        window.node_status_lbl = _FakeWidget()
+        window.node_status = {node_id: {"connected": node_id == 5} for node_id in range(2, 18)}
+        window.update_node_status_display = lambda: None
+        window.zposs_plot = None
+        window.stop_btn = _FakeWidget()
+        window.all_logpos_stop_btn = _FakeWidget()
+        window.log = logs.append
+
+        MainWindow.disconnect_serial(window)
+
+        self.assertFalse(window.is_connected)
+        self.assertTrue(window.cancel_scanning)
+        self.assertFalse(window.scan_active)
+        self.assertFalse(window._batch_node_scan_active)
+        self.assertTrue(window.node_scan_timeout_timer.stopped)
+        self.assertEqual(window.node_discovery_coordinator.cycle_id, 0)
+        self.assertIsNone(window.mcu_version)
+
+    def test_no_sequential_scan_entry_points_remain(self) -> None:
+        for method_name in (
+            "start_node_scan",
+            "scan_next_node",
+            "advance_to_next_node",
+            "start_node_detection",
+            "send_single_scan_cycle",
+            "finalize_single_scan",
+            "stop_node_detection",
+        ):
+            self.assertFalse(hasattr(MainWindow, method_name), method_name)
 
     def test_workspace_session_edit_button_routes_to_active_production_page(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

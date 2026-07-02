@@ -164,6 +164,40 @@ mcu:
             self.assertEqual(nodes["connected_nodes"], [5, 8, 9, 12])
             self.assertEqual(nodes["detected_nodes"], [5, 8, 9, 12])
 
+    def test_bridge_requests_runtime_scan_through_burst_path_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "demo.yaml"
+            config_path.write_text("project:\n  name: demo\n", encoding="utf-8")
+
+            project = ProjectDefinition(name="demo", display_name="Demo", config_path=config_path)
+            bridge = WorkspaceRuntimeBridge(project)
+            scan_requests: list[str] = []
+            runtime_window = SimpleNamespace(
+                dispatch_node_scan_batch=lambda: scan_requests.append("burst") or True,
+            )
+
+            with patch.object(bridge, "get_runtime_window", return_value=runtime_window):
+                self.assertTrue(bridge.request_runtime_node_scan())
+
+            self.assertEqual(scan_requests, ["burst"])
+
+    def test_bridge_does_not_fall_back_to_removed_sequential_scan_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "demo.yaml"
+            config_path.write_text("project:\n  name: demo\n", encoding="utf-8")
+
+            project = ProjectDefinition(name="demo", display_name="Demo", config_path=config_path)
+            bridge = WorkspaceRuntimeBridge(project)
+            sequential_calls: list[str] = []
+            runtime_window = SimpleNamespace(
+                start_node_scan=lambda: sequential_calls.append("sequential"),
+            )
+
+            with patch.object(bridge, "get_runtime_window", return_value=runtime_window):
+                self.assertFalse(bridge.request_runtime_node_scan())
+
+            self.assertEqual(sequential_calls, [])
+
     def test_bridge_exposes_runtime_emergency_stop_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "demo.yaml"

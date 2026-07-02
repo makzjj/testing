@@ -45,10 +45,7 @@ from gui.rp_axis_animation import RpAxisAnimation
 COMMUNICATION_START_DELAY = 200      # Delay before starting communication
 MCU_QUERY_DELAY_MS = 200
 NODE_SCAN_START_DELAY = 600           # Delay before starting node scan
-NODE_ADVANCE_DELAY = 500              # Delay when advancing to next node
-NODE_SCAN_RETRY_DELAY = 200           # Delay for node scan retries
-SINGLE_SCAN_CYCLE_DELAY = 500         # Delay between single scan cycles
-SINGLE_SCAN_FINALIZE_DELAY = 500      # Delay for finalizing single scan
+NODE_ADVANCE_DELAY = 500              # Batch discovery window duration
 NODE_INFO_REQUEST_DELAY = 200         # Delay before requesting node info
 UUID_RETRY_CHECK_DELAY = 200          # Delay before checking UUID retry
 NODE_CMD_DELAY_1 = 150                # First command delay
@@ -180,15 +177,7 @@ class MainWindow(QMainWindow):
         self._batch_node_scan_active = False
         self.emergency_stop_active = None
 
-        self.detection_interval = 100 #500  # ms between commands
-        self.response_timeout = 100 #1000 #2500  # ms timeout for responses
-        self.scan_cycle_delay = 2000  # ms delay between full scan cycles
-
         # Node status monitoring
-        # Initialize node detection attributes FIRST
-        self.detection_active = False
-        self.current_detection_node = 2
-        self.pending_detection = {}
         self.node_status = {}  # Dictionary to store node status
 
         # Initialize node status for all possible nodes (2-16, matching legacy defaults)
@@ -1073,8 +1062,6 @@ class MainWindow(QMainWindow):
             self.baud_combo.setEnabled(False)  # Disable baud rate during connection
 
             # Initialize node detection system
-            self.initialize_node_detection()
-
             # Enable ZPOSS controls if available
             try:
                 if hasattr(self, 'zposs_plot') and self.zposs_plot:
@@ -1113,7 +1100,7 @@ class MainWindow(QMainWindow):
             self.is_connected = False
             self.cancel_scanning = True
             self.scan_active = False
-            self.detection_active = False
+            self._batch_node_scan_active = False
 
             # Stop all timers
             if hasattr(self, 'node_scan_timeout_timer'):
@@ -1183,28 +1170,10 @@ class MainWindow(QMainWindow):
             self.is_connected = False
             self.cancel_scanning = True
             self.scan_active = False
-            self.detection_active = False
+            self._batch_node_scan_active = False
             return False
 
         return True
-
-    def initialize_node_detection(self):
-        """Initialize the node detection system safely."""
-        try:
-            # Ensure all required attributes exist
-            if not hasattr(self, 'detection_active'):
-                self.detection_active = False
-            if not hasattr(self, 'current_detection_node'):
-                self.current_detection_node = 2
-            if not hasattr(self, 'pending_detection'):
-                self.pending_detection = {}
-            if not hasattr(self, 'node_status'):
-                self.node_status = build_default_node_status()
-
-            self.log("✅ Node detection system initialized")
-
-        except Exception as e:
-            self.log(f"❌ Node detection initialization failed: {e}")
 
     def start_communication(self):
         """Start all communication tasks after connection is stable."""
@@ -1219,8 +1188,8 @@ class MainWindow(QMainWindow):
             else:
                 self.log("ℹ️ MCU version already queried, skipping")
 
-            # Start node detection after MCU query
-            QTimer.singleShot(NODE_SCAN_START_DELAY, self.start_node_scan)
+            # Start burst node scan after MCU query
+            QTimer.singleShot(NODE_SCAN_START_DELAY, self.dispatch_node_scan_batch)
 
 
         except Exception as e:
@@ -1255,102 +1224,15 @@ class MainWindow(QMainWindow):
             self._batch_node_scan_active = False
             return False
 
-    def start_node_scan(self):
-        """Start scanning nodes sequentially after COM connected."""
-        if not self.validate_connection_state():
-            self.log("⚠️ Serial port not connected, cannot start scan")
-            self.scan_active = False
-            return
-
-        self.scan_active = True
-        self.cancel_scanning = False
-        self.current_scan_node = 2
-        self.detected_nodes.clear()
-        self.node_discovery_coordinator.begin_cycle()
-        self.log("🔍 Starting node ID scan (2–14 sequentially)...")
-        self.scan_next_node()
-
-    def scan_next_node(self):
-        """Send NodeIDRef to the next node, wait for response."""
-        # Check if we should stop scanning
-        if not self.scan_active or self.cancel_scanning or not self.validate_connection_state():
-            self.log("🛑 Scanning stopped (connection lost or cancelled)")
-            self.scan_active = False
-            return
-
-        node_id = self.current_scan_node
-        if node_id > 18:
-            self.log("✅ Node scan completed for all nodes 2–17")
-            self.scan_active = False
-            return
-
-        self.log(f"📡 Scanning Node {node_id:02d}...")
-
-        try:
-            if not self.validate_connection_state():
-                self.log("🛑 Connection lost during scan")
-                self.scan_active = False
-                return
-
-            payload = self.backend_client.send_node_id_request(node_id)
-            self.log(f"TX[SCAN] → Node {node_id:02d}: {' '.join(f'{b:02X}' for b in payload)}")
-
-            # Start timeout countdown for node response
-            self.node_scan_timeout_timer.start(NODE_ADVANCE_DELAY)
-
-        except Exception as e:
-            self.log(f"❌ Failed to send NodeIDRef to Node {node_id}: {e}")
-            if self.validate_connection_state():
-                QTimer.singleShot(NODE_ADVANCE_DELAY, self.advance_to_next_node)
-            else:
-                self.scan_active = False
-
     def on_node_scan_timeout(self):
-        """Called when a node doesn't respond within timeout."""
+        """Finish the current burst discovery window."""
         if not self.validate_connection_state():
             self.scan_active = False
             return
 
-        if getattr(self, "_batch_node_scan_active", False):
-            self.log("Node scan window elapsed.")
-            self._batch_node_scan_active = False
-            self.scan_active = False
-            return
-
-        node_id = self.current_scan_node
-        self.log(f"⏱️ Node {node_id:02d} timed out, moving to next node.")
-        self.advance_to_next_node()
-
-    def advance_to_next_node(self):
-        """Advance to next node with robust error handling."""
-        try:
-            # Check if we should stop
-            if not self.scan_active or self.cancel_scanning or not self.validate_connection_state():
-                self.scan_active = False
-                return
-
-            self.current_scan_node += 1
-
-            # Add a small delay before scanning next node
-            if self.current_scan_node <= 17:
-                self.log(f"➡️ Advancing to Node {self.current_scan_node:02d}...")
-                if self.validate_connection_state():
-                    QTimer.singleShot(NODE_ADVANCE_DELAY, self.scan_next_node)
-                else:
-                    self.scan_active = False
-            else:
-                self.log("✅ Node scan completed for all nodes 2–17")
-                self.scan_active = False
-
-        except Exception as e:
-            self.log(f"❌ Error advancing to next node: {e}")
-            # Try to recover and continue scanning
-            if self.validate_connection_state():
-                self.current_scan_node += 1
-                if self.current_scan_node <= 17:
-                    QTimer.singleShot(NODE_ADVANCE_DELAY, self.scan_next_node)
-            else:
-                self.scan_active = False
+        self.log("Node scan window elapsed.")
+        self._batch_node_scan_active = False
+        self.scan_active = False
 
     def query_mcu_version(self):
         """Query MCU firmware version after connection - WITH DUPLICATE PREVENTION."""
@@ -1373,100 +1255,6 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             self.log(f"Failed to query MCU version: {e}")
-
-    def start_node_detection(self):
-        """Start single node detection scan after connection."""
-        try:
-            if not hasattr(self, 'detection_active'):
-                self.detection_active = False
-
-            if not hasattr(self, 'current_detection_node'):
-                self.current_detection_node = 2
-
-            if not hasattr(self, 'pending_detection'):
-                self.pending_detection = {}
-
-            if not self.backend_client.is_connected():
-                self.log("⚠️ Cannot start node detection - serial port not connected")
-                return
-
-            self.log("🔍 Starting single node detection scan...")
-            self.detection_active = True
-            self.current_detection_node = 2
-            self.pending_detection = {}
-
-            # Start scanning immediately and continue until all nodes are scanned
-            self.send_single_scan_cycle()
-
-            self.log("✅ Node detection started - will scan nodes 2-12 sequentially")
-
-        except Exception as e:
-            self.log(f"❌ Node detection startup failed: {e}")
-
-    def send_single_scan_cycle(self):
-        """Send a node ID request to all possible nodes (2–14)."""
-        if not self.detection_active or not self.backend_client.is_connected():
-            return
-
-        node_id = self.current_detection_node
-
-        try:
-            payload = self.backend_client.send_node_id_request(node_id)
-            self.log(f"TX[Node Detect] → Node {node_id:02d}: {' '.join(f'{b:02X}' for b in payload)}")
-            self.pending_detection[node_id] = QDateTime.currentDateTime()
-        except Exception as e:
-            self.log(f"❌ Failed to send to node {node_id}: {e}")
-
-        # Move to next node
-        self.current_detection_node += 1
-        if self.current_detection_node <= 17:
-            QTimer.singleShot(SINGLE_SCAN_CYCLE_DELAY, self.send_single_scan_cycle)
-        else:
-            QTimer.singleShot(SINGLE_SCAN_FINALIZE_DELAY, self.finalize_single_scan)
-
-    def finalize_single_scan(self):
-        """Finalize the single scan after all nodes have been queried."""
-        try:
-            self.detection_active = False
-
-            # Count connected nodes
-            connected_nodes = [node_id for node_id, status in self.node_status.items()
-                               if status.get('connected', False)]
-
-            self.log(f"✅ Single node detection completed: {len(connected_nodes)} nodes connected")
-            self.log(f"📊 Connected nodes: {', '.join(map(str, connected_nodes)) if connected_nodes else 'None'}")
-
-            # Force UI update to show final status
-            self.update_node_status_display()
-
-        except Exception as e:
-            self.log(f"❌ Error finalizing single scan: {e}")
-
-    def stop_node_detection(self):
-        """Stop node detection when disconnecting."""
-        try:
-            if hasattr(self, 'detection_active'):
-                self.detection_active = False
-
-            if hasattr(self, 'node_status_timer'):
-                self.node_status_timer.stop()
-
-            self.log("🛑 Node detection stopped")
-
-            # Reset all node status if it exists
-            if hasattr(self, 'node_status'):
-                for node_id in range(2, 17):
-                    if node_id in self.node_status:
-                        self.node_status[node_id]['connected'] = False
-                        self.node_status[node_id]['response_time'] = 0
-
-            self.node_discovery_coordinator.reset()
-
-            # if hasattr(self, 'update_node_status_display'):
-            self.update_node_status_display()
-
-        except Exception as e:
-            self.log(f"❌ Error stopping node detection: {e}")
 
     def setup_node_status_gui(self):
         """Setup the node status table for connected node information."""
@@ -1650,7 +1438,7 @@ class MainWindow(QMainWindow):
     def process_node_id_response(self, node_id, params):
         """Handle Node ID response and start info retrieval."""
         try:
-            self.log(f"✅ Node {node_id:02d} responded to NodeIDRef")
+            self.log(f"Node {node_id:02d} responded to NodeIDRef")
 
             if node_id not in self.node_status:
                 self.node_status[node_id] = {'connected': True}
@@ -1658,21 +1446,11 @@ class MainWindow(QMainWindow):
                 self.node_status[node_id]['connected'] = True
 
             self.detected_nodes.add(node_id)
-            if not getattr(self, "_batch_node_scan_active", False):
-                self.node_scan_timeout_timer.stop()
-
             self._schedule_node_info_requests_for_node(node_id, source="node_id_response")
-
-            if not getattr(self, "_batch_node_scan_active", False):
-                QTimer.singleShot(500, self.advance_to_next_node)
-
             self.update_node_status_display()
 
         except Exception as e:
-            self.log(f"❌ Node ID response processing failed: {e}")
-            # Even if there's an error, continue scanning
-            if not getattr(self, "_batch_node_scan_active", False):
-                QTimer.singleShot(500, self.advance_to_next_node)
+            self.log(f"Node ID response processing failed: {e}")
 
     def send_node_info_requests(self, node_id):
         """Send node info queries - FIXED VERSION."""

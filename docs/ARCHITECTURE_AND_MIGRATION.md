@@ -100,6 +100,35 @@ UI/pages
   - `main_window.py` still owns the legacy scan lifecycle and timer orchestration
   - a full removal waits until scan lifecycle ownership itself is migrated out of `main_window.py` without changing UI behavior or controller access
 
+## Pilot update
+
+- Selected Phase 0D pilot:
+  - obsolete sequential node-scan workflow removal
+- Canonical owner before:
+  - burst scan already existed in `MainWindow.dispatch_node_scan_batch(...)`
+  - legacy sequential scan entry points still coexisted in `main_window.py`
+  - startup and bridge scan hooks could still reach sequential paths
+- Canonical owner after:
+  - burst CAN scan is the sole canonical node-scan workflow
+  - `MainWindow.start_communication()` now starts `dispatch_node_scan_batch()`
+  - `WorkspaceRuntimeBridge.request_runtime_node_scan()` now calls only `dispatch_node_scan_batch()`
+- Legacy path removed/deprecated:
+  - removed sequential-only scan methods and their entry points
+  - removed the sequential branch from `on_node_scan_timeout()`
+- Remaining `MainWindow` responsibility:
+  - receiving legacy runtime events
+  - opening and closing the burst scan window
+  - integrating the batch timeout timer with the event loop
+  - invoking the existing node-info command-burst sender through the Phase 0C coordinator path
+- Tests run:
+  - `python -m pytest tests/test_workspace_session_panel.py tests/test_workspace_runtime_bridge.py`
+  - `python -m pytest tests/test_backend_runtime_services.py tests/test_workspace_runtime_bridge.py tests/test_workspace_session_panel.py tests/test_comm_monitor.py tests/test_single_axis_functional_controller.py tests/test_sampling_controller.py`
+- Live validation required:
+  - confirm one burst scan starts on connect
+  - confirm `Update Nodes` sends one `86 3F` burst with no sequential delay loop
+  - confirm each responding node gets one node-info burst only
+  - confirm disconnect during a burst leaves no stale active scan state
+
 ## E. Governing rule
 
 Every touched responsibility must end with fewer owners, fewer active paths, and a clear deletion plan.
