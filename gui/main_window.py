@@ -127,7 +127,6 @@ class MainWindow(QMainWindow):
         # --- Connection state tracking ---
         self.is_connected = False  # Track connection state
         self.scan_active = False  # Track if scanning is active
-        self.cancel_scanning = False  # Flag to cancel scanning
 
         # Per-node panels and state
         self.motor_panels = {} # {node_id: MotorAnimationModule}
@@ -1055,7 +1054,6 @@ class MainWindow(QMainWindow):
 
         if self.backend_client.connect(port, baud_rate):
             self.is_connected = True
-            self.cancel_scanning = False
             self.log(f"✅ Successfully connected to {port} at {self.backend_client.baudrate} baud")
             self.connect_btn.setText("Disconnect")
             self.port_combo.setEnabled(False)
@@ -1098,7 +1096,6 @@ class MainWindow(QMainWindow):
         try:
             # Set flags to stop all activities FIRST
             self.is_connected = False
-            self.cancel_scanning = True
             self.scan_active = False
             self._batch_node_scan_active = False
 
@@ -1168,7 +1165,6 @@ class MainWindow(QMainWindow):
         # Check serial connection state
         if not self.backend_client.is_connected():
             self.is_connected = False
-            self.cancel_scanning = True
             self.scan_active = False
             self._batch_node_scan_active = False
             return False
@@ -1203,7 +1199,6 @@ class MainWindow(QMainWindow):
             return False
 
         self.scan_active = True
-        self.cancel_scanning = False
         self.current_scan_node = 2
         self.detected_nodes.clear()
         self.node_discovery_coordinator.begin_cycle()
@@ -1445,8 +1440,9 @@ class MainWindow(QMainWindow):
             else:
                 self.node_status[node_id]['connected'] = True
 
-            self.detected_nodes.add(node_id)
-            self._schedule_node_info_requests_for_node(node_id, source="node_id_response")
+            if self._batch_node_scan_active:
+                self.detected_nodes.add(node_id)
+                self._schedule_node_info_requests_for_node(node_id, source="node_id_response")
             self.update_node_status_display()
 
         except Exception as e:
@@ -1557,7 +1553,8 @@ class MainWindow(QMainWindow):
                 node_record['connected'] = True
                 self.log(f"✅ Node {node_id:02d} detected via incoming packet")
 
-            self._schedule_node_info_requests_for_node(node_id, source="node_activity")
+            if self._batch_node_scan_active:
+                self._schedule_node_info_requests_for_node(node_id, source="node_activity")
 
             self.update_node_status_display()
 

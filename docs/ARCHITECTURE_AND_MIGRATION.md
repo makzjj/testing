@@ -129,6 +129,28 @@ UI/pages
   - confirm each responding node gets one node-info burst only
   - confirm disconnect during a burst leaves no stale active scan state
 
+## Closeout update
+
+- Selected closeout:
+  - burst-scan lifecycle policy and tests
+- Canonical owner remains:
+  - `MainWindow` temporarily owns burst scan start/end, the Qt batch-window timer, disconnect teardown, and legacy runtime-event integration
+  - no new lifecycle coordinator was introduced
+- Burst-window versus runtime-connectivity semantics:
+  - `detected_nodes` means nodes detected during the active `Update Nodes` batch window only
+  - `node_status.connected` and node information remain broader runtime knowledge and persist until disconnect/reset
+- Late-response policy:
+  - after the burst window ends, late packets may still update runtime connectivity and runtime node information
+  - late packets must not add nodes to `detected_nodes`
+  - late packets must not trigger a new node-info request burst for the completed scan
+  - completed scan LED results therefore remain frozen because the workspace UI renders `detected_nodes` for the current scan result
+- `cancel_scanning` status:
+  - removed
+  - repo-wide search showed no active readers after sequential scan removal
+- Tests run:
+  - `python -m pytest tests/test_workspace_session_panel.py tests/test_workspace_runtime_bridge.py`
+  - `python -m pytest tests/test_backend_runtime_services.py tests/test_workspace_runtime_bridge.py tests/test_workspace_session_panel.py tests/test_comm_monitor.py tests/test_single_axis_functional_controller.py tests/test_sampling_controller.py`
+
 ## E. Governing rule
 
 Every touched responsibility must end with fewer owners, fewer active paths, and a clear deletion plan.
