@@ -4,6 +4,7 @@ import pytest
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
+from data.binary_cmd_builders import build_nodeconfig_query_payload
 from gui.workspace.pages.single_axis_functional_popup import SingleAxisFunctionalPopup
 
 
@@ -54,6 +55,48 @@ class _FakeBridge:
         return self._runtime_window
 
 
+def _emit_can(runtime_window: _FakeRuntimeWindow, sender: int, cmd: int, params: list[int]):
+    runtime_window.packet_received.emit({
+        "type": "can_over_uart",
+        "sender": sender,
+        "cmd": cmd,
+        "params": list(params),
+    })
+
+
+def _emit_direct(runtime_window: _FakeRuntimeWindow, node_id: int, payload: list[int]):
+    runtime_window.packet_received.emit({
+        "type": "direct_uart",
+        "node_id": node_id,
+        "raw_payload": list(payload),
+    })
+
+
+def _start_live_popup(node_id: int, node_name: str = "Axis") -> tuple[SingleAxisFunctionalPopup, _FakeBackendClient, _FakeRuntimeWindow]:
+    backend = _FakeBackendClient(connected=True)
+    runtime_window = _FakeRuntimeWindow(backend)
+    bridge = _FakeBridge(runtime_window)
+    popup = SingleAxisFunctionalPopup(node_options=[(node_id, node_name)], bridge=bridge)
+    popup.node_combo.setCurrentIndex(1)
+    popup._handle_run_clicked()
+    return popup, backend, runtime_window
+
+
+def _drive_to_first_run_ack_wait(runtime_window: _FakeRuntimeWindow, node_id: int) -> None:
+    _emit_can(runtime_window, node_id, 0xC4, [0x3A, 0x00])
+    _emit_can(runtime_window, node_id, 0xC3, [0x41])
+    _emit_can(runtime_window, node_id, 0x81, [ord("L")])
+    _emit_can(runtime_window, node_id, 0x81, [ord("I")])
+    _emit_can(runtime_window, node_id, 0x82, [0x00, 0x00, 0x00, 0x00])
+    _emit_can(runtime_window, node_id, 0xC9, [0x3A, 0x09])
+    _emit_can(runtime_window, node_id, 0xCA, [0x3A, 0x09])
+
+
+def _drive_to_first_sensor_wait(runtime_window: _FakeRuntimeWindow, node_id: int) -> None:
+    _drive_to_first_run_ack_wait(runtime_window, node_id)
+    _emit_can(runtime_window, node_id, 0x88, [0x53, 0x00, 0xBE])
+
+
 def test_disconnected_backend_aborts_run(monkeypatch):
     _suppress_boxes(monkeypatch)
     backend = _FakeBackendClient(connected=False)
@@ -74,14 +117,8 @@ def test_disconnected_backend_aborts_run(monkeypatch):
 
 def test_connected_backend_sends_and_receives(monkeypatch):
     _suppress_boxes(monkeypatch)
-    node_id = 3
-    backend = _FakeBackendClient(connected=True)
-    runtime_window = _FakeRuntimeWindow(backend)
-    bridge = _FakeBridge(runtime_window)
-
-    popup = SingleAxisFunctionalPopup(node_options=[(node_id, "AxisX")], bridge=bridge)
-    popup.node_combo.setCurrentIndex(1)
-    popup._handle_run_clicked()
+    node_id = 8
+    popup, backend, runtime_window = _start_live_popup(node_id, "AxisX")
 
     # Should be running in live mode
     assert popup._is_running is True
@@ -93,19 +130,11 @@ def test_connected_backend_sends_and_receives(monkeypatch):
     sent_nodes = {n for (n, _p) in backend.sent}
     assert sent_nodes == {node_id}
 
-    # Simulate incoming RX packets from our node
-    runtime_window.packet_received.emit({
-        "type": "can_over_uart",
-        "sender": node_id,
-        "cmd": 0x81,
-        "params": [ord('L')],
-    })
-    runtime_window.packet_received.emit({
-        "type": "can_over_uart",
-        "sender": node_id,
-        "cmd": 0x82,
-        "params": [0x00, 0x00, 0x00, 0x10],  # position 16
-    })
+    _emit_can(runtime_window, node_id, 0xC4, [0x3A, 0x00])
+    _emit_can(runtime_window, node_id, 0xC3, [0x41])
+    _emit_can(runtime_window, node_id, 0x81, [ord('L')])
+    _emit_can(runtime_window, node_id, 0x81, [ord('I')])
+    _emit_can(runtime_window, node_id, 0x82, [0x00, 0x00, 0x00, 0x10])
 
     # Check status logs include RX labels
     t = popup.status_block.toPlainText()
@@ -194,3 +223,100 @@ def test_no_out_of_state_ignore_log_while_waiting_for_nodeconfig(monkeypatch):
     text = popup.status_block.toPlainText()
     assert "Querying NODECONFIG" in text
     assert "Ignoring out-of-state packet while waiting for RUN ACK" not in text
+
+
+def test_adapter_ignores_wrong_node_and_runtime_only_packets_without_logging(monkeypatch):
+    _suppress_boxes(monkeypatch)
+    node_id = 5
+    popup, backend, runtime_window = _start_live_popup(node_id, "AxisZ")
+
+    baseline_text = popup.status_block.toPlainText()
+    assert backend.sent == [(node_id, build_nodeconfig_query_payload())]
+    assert popup.controller is not None
+    assert popup.controller.current_wait_for == "nodeconfig"
+
+    _emit_can(runtime_window, 7, 0x88, [0x53, 0x00, 0xBE])
+    _emit_can(runtime_window, node_id, 0xC8, [0x3A, 0x12, 0x30, 0x10])
+    _emit_can(runtime_window, node_id, 0xD8, [0x3A, 0x01, 0x00])
+    _emit_can(runtime_window, node_id, 0x86, [0x3A])
+    _emit_direct(runtime_window, 1, [0xB5, 0x3A, 0x01, 0x05, 0x00])
+
+    assert popup.controller.current_wait_for == "nodeconfig"
+    assert backend.sent == [(node_id, build_nodeconfig_query_payload())]
+    assert popup.status_block.toPlainText() == baseline_text
+    assert popup._is_running is True
+
+
+def test_stale_run_ack_with_wrong_velocity_is_dropped(monkeypatch):
+    _suppress_boxes(monkeypatch)
+    node_id = 8
+    popup, backend, runtime_window = _start_live_popup(node_id, "AxisY")
+
+    _drive_to_first_run_ack_wait(runtime_window, node_id)
+    assert popup.controller is not None
+    assert popup.controller.current_wait_for == "run_right_ack"
+    baseline_text = popup.status_block.toPlainText()
+    sent_count = len(backend.sent)
+
+    _emit_can(runtime_window, node_id, 0x88, [0x53, 0xFF, 0x42])
+
+    assert popup.controller.current_wait_for == "run_right_ack"
+    assert len(backend.sent) == sent_count
+    assert popup.status_block.toPlainText() == baseline_text
+
+    _emit_can(runtime_window, node_id, 0x88, [0x53, 0x00, 0xBE])
+    assert popup.controller.current_wait_for == "right_sensor"
+    assert "WAIT_FOR_RIGHT_SENSOR" in popup.status_block.toPlainText()
+
+
+def test_stale_same_node_getpos_and_middle_tpos_are_dropped_while_waiting_for_sensor(monkeypatch):
+    _suppress_boxes(monkeypatch)
+    node_id = 8
+    popup, backend, runtime_window = _start_live_popup(node_id, "AxisY")
+
+    _drive_to_first_sensor_wait(runtime_window, node_id)
+    assert popup.controller is not None
+    assert popup.controller.current_wait_for == "right_sensor"
+    baseline_text = popup.status_block.toPlainText()
+    sent_count = len(backend.sent)
+
+    _emit_can(runtime_window, node_id, 0x82, [0x00, 0x00, 0x00, 0x10])
+    _emit_can(runtime_window, node_id, 0x81, [ord("E"), 0x82, 0x00, 0x00, 0x13, 0x88])
+
+    assert popup.controller.current_wait_for == "right_sensor"
+    assert len(backend.sent) == sent_count
+    assert popup.status_block.toPlainText() == baseline_text
+
+
+def test_duplicate_sensor_event_outside_relevant_wait_is_dropped(monkeypatch):
+    _suppress_boxes(monkeypatch)
+    node_id = 8
+    popup, backend, runtime_window = _start_live_popup(node_id, "AxisY")
+
+    _drive_to_first_sensor_wait(runtime_window, node_id)
+    _emit_can(runtime_window, node_id, 0x81, [ord("R")])
+    assert popup.controller is not None
+    assert popup.controller.current_wait_for == "getpos_r1"
+    sent_count = len(backend.sent)
+    baseline_text = popup.status_block.toPlainText()
+
+    _emit_can(runtime_window, node_id, 0x81, [ord("R")])
+
+    assert popup.controller.current_wait_for == "getpos_r1"
+    assert len(backend.sent) == sent_count
+    assert popup.status_block.toPlainText() == baseline_text
+
+
+def test_wrong_sensor_during_active_movement_wait_still_reaches_controller_and_fails(monkeypatch):
+    _suppress_boxes(monkeypatch)
+    node_id = 8
+    popup, backend, runtime_window = _start_live_popup(node_id, "AxisY")
+
+    _drive_to_first_sensor_wait(runtime_window, node_id)
+    _emit_can(runtime_window, node_id, 0x81, [ord("L")])
+
+    assert popup._is_running is False
+    assert backend.sent[-1] == (node_id, [0xDD])
+    text = popup.status_block.toPlainText()
+    assert f"RX Node {node_id}: 81 4C - Left sensor has been cut" in text
+    assert "FAILED" in text or "Functional test FAILED" in text

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
+from data.binary_cmd_parser import decode_command
+
 try:
     # PyQt is available in the project (used in tests too)
     from PyQt6.QtCore import QObject
@@ -34,6 +36,7 @@ class FunctionalTransportAdapter(QObject):
         tx_logger: Optional[Callable[[str], None]] = None,
         rx_logger: Optional[Callable[[str], None]] = None,
         controller_handler: Optional[Callable[[list[int]], None]] = None,
+        controller_relevance: Optional[Callable[[str | None, object, list[int] | None], bool]] = None,
     ) -> None:
         super().__init__()
         self.backend_client = backend_client
@@ -41,6 +44,7 @@ class FunctionalTransportAdapter(QObject):
         self._tx_logger = tx_logger or (lambda _m: None)
         self._rx_logger = rx_logger or (lambda _m: None)
         self._controller_handler = controller_handler or (lambda _p: None)
+        self._controller_relevance = controller_relevance
         self._runtime_window: Optional[object] = None
 
     # --- TX path ---
@@ -97,7 +101,6 @@ class FunctionalTransportAdapter(QObject):
         """
         try:
             if not isinstance(packet, dict):
-                self._rx_logger("ignored packet: node=?, payload=?, reason=non-dict packet")
                 return
             ptype = packet.get("type")
 
@@ -107,14 +110,11 @@ class FunctionalTransportAdapter(QObject):
             if src is None:
                 src = packet.get("node_id")
             if src is None:
-                self._log_ignored_packet(packet, reason="missing sender/node_id")
                 return
             try:
                 if int(src) != self.node_id:
-                    self._log_ignored_packet(packet, reason=f"wrong node {int(src)}")
                     return
             except Exception:
-                self._log_ignored_packet(packet, reason=f"invalid sender/node_id {src!r}")
                 return
 
             # Extract command/params depending on packet type
@@ -123,7 +123,6 @@ class FunctionalTransportAdapter(QObject):
 
             if ptype == "can_over_uart":
                 if "cmd" not in packet:
-                    self._log_ignored_packet(packet, reason="missing command byte")
                     return
                 cmd = int(packet.get("cmd", 0))
                 params = list(packet.get("params", []))
@@ -138,20 +137,18 @@ class FunctionalTransportAdapter(QObject):
                     except Exception:
                         cmd = None
                 else:
-                    # Nothing decodable; ignore quietly
-                    self._log_ignored_packet(packet, reason="direct_uart missing payload")
                     return
             else:
-                # Unknown packet type; ignore
-                self._log_ignored_packet(packet, reason=f"unsupported packet type {ptype!r}")
                 return
 
             if cmd is None:
-                self._log_ignored_packet(packet, reason="missing command byte")
                 return
 
             # RX log with friendly labels for key events
             payload = [cmd, *params]
+            decoded_kind, decoded_value = decode_command(cmd, params)
+            if self._controller_relevance is not None and not self._controller_relevance(decoded_kind, decoded_value, payload):
+                return
             lbl = self._label_for_rx(cmd, params)
             hex_str = " ".join(f"{b:02X}" for b in payload)
             if lbl:
@@ -164,32 +161,6 @@ class FunctionalTransportAdapter(QObject):
             self._controller_handler(payload)
         except Exception as exc:  # pragma: no cover - log-only path
             self._rx_logger(f"RX handler error: {exc}")
-
-    def _log_ignored_packet(self, packet: dict, *, reason: str) -> None:
-        try:
-            src = packet.get("sender")
-            if src is None:
-                src = packet.get("node_id")
-            payload = packet.get("params")
-            cmd = packet.get("cmd")
-            full_payload: list[int] | None = None
-            if isinstance(cmd, int):
-                full_payload = [int(cmd) & 0xFF]
-            if payload is None:
-                payload = packet.get("raw_payload") or packet.get("payload")
-            if isinstance(payload, (bytes, bytearray)):
-                payload = list(payload)
-            if isinstance(payload, (list, tuple)):
-                payload_values = [int(b) & 0xFF for b in payload]
-                if full_payload is not None:
-                    full_payload.extend(payload_values)
-                    payload_values = full_payload
-                payload_hex = " ".join(f"{b:02X}" for b in payload_values)
-            else:
-                payload_hex = "?"
-            self._rx_logger(f"ignored packet: node={src!r}, payload={payload_hex}, reason={reason}")
-        except Exception:
-            self._rx_logger(f"ignored packet: node=?, payload=?, reason={reason}")
 
     @staticmethod
     def _label_for_rx(cmd: int, params: list[int]) -> str:

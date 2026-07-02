@@ -335,6 +335,7 @@ class SingleAxisFunctionalPopup(QDialog):
                     tx_logger=self.append_status,
                     rx_logger=self.append_status,
                     controller_handler=self.controller.handle_runtime_packet,
+                    controller_relevance=self.controller.accepts_workflow_packet,
                 )
                 # Attach RX routing if a runtime window exists
                 if hasattr(adapter, "attach_runtime_window"):

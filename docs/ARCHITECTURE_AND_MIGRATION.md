@@ -172,6 +172,32 @@ UI/pages
   - expected Sampling packets must still advance the workflow
   - live validation must confirm runtime status/firmware/emergency updates continue while Sampling runs
 
+## Pilot update
+
+- Selected Phase 1D pilot:
+  - strengthen Single Axis workflow ingress by extending `FunctionalTransportAdapter`
+- Canonical owner:
+  - runtime layer still owns global/status packets and runtime state updates
+  - `services/functional_transport_adapter.py` is the canonical Single Axis ingress owner
+  - `SingleAxisFunctionalTestController` owns workflow state only
+- Forwarding rule:
+  - active node
+  - semantic decoded kind
+  - current Single Axis state/wait predicate
+  - expected value where it is safely checkable, including RUN ACK velocity
+- Existing path reused or replaced:
+  - reused the existing `FunctionalTransportAdapter`
+  - no new Single Axis adapter was created
+- Legacy/duplicate path affected:
+  - removed broad same-node forwarding of all parsed packets into Single Axis controller logic
+- Remaining limitation:
+  - protocol correlation is still limited where the same node can emit two identical same-command responses and no request ID/sequence token exists
+  - this phase drops avoidable stale traffic but does not claim to solve identical same-node GETPOS ambiguity fully
+- Tests and live validation required:
+  - wrong-node, global/status, and stale same-node packets must not reach or advance Single Axis
+  - genuine wrong-sensor and expected fault paths must still fail safely
+  - live validation must confirm unrelated runtime traffic remains visible to runtime/global logging while Single Axis ignores it
+
 ## E. Governing rule
 
 Every touched responsibility must end with fewer owners, fewer active paths, and a clear deletion plan.

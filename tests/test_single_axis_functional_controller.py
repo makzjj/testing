@@ -335,6 +335,40 @@ class FunctionalControllerTests(unittest.TestCase):
         # Should transition to waiting for right sensor
         self.assertIn("WAIT_FOR_RIGHT_SENSOR", self.ctrl.statuses[-1])
 
+    def test_accepts_workflow_packet_requires_matching_run_ack_velocity(self):
+        self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
+        self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
+        self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
+
+        self.assertEqual(self.ctrl.current_wait_for, "run_right_ack")
+        self.assertTrue(self.ctrl.accepts_workflow_packet("run_started", 190, [0x88, 0x53, 0x00, 0xBE]))
+        self.assertFalse(self.ctrl.accepts_workflow_packet("run_started", -190, [0x88, 0x53, 0xFF, 0x42]))
+        self.assertFalse(self.ctrl.accepts_workflow_packet("getpos", ('G', 0), [0x82, 0x00, 0x00, 0x00, 0x00]))
+
+    def test_accepts_workflow_packet_keeps_wrong_sensor_relevant_during_active_sensor_wait(self):
+        self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
+        self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
+        self.ctrl.handle_runtime_packet(pkt(0x82, 0x00, 0x00, 0x00, 0x00))
+        self.ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
+        self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x00, 0xBE))
+
+        self.assertEqual(self.ctrl.current_wait_for, "right_sensor")
+        self.assertTrue(self.ctrl.accepts_workflow_packet("tpos_status", {"event": "R"}, [0x81, ord('R')]))
+        self.assertTrue(self.ctrl.accepts_workflow_packet("tpos_status", {"event": "L"}, [0x81, ord('L')]))
+        self.assertTrue(self.ctrl.accepts_workflow_packet("tpos_status", {"event": "I"}, [0x81, ord('I')]))
+        self.assertFalse(
+            self.ctrl.accepts_workflow_packet(
+                "tpos_status",
+                {"event": "reached", "position": 5000},
+                [0x81, ord('E'), 0x82, 0x00, 0x00, 0x13, 0x88],
+            )
+        )
+
     def test_ignore_getpos_while_waiting_for_run_ack_then_proceed(self):
         # Reach state awaiting first RUN ACK
         self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))

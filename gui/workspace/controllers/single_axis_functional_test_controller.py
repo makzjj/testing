@@ -188,6 +188,10 @@ class SingleAxisFunctionalTestController:
     def stop_requested_by_user(self) -> bool:
         return self.abort_by_user()
 
+    @property
+    def current_wait_for(self) -> str | None:
+        return self._wait_for
+
     def on_timeout(self) -> None:
         """Tests can invoke to simulate a timeout for the current wait condition."""
         if not self._running:
@@ -238,6 +242,47 @@ class SingleAxisFunctionalTestController:
         if self._state == self.S_WAIT_MIDDLE and self._wait_for == "tpos_complete":
             self._request_stopmotor()
             return self._fail("TPOS completion timeout")
+
+    def accepts_workflow_packet(self, decoded_kind: str | None, decoded_value, packet: list[int] | None = None) -> bool:
+        """Return whether one decoded packet is relevant to the active workflow step."""
+        if not self._running or self._state in (self.S_FAILED, self.S_PASSED, self.S_ABORTED):
+            return False
+
+        if self._wait_for == "nodeconfig":
+            return decoded_kind == "nodeconfig"
+        if self._wait_for == "hunting_ack":
+            return decoded_kind == "hunting"
+        if self._wait_for == "getpos_zero":
+            return decoded_kind == "getpos"
+        if self._wait_for == "lflag_query":
+            return decoded_kind == "lflag"
+        if self._wait_for == "rflag_query":
+            return decoded_kind == "rflag"
+        if self._wait_for == "run_right_ack":
+            return (
+                self._state == self.S_RUN_TO_RIGHT
+                and decoded_kind == "run_started"
+                and self._run_ack_matches_expected_velocity(decoded_value)
+            )
+        if self._wait_for == "run_left_ack":
+            return (
+                self._state == self.S_RUN_TO_LEFT
+                and decoded_kind == "run_started"
+                and self._run_ack_matches_expected_velocity(decoded_value)
+            )
+        if self._wait_for in ("left_sensor", "right_sensor"):
+            return self._accepts_sensor_wait_packet(decoded_kind, decoded_value)
+        if self._wait_for == "zeroed":
+            return self._accepts_zero_wait_packet(decoded_kind, decoded_value)
+        if self._wait_for == "getpos_r1":
+            return self._state == self.S_READ_RANGE1 and decoded_kind == "getpos"
+        if self._wait_for == "getpos_r2":
+            return self._state == self.S_READ_RANGE2 and decoded_kind == "getpos"
+        if self._wait_for == "tpos_ack":
+            return self._accepts_middle_tpos_packet(decoded_kind, decoded_value, require_completion=False)
+        if self._wait_for == "tpos_complete":
+            return self._accepts_middle_tpos_packet(decoded_kind, decoded_value, require_completion=True)
+        return False
 
     def handle_runtime_packet(self, packet: list[int] | bytes) -> None:
         if not packet:
@@ -692,6 +737,67 @@ class SingleAxisFunctionalTestController:
 
     def _run_velocity_for_sign(self, sign: int) -> int:
         return self.cfg.velocity_left_to_right if int(sign) > 0 else self.cfg.velocity_right_to_left
+
+    def _expected_run_ack_velocity(self) -> int | None:
+        polarity = self._motion_polarity
+        if polarity is None:
+            return None
+        if self._movement_phase == "outward":
+            return self._run_velocity_for_sign(polarity.sign_to_opposite())
+        if self._movement_phase == "return":
+            return self._run_velocity_for_sign(polarity.sign_to_home())
+        if self._state == self.S_RUN_TO_RIGHT:
+            return self.cfg.velocity_left_to_right
+        if self._state == self.S_RUN_TO_LEFT:
+            return self.cfg.velocity_right_to_left
+        return None
+
+    def _run_ack_matches_expected_velocity(self, decoded_value) -> bool:
+        if not isinstance(decoded_value, int):
+            return False
+        expected_velocity = self._expected_run_ack_velocity()
+        if expected_velocity is None:
+            return False
+        return int(decoded_value) == int(expected_velocity)
+
+    @staticmethod
+    def _normalized_tpos_event(decoded_value) -> str | None:
+        if not isinstance(decoded_value, dict):
+            return None
+        event = decoded_value.get("event")
+        if event == "Z":
+            by = decoded_value.get("by")
+            return str(by) if by in ("L", "R") else None
+        if event in ("L", "R", "I", "started", "reached", "no_move"):
+            return str(event)
+        return None
+
+    def _accepts_zero_wait_packet(self, decoded_kind: str | None, decoded_value) -> bool:
+        return (
+            self._state == self.S_WAIT_ZERO
+            and decoded_kind == "tpos_status"
+            and self._normalized_tpos_event(decoded_value) == "I"
+        )
+
+    def _accepts_sensor_wait_packet(self, decoded_kind: str | None, decoded_value) -> bool:
+        if decoded_kind != "tpos_status":
+            return False
+        event = self._normalized_tpos_event(decoded_value)
+        if event is None:
+            return False
+        if self._state == self.S_WAIT_HUNTING_SENSOR:
+            return event in ("L", "R")
+        if self._state in (self.S_WAIT_LEFT, self.S_WAIT_RIGHT):
+            return event in ("L", "R", "I")
+        return False
+
+    def _accepts_middle_tpos_packet(self, decoded_kind: str | None, decoded_value, *, require_completion: bool) -> bool:
+        if decoded_kind != "tpos_status" or not isinstance(decoded_value, dict):
+            return False
+        event = self._normalized_tpos_event(decoded_value)
+        if require_completion:
+            return self._state == self.S_WAIT_MIDDLE and event == "reached"
+        return self._state == self.S_MOVE_MIDDLE and event in ("started", "reached", "no_move")
 
     def _resolved_axis_name(self) -> str:
         return str(get_ml20_node_name(self._node_id) or "").strip().upper()
