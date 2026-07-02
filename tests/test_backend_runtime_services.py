@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from services import (
+    NodeDiscoveryCoordinator,
     RuntimePacketHandler,
     RxLogWriter,
     build_default_node_status,
@@ -41,6 +42,31 @@ class NodeStatusStoreTests(unittest.TestCase):
         self.assertEqual(sorted(node_status.keys()), [2, 3])
         self.assertEqual(connected_node_ids(node_status), [])
         self.assertEqual(node_status[2]["firmware"], "")
+
+
+class NodeDiscoveryCoordinatorTests(unittest.TestCase):
+    def test_coordinator_schedules_once_per_cycle_and_clears_pending_on_dispatch(self) -> None:
+        coordinator = NodeDiscoveryCoordinator()
+
+        self.assertEqual(coordinator.begin_cycle(), 1)
+        self.assertTrue(coordinator.request_node_info_once(5))
+        self.assertTrue(coordinator.is_pending(5))
+        self.assertFalse(coordinator.request_node_info_once(5))
+
+        coordinator.mark_dispatch_started(5)
+
+        self.assertFalse(coordinator.is_pending(5))
+        self.assertEqual(coordinator.scheduled_nodes(), {5})
+
+    def test_new_cycle_allows_rescheduling_same_node(self) -> None:
+        coordinator = NodeDiscoveryCoordinator()
+
+        coordinator.begin_cycle()
+        self.assertTrue(coordinator.request_node_info_once(5))
+        self.assertFalse(coordinator.request_node_info_once(5))
+
+        coordinator.begin_cycle()
+        self.assertTrue(coordinator.request_node_info_once(5))
 
 
 class RuntimePacketHandlerTests(unittest.TestCase):

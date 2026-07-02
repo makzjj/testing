@@ -9,6 +9,7 @@ __all__ = [
     "build_default_node_status",
     "connected_node_ids",
     "ensure_node_status",
+    "NodeDiscoveryCoordinator",
     "reset_node_status",
 ]
 
@@ -47,6 +48,10 @@ def __getattr__(name: str):
         from .node_status_store import ensure_node_status
 
         return ensure_node_status
+    if name == "NodeDiscoveryCoordinator":
+        from .node_discovery_coordinator import NodeDiscoveryCoordinator
+
+        return NodeDiscoveryCoordinator
     if name == "reset_node_status":
         from .node_status_store import reset_node_status
 

@@ -17,6 +17,7 @@ from gui.workspace.constants import ROUTE_FIRMWARE, ROUTE_MECHANICAL, ROUTE_PROD
 from gui.workspace.widgets import LiveSessionPanel
 from gui.main_window import MainWindow
 from myconfig.project_models import ProjectDefinition, ProjectFeatures, ProjectUiConfig
+from services import NodeDiscoveryCoordinator
 
 try:
     from openpyxl import Workbook
@@ -445,6 +446,7 @@ class MainWindowNodeScanTests(unittest.TestCase):
         window.cancel_scanning = False
         window.current_scan_node = 99
         window.detected_nodes = {5, 8}
+        window.node_discovery_coordinator = NodeDiscoveryCoordinator()
         window.validate_connection_state = lambda: True
         window.log = logs.append
         window.update_node_status_display = lambda: updates.append("refresh")
@@ -454,11 +456,94 @@ class MainWindowNodeScanTests(unittest.TestCase):
         self.assertTrue(result)
         self.assertTrue(window.scan_active)
         self.assertTrue(window._batch_node_scan_active)
+        self.assertEqual(window.node_discovery_coordinator.cycle_id, 1)
         self.assertEqual(window.current_scan_node, 2)
         self.assertEqual(window.detected_nodes, set())
         self.assertEqual(window.backend_client.sent_nodes, list(range(2, 18)))
         self.assertEqual(window.node_scan_timeout_timer.started_with, [500])
         self.assertEqual(updates, ["refresh"])
+
+    def test_node_info_scheduling_uses_one_dedup_path_per_cycle(self) -> None:
+        logs: list[str] = []
+        updates: list[str] = []
+        advances: list[str] = []
+        scheduled: list[tuple[int, object]] = []
+        sent_info: list[int] = []
+        window = type("ScanHarness", (), {})()
+        window.node_status = {}
+        window.detected_nodes = set()
+        window.node_scan_timeout_timer = _FakeScanTimer()
+        window._batch_node_scan_active = False
+        window.node_discovery_coordinator = NodeDiscoveryCoordinator()
+        window.node_discovery_coordinator.begin_cycle()
+        window.log = logs.append
+        window.update_node_status_display = lambda: updates.append("refresh")
+        window.advance_to_next_node = lambda: advances.append("advance")
+        window.send_node_info_requests = lambda node_id: sent_info.append(node_id)
+        window._dispatch_scheduled_node_info_requests = (
+            lambda node_id: MainWindow._dispatch_scheduled_node_info_requests(window, node_id)
+        )
+        window._schedule_node_info_requests_for_node = (
+            lambda node_id, source: MainWindow._schedule_node_info_requests_for_node(window, node_id, source=source)
+        )
+
+        with patch("gui.main_window.QTimer.singleShot", side_effect=lambda delay, callback: scheduled.append((delay, callback))):
+            MainWindow.update_node_activity(window, 5)
+
+            self.assertEqual(len([item for item in scheduled if item[0] == 200]), 1)
+            self.assertTrue(window.node_discovery_coordinator.is_pending(5))
+            self.assertEqual(window.node_discovery_coordinator.scheduled_nodes(), {5})
+
+            scheduled[0][1]()
+
+            self.assertEqual(sent_info, [5])
+            self.assertFalse(window.node_discovery_coordinator.is_pending(5))
+            self.assertEqual(window.node_discovery_coordinator.scheduled_nodes(), {5})
+
+            MainWindow.process_node_id_response(window, 5, [0x3A, 0x05])
+
+        self.assertEqual(len([item for item in scheduled if item[0] == 200]), 1)
+        self.assertEqual(len([item for item in scheduled if item[0] == 500]), 1)
+        self.assertFalse(window.node_discovery_coordinator.is_pending(5))
+        self.assertEqual(window.node_discovery_coordinator.scheduled_nodes(), {5})
+        self.assertEqual(window.detected_nodes, {5})
+        self.assertTrue(window.node_scan_timeout_timer.stopped)
+        self.assertGreaterEqual(len(updates), 2)
+        self.assertEqual(advances, [])
+        self.assertTrue(any("Skipping duplicate node info scheduling" in entry for entry in logs))
+
+    def test_new_discovery_cycle_allows_node_info_reschedule(self) -> None:
+        scheduled: list[tuple[int, object]] = []
+        sent_info: list[int] = []
+        window = type("ScanHarness", (), {})()
+        window.node_status = {}
+        window.detected_nodes = set()
+        window.node_scan_timeout_timer = _FakeScanTimer()
+        window._batch_node_scan_active = True
+        window.node_discovery_coordinator = NodeDiscoveryCoordinator()
+        window.node_discovery_coordinator.begin_cycle()
+        window.log = lambda message: None
+        window.update_node_status_display = lambda: None
+        window.advance_to_next_node = lambda: None
+        window.send_node_info_requests = lambda node_id: sent_info.append(node_id)
+        window._dispatch_scheduled_node_info_requests = (
+            lambda node_id: MainWindow._dispatch_scheduled_node_info_requests(window, node_id)
+        )
+        window._schedule_node_info_requests_for_node = (
+            lambda node_id, source: MainWindow._schedule_node_info_requests_for_node(window, node_id, source=source)
+        )
+
+        with patch("gui.main_window.QTimer.singleShot", side_effect=lambda delay, callback: scheduled.append((delay, callback))):
+            MainWindow.process_node_id_response(window, 8, [0x3A, 0x08])
+            window.node_discovery_coordinator.begin_cycle()
+            MainWindow.process_node_id_response(window, 8, [0x3A, 0x08])
+
+        self.assertEqual(len([item for item in scheduled if item[0] == 200]), 2)
+
+        for _, callback in scheduled:
+            callback()
+
+        self.assertEqual(sent_info, [8, 8])
 
     def test_workspace_session_edit_button_routes_to_active_production_page(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

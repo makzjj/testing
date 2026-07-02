@@ -25,6 +25,7 @@ from data.binary_cmd_parser import decode_command, parse_get_interrupt
 
 from services import (
     CommunicationLogStore,
+    NodeDiscoveryCoordinator,
     RobotBackendClient,
     RuntimePacketEvent,
     RuntimePacketHandler,
@@ -166,7 +167,7 @@ class MainWindow(QMainWindow):
         self.mcu_version_queried = False  # Track if MCU version already queried
         self.mcu_version = None  # Store the MCU version in shared runtime state
 
-        self.node_info_requested = set()  # Track which nodes have info requests pending
+        self.node_discovery_coordinator = NodeDiscoveryCoordinator()
 
         # --- Node scanning initialization ---
         # Node status table
@@ -1131,8 +1132,7 @@ class MainWindow(QMainWindow):
             self.mcu_version_queried = False
             self.mcu_version = None  # clear the MCU version
             self.mcu_version_lbl.setText(f"MCU Firmware Version: ")
-            # Clear the info request tracking
-            self.node_info_requested.clear()
+            self.node_discovery_coordinator.reset()
 
             # Disconnect serial
             self.backend_client.disconnect()
@@ -1237,6 +1237,7 @@ class MainWindow(QMainWindow):
         self.cancel_scanning = False
         self.current_scan_node = 2
         self.detected_nodes.clear()
+        self.node_discovery_coordinator.begin_cycle()
         self._batch_node_scan_active = True
         self.node_scan_timeout_timer.stop()
         self.log("ðŸ” Starting node ID scan batch (2â€“17)...")
@@ -1265,6 +1266,7 @@ class MainWindow(QMainWindow):
         self.cancel_scanning = False
         self.current_scan_node = 2
         self.detected_nodes.clear()
+        self.node_discovery_coordinator.begin_cycle()
         self.log("🔍 Starting node ID scan (2–14 sequentially)...")
         self.scan_next_node()
 
@@ -1457,6 +1459,8 @@ class MainWindow(QMainWindow):
                     if node_id in self.node_status:
                         self.node_status[node_id]['connected'] = False
                         self.node_status[node_id]['response_time'] = 0
+
+            self.node_discovery_coordinator.reset()
 
             # if hasattr(self, 'update_node_status_display'):
             self.update_node_status_display()
@@ -1657,21 +1661,7 @@ class MainWindow(QMainWindow):
             if not getattr(self, "_batch_node_scan_active", False):
                 self.node_scan_timeout_timer.stop()
 
-            # Initialize node_info_requested if not exists
-            if not hasattr(self, 'node_info_requested'):
-                self.node_info_requested = set()
-
-            # Start fetching detailed info for this node
-            # Check if info requests already sent for this node
-            if node_id not in self.node_info_requested:
-                self.node_info_requested.add(node_id)
-                self.log(f"⚙️ Gathering info from Node {node_id:02d}...")
-
-                # Start fetching detailed info for this node
-                QTimer.singleShot(200, lambda nid=node_id: self.send_node_info_requests(nid))
-            else:
-                self.log(f"⚠️ Info requests already sent to Node {node_id:02d}, skipping duplicate")
-                # If info already requested, move to next node immediately
+            self._schedule_node_info_requests_for_node(node_id, source="node_id_response")
 
             if not getattr(self, "_batch_node_scan_active", False):
                 QTimer.singleShot(500, self.advance_to_next_node)
@@ -1716,6 +1706,30 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.log(f"❌ Failed to schedule info requests for node {node_id}: {e}")
 
+    def _schedule_node_info_requests_for_node(self, node_id: int, *, source: str) -> bool:
+        """Schedule one node-info burst per node per discovery cycle."""
+        if not self.node_discovery_coordinator.request_node_info_once(node_id):
+            self.log(
+                f"⚠️ Skipping duplicate node info scheduling for Node {int(node_id):02d} "
+                f"from {source} in cycle {self.node_discovery_coordinator.cycle_id}"
+            )
+            return False
+
+        self.log(
+            f"⚙️ Scheduling node info for Node {int(node_id):02d} "
+            f"from {source} in cycle {self.node_discovery_coordinator.cycle_id}"
+        )
+        QTimer.singleShot(
+            NODE_INFO_REQUEST_DELAY,
+            lambda nid=int(node_id): self._dispatch_scheduled_node_info_requests(nid),
+        )
+        return True
+
+    def _dispatch_scheduled_node_info_requests(self, node_id: int) -> None:
+        """Run one scheduled node-info dispatch and clear transient pending state."""
+        self.node_discovery_coordinator.mark_dispatch_started(node_id)
+        self.send_node_info_requests(node_id)
+
     def _send_single_node_command(self, node_id, name, cmd_bytes):
         """Send one node info command through the reusable backend client."""
         try:
@@ -1757,7 +1771,7 @@ class MainWindow(QMainWindow):
 
 
     def update_node_activity(self, node_id):
-        """Update node status when activity is detected and request info ONCE."""
+        """Update runtime connectivity and reuse canonical node-info scheduling."""
         try:
             node_record = ensure_node_status(self.node_status, node_id)
 
@@ -1765,11 +1779,7 @@ class MainWindow(QMainWindow):
                 node_record['connected'] = True
                 self.log(f"✅ Node {node_id:02d} detected via incoming packet")
 
-            # Always request info once per connection lifecycle
-            if not node_record.get("info_requested", False):
-                node_record["info_requested"] = True
-                self.log(f"⚙️ Auto-gathering info from Node {node_id:02d}...")
-                QTimer.singleShot(NODE_INFO_REQUEST_DELAY, lambda nid=node_id: self.send_node_info_requests(nid))
+            self._schedule_node_info_requests_for_node(node_id, source="node_activity")
 
             self.update_node_status_display()
 

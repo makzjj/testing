@@ -75,6 +75,31 @@ UI/pages
   - `main_window.py` still remains the legacy runtime shell
   - direct event delivery to `CommMonitorDialog.handle_node_version(...)` can be removed only after that pre-test workflow has a migrated request/response owner outside raw runtime callbacks
 
+## Pilot update
+
+- Selected Phase 0C pilot:
+  - node discovery and node-info scheduling ownership
+- Canonical owner before:
+  - `main_window.py` owned node discovery, but node-info scheduling was split across `process_node_id_response(...)` and `update_node_activity(...)`
+  - deduplication was split between `MainWindow.node_info_requested` and `node_status[node_id]["info_requested"]`
+- Canonical owner after:
+  - `services/node_discovery_coordinator.py` owns discovery-cycle identity/state, per-node deduplication, already-scheduled-this-cycle tracking, and reset policy
+  - `MainWindow._schedule_node_info_requests_for_node(...)` is only the legacy integration adapter that receives runtime events, calls the coordinator, integrates with `QTimer`, and invokes the existing node-info command-burst sender
+- Duplicate path removed/deactivated:
+  - removed active `node_info_requested` scheduling set
+  - removed active `node_status["info_requested"]` scheduling path
+  - `process_node_id_response(...)` and `update_node_activity(...)` now both route through the same scheduler
+- Deduplication policy:
+  - schedule node info once per node per discovery cycle
+  - clear transient pending state when the scheduled dispatch begins
+  - reset the discovery cycle only on a new scan cycle or discovery teardown
+- Tests run:
+  - `python -m pytest tests/test_backend_runtime_services.py tests/test_workspace_runtime_bridge.py tests/test_workspace_session_panel.py`
+  - `python -m pytest tests/test_comm_monitor.py tests/test_single_axis_functional_controller.py tests/test_sampling_controller.py`
+- Remaining deletion condition:
+  - `main_window.py` still owns the legacy scan lifecycle and timer orchestration
+  - a full removal waits until scan lifecycle ownership itself is migrated out of `main_window.py` without changing UI behavior or controller access
+
 ## E. Governing rule
 
 Every touched responsibility must end with fewer owners, fewer active paths, and a clear deletion plan.
