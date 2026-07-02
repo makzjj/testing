@@ -14,6 +14,14 @@ from data.binary_cmd_builders import (
     build_stopmotor,
 )
 from data.binary_cmd_parser import decode_nodeconfig_motion_polarity
+from services.motion_measurements import (
+    SAFE_PARK_TARGET_COUNTS,
+    calculate_midpoint_target,
+    calculate_outward_range,
+    calculate_return_error,
+    calculate_return_range,
+    calculate_safe_park_target,
+)
 
 
 class Recorder(SingleAxisFunctionalTestController):
@@ -127,6 +135,19 @@ class FunctionalControllerTests(unittest.TestCase):
         ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         ctrl.handle_runtime_packet(pkt(0x82, *list(int(home_position).to_bytes(4, "big", signed=True))))
 
+    def test_motion_measurement_helpers_use_explicit_endpoint_semantics(self):
+        self.assertEqual(calculate_outward_range(10, 70), 60)
+        self.assertEqual(calculate_outward_range(-10, -70), 60)
+        self.assertEqual(calculate_return_range(70, 8), 62)
+        self.assertEqual(calculate_return_range(-70, 10), 80)
+        self.assertEqual(calculate_return_error(10, 8), 2)
+        self.assertEqual(calculate_return_error(-10, 8), 18)
+        self.assertEqual(calculate_midpoint_target(10, 71), 40)
+        self.assertEqual(calculate_midpoint_target(10, -70), -30)
+        self.assertEqual(calculate_safe_park_target("Z", 10, 70), SAFE_PARK_TARGET_COUNTS)
+        self.assertEqual(calculate_safe_park_target("PZ", 10, 70), SAFE_PARK_TARGET_COUNTS)
+        self.assertEqual(calculate_safe_park_target("X", 10, 71), 40)
+
     def test_selected_zero_tolerance_boundary_values_pass_and_fail_correctly(self):
         cases = [(-2, True), (2, True), (6, True), (2048, True), (-2048, True), (2049, False), (-2049, False)]
         for home_position, should_pass in cases:
@@ -161,6 +182,35 @@ class FunctionalControllerTests(unittest.TestCase):
         self._drive_to_zero_verification(ctrl, 6)
         self.assertFalse(ctrl.failed)
         self.assertIn(build_lflag_query_payload(), ctrl.commands)
+
+    def test_zero_reference_flow_stores_explicit_home_position(self):
+        self._drive_to_zero_verification(self.ctrl, 4)
+        self.assertEqual(self.ctrl._home_pos, 4)
+
+    def test_nonzero_verified_home_uses_explicit_endpoint_range_and_midpoint(self):
+        ctrl = Recorder(self.ctrl.cfg)
+        ctrl.start(3)
+        self.assertEqual(ctrl.commands[-1], [0xC4, 0x3F])
+        ctrl.handle_runtime_packet(pkt(0xC4, 0x3A, 0x00))
+        ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
+        ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
+        ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
+        ctrl.handle_runtime_packet(pkt(0x82, *list((5).to_bytes(4, "big", signed=True))))
+        ctrl.handle_runtime_packet(pkt(0xC9, 0x3A, 0x09))
+        ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
+        ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0x00, 0xBE))
+        ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
+        ctrl.handle_runtime_packet(pkt(0x82, *list((100_000).to_bytes(4, "big", signed=True))))
+        self.assertEqual(ctrl._home_pos, 5)
+        self.assertEqual(ctrl.range1, 99_995)
+        self.assertEqual(ctrl.commands[-1], build_run(-190))
+
+        ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0xFF, 0x42))
+        ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
+        ctrl.handle_runtime_packet(pkt(0x82, *list((8).to_bytes(4, "big", signed=True))))
+        self.assertEqual(ctrl.range2, 99_992)
+        self.assertEqual(ctrl.diffs[-1], 3)
+        self.assertEqual(ctrl.commands[-1], build_tpos(50_002))
 
     def test_abort_by_user_sends_dd_and_ignores_late_packets(self):
         self.ctrl.abort_by_user()

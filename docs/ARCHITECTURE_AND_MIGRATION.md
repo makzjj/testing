@@ -248,6 +248,38 @@ UI/pages
   - none for the removed wrapper pipeline
   - any later Mechanical parameter migration or test-profile UUID migration must be handled as separate responsibilities
 
+## Pilot update
+
+- Selected Phase 3B pilot:
+  - normalize shared motion measurement primitives only
+- Canonical shared measurement primitives:
+  - outward endpoint range
+  - return endpoint range
+  - return error
+  - midpoint target
+  - `Z` / `PZ` safe park target
+- Existing path reused or replaced:
+  - reused Single Axis and Sampling controllers as workflow owners
+  - added one narrow pure-helper module for identical endpoint math only
+- Single Axis owner after Phase 3B:
+  - `SingleAxisFunctionalTestController` now stores an explicit verified home/reference position from the existing zero-verification `GETPOS`
+  - it remains the owner of Single Axis sequencing, tolerance, and pass/fail lifecycle
+- Sampling owner after Phase 3B:
+  - `SamplingTestController` remains the owner of timing, speed, sample lifecycle, result emission, and workbook output
+- Single Axis popup rule:
+  - the measured `Range` field must remain controller-derived `Range 1` / `Range 2` data
+  - middle-target preview may be logged separately, but must not overwrite the measured `Range` field
+- Explicitly unchanged:
+  - motion sequencing
+  - timeout values
+  - tolerances
+  - safe-position policy
+  - workbook templates
+  - Sampling aggregate-statistics ownership
+- Deferred:
+  - Sampling aggregate statistics ownership
+  - `2/4/8/16/32` formula-range and workbook-template audit
+
 ## E. Governing rule
 
 Every touched responsibility must end with fewer owners, fewer active paths, and a clear deletion plan.

@@ -4704,32 +4704,6 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             self.assertTrue(page._last_parameter_verification_results_by_name["UUID"].passed)
             self.assertEqual(page.uuid_section.workbook_validation_text, "Workbook Validation: PASSED")
 
-    def test_single_axis_return_leg_range_display_uses_middle_travel_delta(self) -> None:
-        controller = SingleAxisFunctionalTestController(FunctionalTestConfig(reference_sensor="L", opposite_sensor="R"))
-        polarity = decode_nodeconfig_motion_polarity(0x00)
-        controller._node_id = 6
-        controller._motion_polarity = polarity
-        controller._sensor_profile = NodeSensorProfile.from_node_context(6, polarity)
-        popup = SingleAxisFunctionalPopup(node_options=[(3, "X")], controller=controller, allow_safe_tx=True)
-        differences: list[int] = []
-        controller.difference_changed = lambda value: differences.append(value)
-
-        controller._state = controller.S_READ_RANGE1
-        controller._wait_for = "getpos_r1"
-        controller._handle_getpos(("G", 2_499_678))
-        self.assertEqual(popup.range_field.text(), "2499678")
-
-        controller._state = controller.S_READ_RANGE2
-        controller._wait_for = "getpos_r2"
-        controller._opposite_pos = 2_499_678
-        controller._range_1 = 2_499_678
-        controller._handle_getpos(("G", -100))
-
-        self.assertEqual(popup.range_field.text(), "1249939")
-        self.assertEqual(differences[-1], 100)
-        popup.close()
-        self._app.processEvents()
-
     def test_communication_logs_button_reuses_popup_and_keeps_progress_log_intact(self) -> None:
         runtime_window = _FakeRuntimeWindow()
         bridge = _FakeBridge(runtime_window)

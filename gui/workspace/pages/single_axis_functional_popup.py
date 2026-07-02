@@ -493,13 +493,10 @@ class SingleAxisFunctionalPopup(QDialog):
             self._middle_travel_display_value = target
         else:
             self._middle_travel_display_value = abs(target - self._middle_travel_origin_position)
-        self.update_range(self._middle_travel_display_value)
-        self.append_status(f"Middle travel distance: {self.range_field.text()}")
+        self.append_status(f"Middle travel distance: {int(self._middle_travel_display_value)}")
 
     def _refresh_middle_travel_display(self) -> None:
-        if not self._middle_travel_active or self._middle_travel_display_value is None:
-            return
-        self.update_range(self._middle_travel_display_value)
+        return
 
     def _ensure_controller(self) -> None:
         if self.controller is None:

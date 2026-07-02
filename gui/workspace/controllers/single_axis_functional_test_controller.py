@@ -30,6 +30,12 @@ from data.binary_cmd_parser import (
     decode_nodeconfig_motion_polarity,
 )
 from myconfig.node_display import get_ml20_node_name
+from services.motion_measurements import (
+    SAFE_PARK_TARGET_COUNTS,
+    calculate_outward_range,
+    calculate_return_range,
+    calculate_safe_park_target,
+)
 from services.node_sensor_profile import NodeSensorProfile
 from data.binary_cmd_builders import (
     build_lflag_query_payload,
@@ -93,7 +99,7 @@ class SingleAxisFunctionalTestController:
     S_ABORTED = "ABORTED"
     S_PASSED = "PASSED"
     S_FAILED = "FAILED"
-    _SAFE_PARK_TARGET_COUNTS = -44_000
+    _SAFE_PARK_TARGET_COUNTS = SAFE_PARK_TARGET_COUNTS
 
     def __init__(self, config: FunctionalTestConfig | None = None) -> None:
         self.cfg = config or FunctionalTestConfig()
@@ -106,6 +112,7 @@ class SingleAxisFunctionalTestController:
         self._signed_range_2: int | None = None
         self._range_2: int | None = None
         # Positions per corrected plan
+        self._home_pos: int | None = None
         self._opposite_pos: int | None = None
         self._returned_home_pos: int | None = None
         self._middle_target: int | None = None
@@ -367,6 +374,7 @@ class SingleAxisFunctionalTestController:
         self._range_1 = None
         self._signed_range_2 = None
         self._range_2 = None
+        self._home_pos = None
         self._opposite_pos = None
         self._returned_home_pos = None
         self._middle_target = None
@@ -527,6 +535,7 @@ class SingleAxisFunctionalTestController:
 
         if self._state == self.S_VERIFY_ZERO and self._wait_for == "getpos_zero":
             if abs(position) <= self.cfg.zero_tolerance:
+                self._home_pos = position
                 # Before first RUN, query SensorL first, then SensorR only after SensorL response.
                 self._set_state(self.S_VERIFY_ZERO)
                 self._wait_for = "lflag_query"
@@ -539,9 +548,12 @@ class SingleAxisFunctionalTestController:
 
         if self._state == self.S_READ_RANGE1 and self._wait_for == "getpos_r1":
             # Store opposite sensor position and range_1
-            self._signed_range_1 = position
+            if self._home_pos is None:
+                self._request_stopmotor()
+                return self._fail("Home position unavailable for range_1 computation")
+            self._signed_range_1 = int(position) - int(self._home_pos)
             self._opposite_pos = position
-            self._range_1 = abs(position)
+            self._range_1 = calculate_outward_range(self._home_pos, self._opposite_pos)
             self.range1_changed(self._range_1)
             # Now send RUN in return direction back to reference/home sensor
             polarity = self._require_motion_polarity()
@@ -571,11 +583,10 @@ class SingleAxisFunctionalTestController:
             # Store returned-home position then compute range_2 as delta from opposite_pos
             self._signed_range_2 = position
             self._returned_home_pos = position
-            # Compute per corrected plan: range_2 = abs(opposite_pos - returned_home_pos)
             if self._opposite_pos is None:
                 self._request_stopmotor()
                 return self._fail("Opposite position unavailable for range_2 computation")
-            self._range_2 = abs(int(self._opposite_pos) - position)
+            self._range_2 = calculate_return_range(self._opposite_pos, position)
             self.range2_changed(self._range_2)
             # Compare ranges
             self._set_state(self.S_COMPARE)
@@ -806,11 +817,9 @@ class SingleAxisFunctionalTestController:
         return self._resolved_axis_name() in {"Z", "PZ"}
 
     def _final_success_target(self) -> int:
-        if self._uses_safe_park_target():
-            return self._SAFE_PARK_TARGET_COUNTS
-        if self._opposite_pos is None:
-            raise RuntimeError("Opposite position unavailable for middle target computation")
-        return int(self._opposite_pos // 2)
+        if self._home_pos is None or self._opposite_pos is None:
+            raise RuntimeError("Endpoint positions unavailable for middle target computation")
+        return calculate_safe_park_target(self._resolved_axis_name(), self._home_pos, self._opposite_pos)
 
     def _final_position_status_text(self) -> str:
         if self._uses_safe_park_target():

@@ -7,8 +7,11 @@ from PyQt6.QtWidgets import QApplication, QMessageBox
 from gui.workspace.pages.single_axis_functional_popup import SingleAxisFunctionalPopup
 from gui.workspace.controllers.single_axis_functional_test_controller import (
     FunctionalTestConfig,
+    SingleAxisFunctionalTestController,
 )
 from data.binary_cmd_builders import build_hunting_timeout, build_nodeconfig_query_payload, build_tpos
+from data.binary_cmd_parser import decode_nodeconfig_motion_polarity
+from services.node_sensor_profile import NodeSensorProfile
 
 
 def get_app():
@@ -126,17 +129,43 @@ def test_position_and_range_difference_updates(monkeypatch):
     assert popup.range_field.text() == "1100"
 
 
-def test_middle_travel_range_uses_tpos_target_then_latest_position(monkeypatch):
-    _suppress_message_boxes(monkeypatch)
-    popup = SingleAxisFunctionalPopup(node_options=[(4, "Axis")], allow_safe_tx=True)
+class SingleAxisFunctionalPopupTests:
+    __test__ = True
 
-    popup.controller.position_changed(8)
-    popup.controller.command_requested(build_tpos(50000))
-    assert popup.range_field.text() == "49992"
-    assert "Middle travel distance: 49992" in popup.status_block.toPlainText()
+    def test_single_axis_return_leg_keeps_measured_range_display_and_logs_middle_preview(self, monkeypatch):
+        _suppress_message_boxes(monkeypatch)
+        controller = SingleAxisFunctionalTestController(FunctionalTestConfig(reference_sensor="L", opposite_sensor="R"))
+        polarity = decode_nodeconfig_motion_polarity(0x00)
+        controller._node_id = 6
+        controller._motion_polarity = polarity
+        controller._sensor_profile = NodeSensorProfile.from_node_context(6, polarity)
+        popup = SingleAxisFunctionalPopup(node_options=[(3, "X")], controller=controller, allow_safe_tx=True)
+        differences: list[int] = []
+        original_difference_changed = controller.difference_changed
 
-    popup.controller.position_changed(49990)
-    assert popup.range_field.text() == "49992"
+        def record_difference(value: int) -> None:
+            differences.append(value)
+            original_difference_changed(value)
+
+        controller.difference_changed = record_difference
+
+        controller._home_pos = 0
+        controller._state = controller.S_READ_RANGE1
+        controller._wait_for = "getpos_r1"
+        controller._handle_getpos(("G", 2_499_678))
+        assert popup.range_field.text() == "2499678"
+
+        controller._state = controller.S_READ_RANGE2
+        controller._wait_for = "getpos_r2"
+        controller._opposite_pos = 2_499_678
+        controller._range_1 = 2_499_678
+        controller._handle_getpos(("G", -100))
+
+        assert popup.range_field.text() == "2499778"
+        assert differences[-1] == 100
+        assert "Middle travel distance: 1249939" in popup.status_block.toPlainText()
+        assert "Difference: 100" in popup.status_block.toPlainText()
+        popup.close()
 
 
 def test_range_display_resets_between_runs(monkeypatch):
@@ -149,7 +178,7 @@ def test_range_display_resets_between_runs(monkeypatch):
     popup.controller.range2_changed(1100)
     popup.controller.position_changed(12)
     popup.controller.command_requested(build_tpos(50000))
-    assert popup.range_field.text() == "49988"
+    assert popup.range_field.text() == "1100"
 
     popup.stop_button.click()
     popup._handle_run_clicked()

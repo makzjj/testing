@@ -9,6 +9,14 @@ import time
 from data.binary_cmd_builders import build_getpos, build_run, build_stopmotor, build_tpos, build_vel
 from data.binary_cmd_parser import decode_command
 from services.ipqc_excel_adapter import IpqcExcelAdapter, SamplingWorkbookLayout
+from services.motion_measurements import (
+    SAFE_PARK_TARGET_COUNTS,
+    calculate_midpoint_target,
+    calculate_outward_range,
+    calculate_return_error,
+    calculate_return_range,
+    calculate_safe_park_target,
+)
 from services.node_motion_polarity import NodeMotionPolarity
 from services.node_sensor_profile import NodeSensorProfile
 
@@ -90,7 +98,7 @@ class SamplingTestController:
     S_FAILED = "FAILED"
     S_ABORTED = "ABORTED"
     S_COMPLETED = "COMPLETED"
-    _SAFE_PARK_TARGET_COUNTS = -44_000
+    _SAFE_PARK_TARGET_COUNTS = SAFE_PARK_TARGET_COUNTS
 
     def __init__(
         self,
@@ -1120,15 +1128,18 @@ class SamplingTestController:
             if self._start_l_pos is None:
                 self._fail_with_stop("Home position is missing before outward measurement.", resumable=False)
                 return
-            range_value = abs(int(self._current_r_pos) - int(self._start_l_pos))
+            range_value = calculate_outward_range(self._start_l_pos, self._current_r_pos)
             return_error = None
         else:
             self._current_l_pos = position
             if self._current_r_pos is None:
                 self._fail_with_stop("Opposite reference position is missing before return measurement.", resumable=False)
                 return
-            range_value = abs(int(self._current_r_pos) - int(self._current_l_pos))
-            return_error = abs(int(self._current_l_pos) - int(self._start_l_pos or 0))
+            if self._start_l_pos is None:
+                self._fail_with_stop("Home position is missing before return measurement.", resumable=False)
+                return
+            range_value = calculate_return_range(self._current_r_pos, self._current_l_pos)
+            return_error = calculate_return_error(self._start_l_pos, self._current_l_pos)
 
         speed = float(range_value) / float(elapsed_seconds)
         rounded_elapsed_seconds = round(float(elapsed_seconds), 3)
@@ -1256,15 +1267,17 @@ class SamplingTestController:
         opposite_pos = self._opposite_position if self._opposite_position is not None else self._current_r_pos
         if home_pos is None or opposite_pos is None:
             raise RuntimeError("Sampling endpoint positions are missing for middle target calculation.")
-        return int(int(home_pos) + ((int(opposite_pos) - int(home_pos)) // 2))
+        return calculate_midpoint_target(home_pos, opposite_pos)
 
     def _uses_safe_park_target(self) -> bool:
         return str(self._node_name or "").strip().upper() in {"Z", "PZ"}
 
     def _final_success_target(self) -> int:
-        if self._uses_safe_park_target():
-            return self._SAFE_PARK_TARGET_COUNTS
-        return self._calculate_middle_target()
+        home_pos = self._home_position if self._home_position is not None else self._start_l_pos
+        opposite_pos = self._opposite_position if self._opposite_position is not None else self._current_r_pos
+        if home_pos is None or opposite_pos is None:
+            raise RuntimeError("Sampling endpoint positions are missing for middle target calculation.")
+        return calculate_safe_park_target(self._node_name, home_pos, opposite_pos)
 
     def _final_position_status_text(self) -> str:
         if self._uses_safe_park_target():
