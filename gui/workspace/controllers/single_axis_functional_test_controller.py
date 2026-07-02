@@ -29,6 +29,7 @@ from data.binary_cmd_parser import (
     decode_command,
     decode_nodeconfig_motion_polarity,
 )
+from myconfig.node_display import get_ml20_node_name
 from services.node_sensor_profile import NodeSensorProfile
 from data.binary_cmd_builders import (
     build_lflag_query_payload,
@@ -92,6 +93,7 @@ class SingleAxisFunctionalTestController:
     S_ABORTED = "ABORTED"
     S_PASSED = "PASSED"
     S_FAILED = "FAILED"
+    _SAFE_PARK_TARGET_COUNTS = -44_000
 
     def __init__(self, config: FunctionalTestConfig | None = None) -> None:
         self.cfg = config or FunctionalTestConfig()
@@ -540,10 +542,10 @@ class SingleAxisFunctionalTestController:
             if difference > self.cfg.movement_tolerance:
                 self._request_stopmotor()
                 return self._fail("Range difference exceeds tolerance")
-            # Compute middle from opposite_pos only (absolute leg from zero)
-            self._middle_target = int(self._opposite_pos // 2)
+            self._middle_target = self._final_success_target()
             self._set_state(self.S_MOVE_MIDDLE)
             self._wait_for = "tpos_ack"
+            self.status_changed(self._final_position_status_text())
             self._emit_command(build_tpos(self._middle_target))
             return
 
@@ -690,3 +692,21 @@ class SingleAxisFunctionalTestController:
 
     def _run_velocity_for_sign(self, sign: int) -> int:
         return self.cfg.velocity_left_to_right if int(sign) > 0 else self.cfg.velocity_right_to_left
+
+    def _resolved_axis_name(self) -> str:
+        return str(get_ml20_node_name(self._node_id) or "").strip().upper()
+
+    def _uses_safe_park_target(self) -> bool:
+        return self._resolved_axis_name() in {"Z", "PZ"}
+
+    def _final_success_target(self) -> int:
+        if self._uses_safe_park_target():
+            return self._SAFE_PARK_TARGET_COUNTS
+        if self._opposite_pos is None:
+            raise RuntimeError("Opposite position unavailable for middle target computation")
+        return int(self._opposite_pos // 2)
+
+    def _final_position_status_text(self) -> str:
+        if self._uses_safe_park_target():
+            return "Final position: moving to safe position -44000 counts (half revolution from home)"
+        return f"Final position: moving to midpoint {int(self._middle_target or 0)}"

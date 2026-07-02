@@ -726,6 +726,78 @@ class SamplingControllerTests(unittest.TestCase):
                     self.assertFalse(controller.failures)
                     self.assertFalse(controller.aborts)
 
+    def test_sampling_z_axis_uses_safe_park_target_after_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controller = self._build_sampling_controller(
+                tmpdir,
+                [0.0, 0.5, 1.0, 1.4, 2.0, 2.4],
+                pwm_values=(100,),
+                samples_per_direction=1,
+                node_id=12,
+            )
+
+            self.assertTrue(controller.start(12, "Z"))
+            self._drive_home_sequence(controller, start_pos=10, home_packet=self._tpos_home_packet("L"))
+            controller.handle_runtime_packet([0x88, 0x53, *build_run(100)[1:]])
+            controller.handle_runtime_packet(self._sensor_packet("R"))
+            controller.handle_runtime_packet(self._getpos_packet(70))
+            controller.handle_runtime_packet([0x88, 0x53, *build_run(-100)[1:]])
+            controller.handle_runtime_packet(self._sensor_packet("L"))
+            controller.handle_runtime_packet(self._getpos_packet(10))
+
+            self.assertEqual(controller.commands[-1], build_tpos(-44000))
+            self.assertIn("Final position: moving to safe position -44000 counts (half revolution from home)", controller.statuses)
+            self.assertIn("Home position captured: 10", controller.statuses)
+
+    def test_sampling_pz_axis_uses_safe_park_target_after_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controller = self._build_sampling_controller(
+                tmpdir,
+                [0.0, 0.5, 1.0, 1.4, 2.0, 2.4],
+                pwm_values=(100,),
+                samples_per_direction=1,
+                node_id=9,
+            )
+
+            self.assertTrue(controller.start(9, "PZ"))
+            self._drive_home_sequence(controller, start_pos=10, home_packet=self._tpos_home_packet("L"))
+            controller.handle_runtime_packet([0x88, 0x53, *build_run(100)[1:]])
+            controller.handle_runtime_packet(self._sensor_packet("R"))
+            controller.handle_runtime_packet(self._getpos_packet(70))
+            controller.handle_runtime_packet([0x88, 0x53, *build_run(-100)[1:]])
+            controller.handle_runtime_packet(self._sensor_packet("L"))
+            controller.handle_runtime_packet(self._getpos_packet(10))
+
+            self.assertEqual(controller.commands[-1], build_tpos(-44000))
+
+    def test_sampling_rz_and_unknown_axes_retain_midpoint_final_target(self) -> None:
+        cases = [
+            ("RZ", 8),
+            ("Unknown", 8),
+        ]
+        for node_name, node_id in cases:
+            with self.subTest(node_name=node_name):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    controller = self._build_sampling_controller(
+                        tmpdir,
+                        [0.0, 0.5, 1.0, 1.4, 2.0, 2.4],
+                        pwm_values=(100,),
+                        samples_per_direction=1,
+                        node_id=node_id,
+                    )
+
+                    self.assertTrue(controller.start(node_id, node_name))
+                    self._drive_home_sequence(controller, start_pos=10, home_packet=self._tpos_home_packet("L"))
+                    controller.handle_runtime_packet([0x88, 0x53, *build_run(100)[1:]])
+                    controller.handle_runtime_packet(self._sensor_packet("R"))
+                    controller.handle_runtime_packet(self._getpos_packet(70))
+                    controller.handle_runtime_packet([0x88, 0x53, *build_run(-100)[1:]])
+                    controller.handle_runtime_packet(self._sensor_packet("L"))
+                    controller.handle_runtime_packet(self._getpos_packet(10))
+
+                    self.assertEqual(controller.commands[-1], build_tpos(40))
+                    self.assertIn("Final position: moving to midpoint 40", controller.statuses)
+
     def test_sampling_duplicate_sensor_while_waiting_for_getpos_is_ignored(self) -> None:
         cases = [
             ("positive direct", self._sensor_packet("R"), self._sensor_packet("R"), 70, [0x88, 0xFF, 0x9C], 1),
@@ -884,6 +956,74 @@ class SamplingControllerTests(unittest.TestCase):
             self.assertEqual(controller.commands[-1], [0xDD])
             self.assertTrue(controller.failures)
             self.assertIn("Unexpected packet", controller.failures[-1])
+
+    def test_sampling_same_sensor_profile_outward_first_l_advances_to_getpos(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controller = self._build_sampling_controller(tmpdir, [0.0, 0.05], samples_per_direction=1, node_id=5)
+
+            self.assertTrue(controller.start(5, "V"))
+            self._drive_home_sequence(controller, start_pos=10, home_packet=self._tpos_home_packet("L"))
+
+            self.assertEqual(controller.commands[3], [0x88, 0x00, 0x64])
+            controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
+            controller.handle_runtime_packet(self._sensor_packet("L"))
+
+            self.assertTrue(controller.is_active())
+            self.assertEqual(controller.state, controller.S_SAMPLE_WAIT_GETPOS)
+            self.assertEqual(controller.commands[-1], [0x82])
+            self._assert_no_dd(controller)
+
+    def test_sampling_same_sensor_profile_return_first_l_advances_to_getpos(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controller = self._build_sampling_controller(tmpdir, [0.0, 0.05, 1.0, 1.4], samples_per_direction=1, node_id=5)
+
+            self.assertTrue(controller.start(5, "V"))
+            self._drive_home_sequence(controller, start_pos=10, home_packet=self._tpos_home_packet("L"))
+            controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
+            controller.handle_runtime_packet(self._sensor_packet("L"))
+            controller.handle_runtime_packet(self._getpos_packet(70))
+
+            self.assertEqual(controller.commands[-1], [0x88, 0xFF, 0x9C])
+            controller.handle_runtime_packet([0x88, 0x53, 0xFF, 0x9C])
+            controller.handle_runtime_packet(self._sensor_packet("L"))
+
+            self.assertTrue(controller.is_active())
+            self.assertEqual(controller.state, controller.S_SAMPLE_WAIT_GETPOS)
+            self.assertEqual(controller.commands[-1], [0x82])
+            self._assert_no_dd(controller)
+
+    def test_sampling_same_sensor_profile_accepts_first_l_with_reversed_run_sign(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controller = self._build_sampling_controller(tmpdir, [0.0, 0.05], samples_per_direction=1, node_id=6)
+            polarity = decode_nodeconfig_motion_polarity(0x02, allow_unvalidated=True)
+            controller.set_motion_polarity(polarity)
+            controller.set_sensor_profile(NodeSensorProfile.from_node_context(6, polarity))
+
+            self.assertTrue(controller.start(6, "H"))
+            self._drive_home_sequence(controller, start_pos=10, home_packet=self._tpos_home_packet("L"))
+
+            self.assertEqual(controller.commands[3], [0x88, 0xFF, 0x9C])
+            controller.handle_runtime_packet([0x88, 0x53, 0xFF, 0x9C])
+            controller.handle_runtime_packet(self._sensor_packet("L"))
+
+            self.assertTrue(controller.is_active())
+            self.assertEqual(controller.state, controller.S_SAMPLE_WAIT_GETPOS)
+            self.assertEqual(controller.commands[-1], [0x82])
+            self._assert_no_dd(controller)
+
+    def test_sampling_same_sensor_profile_accepts_zl_event_form(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controller = self._build_sampling_controller(tmpdir, [0.0, 0.05], samples_per_direction=1, node_id=5)
+
+            self.assertTrue(controller.start(5, "V"))
+            self._drive_home_sequence(controller, start_pos=10, home_packet=self._tpos_home_packet("L"))
+            controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
+            controller.handle_runtime_packet(self._sensor_packet("L", z_form=True))
+
+            self.assertTrue(controller.is_active())
+            self.assertEqual(controller.state, controller.S_SAMPLE_WAIT_GETPOS)
+            self.assertEqual(controller.commands[-1], [0x82])
+            self._assert_no_dd(controller)
 
     def test_sampling_middle_tpos_l_sensor_is_not_treated_as_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

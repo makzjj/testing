@@ -204,6 +204,37 @@ class FunctionalControllerTests(unittest.TestCase):
         self.assertEqual(self.ctrl.commands[-1], build_tpos(1_250_000))
         self.assertFalse(self.ctrl.failed)
 
+    def test_normal_axis_retains_midpoint_final_target(self):
+        self._drive_to_compare(2_500_000, 0)
+        self.assertEqual(self.ctrl.commands[-1], build_tpos(1_250_000))
+        self.assertIn("Final position: moving to midpoint 1250000", self.ctrl.statuses)
+
+    def test_z_axis_uses_safe_park_target_after_successful_validation(self):
+        ctrl = Recorder(self.ctrl.cfg)
+        ctrl.start(12)
+        self.assertEqual(ctrl.commands[-1], [0xC4, 0x3F])
+        ctrl.handle_runtime_packet(pkt(0xC4, 0x3A, 0x00))
+        self._drive_to_compare(5000, 0, ctrl=ctrl)
+        self.assertEqual(ctrl.commands[-1], build_tpos(-44000))
+        self.assertIn("Final position: moving to safe position -44000 counts (half revolution from home)", ctrl.statuses)
+        self.assertIn(0, ctrl.positions)
+
+    def test_pz_axis_uses_safe_park_target_after_successful_validation(self):
+        ctrl = Recorder(self.ctrl.cfg)
+        ctrl.start(9)
+        self.assertEqual(ctrl.commands[-1], [0xC4, 0x3F])
+        ctrl.handle_runtime_packet(pkt(0xC4, 0x3A, 0x00))
+        self._drive_to_compare(5000, 0, ctrl=ctrl)
+        self.assertEqual(ctrl.commands[-1], build_tpos(-44000))
+
+    def test_rz_axis_retains_midpoint_final_target(self):
+        ctrl = Recorder(self.ctrl.cfg)
+        ctrl.start(8)
+        self.assertEqual(ctrl.commands[-1], [0xC4, 0x3F])
+        ctrl.handle_runtime_packet(pkt(0xC4, 0x3A, 0x00))
+        self._drive_to_compare(5000, 0, ctrl=ctrl)
+        self.assertEqual(ctrl.commands[-1], build_tpos(2500))
+
     def test_range_difference_513_fails_and_sends_stop(self):
         self._drive_to_compare(2_500_000, -513)
         self.assertEqual(self.ctrl.diffs[-1], 513)

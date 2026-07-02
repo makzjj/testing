@@ -90,6 +90,7 @@ class SamplingTestController:
     S_FAILED = "FAILED"
     S_ABORTED = "ABORTED"
     S_COMPLETED = "COMPLETED"
+    _SAFE_PARK_TARGET_COUNTS = -44_000
 
     def __init__(
         self,
@@ -901,7 +902,7 @@ class SamplingTestController:
         self._wait_for = "tpos_status"
         expected_sensor = self._expected_sensor_for_direction(self._current_direction)
         self._pending_departure_sensor = self._departure_sensor_for_direction(self._current_direction)
-        self._allow_departure_duplicate = True
+        self._allow_departure_duplicate = self._pending_departure_sensor != expected_sensor
         self._expected_response_description = f"{expected_sensor} sensor event for PWM {self._current_pwm} sample {self._current_sample_index}"
         self.status_changed(
             f"Waiting for {expected_sensor} sensor event: PWM {self._current_pwm}, sample {self._current_sample_index}, direction {self._current_direction}"
@@ -1222,8 +1223,8 @@ class SamplingTestController:
         self._set_state(self.S_WAIT_MIDDLE_TPOS)
         self._wait_for = "tpos_status"
         self._expected_response_description = "TPOS middle completion"
-        self.status_changed("Moving to middle")
-        self.log_message("Moving to middle")
+        self.status_changed(self._final_position_status_text())
+        self.log_message(self._final_position_status_text())
         self.command_requested(build_tpos(int(self._resume_middle_target or 0)))
 
     def _handle_sys_mode(self, value: object) -> None:
@@ -1238,15 +1239,15 @@ class SamplingTestController:
     def _move_to_middle_and_complete(self, range_value: int) -> None:
         _ = range_value
         try:
-            self._middle_target = self._calculate_middle_target()
+            self._middle_target = self._final_success_target()
         except RuntimeError as exc:
             self._fail_with_stop(str(exc), resumable=False)
             return
         self._set_state(self.S_WAIT_MIDDLE_TPOS)
         self._wait_for = "tpos_status"
         self._expected_response_description = "TPOS middle completion"
-        self.status_changed("Moving to middle")
-        self.log_message("Moving to middle")
+        self.status_changed(self._final_position_status_text())
+        self.log_message(self._final_position_status_text())
         self.command_requested(build_tpos(int(self._middle_target or 0)))
 
     def _calculate_middle_target(self) -> int:
@@ -1255,6 +1256,19 @@ class SamplingTestController:
         if home_pos is None or opposite_pos is None:
             raise RuntimeError("Sampling endpoint positions are missing for middle target calculation.")
         return int(int(home_pos) + ((int(opposite_pos) - int(home_pos)) // 2))
+
+    def _uses_safe_park_target(self) -> bool:
+        return str(self._node_name or "").strip().upper() in {"Z", "PZ"}
+
+    def _final_success_target(self) -> int:
+        if self._uses_safe_park_target():
+            return self._SAFE_PARK_TARGET_COUNTS
+        return self._calculate_middle_target()
+
+    def _final_position_status_text(self) -> str:
+        if self._uses_safe_park_target():
+            return "Final position: moving to safe position -44000 counts (half revolution from home)"
+        return f"Final position: moving to midpoint {int(self._middle_target or 0)}"
 
     def _clear_pending_runtime_state(self) -> None:
         self._wait_for = None
