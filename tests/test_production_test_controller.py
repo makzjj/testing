@@ -1023,7 +1023,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
         assert button_row is not None
         self.assertIsNotNone(button_row.itemAt(0).spacerItem())
         button_texts = [button_row.itemAt(index).widget().text() for index in range(button_row.count()) if button_row.itemAt(index).widget() is not None]
-        self.assertEqual(button_texts, ["Robot Power ON/OFF", "Update Nodes", "Clear"])
+        self.assertEqual(button_texts, ["Emergency Button", "Robot Power ON/OFF", "Update Nodes", "Clear"])
         self.assertFalse(disconnected_page.node_status_section._robot_power_button.isEnabled())
 
         connected_page = ProductionPage(_FakeBridge(_FakeRuntimeWindow(connected=True)))

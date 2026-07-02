@@ -84,6 +84,22 @@ class RuntimePacketHandlerTests(unittest.TestCase):
         self.assertEqual(comm_stats_event.value["uart_rx"], 9)
         self.assertEqual(mcu_version_event.value, "v1.2.3.4")
 
+    def test_can_version_packet_updates_runtime_node_state_and_emits_event(self) -> None:
+        packet = {
+            "status": "ok",
+            "type": "can_over_uart",
+            "sender": 5,
+            "cmd": 0xC8,
+            "params": [0x3A, 0x12, 0x34, 0x56],
+        }
+
+        events = self.handler.handle_packet(packet, self.node_status)
+        node_version_event = next(event for event in events if event.kind == "node_version")
+
+        self.assertEqual(node_version_event.node_id, 5)
+        self.assertEqual(node_version_event.value, "v1.2.3.1110")
+        self.assertEqual(self.node_status[5]["firmware"], "v1.2.3.1110")
+
     def test_mcu_master_interrupt_packet_emits_emergency_stop_active_and_release_events(self) -> None:
         active_packet = {
             "status": "ok",

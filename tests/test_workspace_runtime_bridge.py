@@ -322,6 +322,14 @@ ui:
             self.assertTrue(bridge.raw_config["features"]["mechanical_tools"])
 
     def test_bridge_only_reports_live_overlays_for_mismatches(self) -> None:
+        class _RuntimeWindow:
+            def __init__(self, version: str) -> None:
+                self.runtime_system_state = {"mcu_version": version}
+
+            @property
+            def mcu_version(self) -> str | None:
+                return self.runtime_system_state.get("mcu_version")
+
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "demo.yaml"
             config_path.write_text(
@@ -344,13 +352,13 @@ mcu configuration:
             )
 
             bridge = WorkspaceRuntimeBridge(project)
-            bridge._runtime_launcher._window = SimpleNamespace(mcu_version="2.0.0")
+            bridge._runtime_launcher._window = _RuntimeWindow("2.0.0")
 
             overlays = bridge.get_live_hardware_overlays()
             self.assertEqual(len(overlays), 1)
             self.assertEqual(overlays[0].display_text, "Actual: MCU Version = 2.0.0")
 
-            bridge._runtime_launcher._window = SimpleNamespace(mcu_version="1.0.0")
+            bridge._runtime_launcher._window = _RuntimeWindow("1.0.0")
             self.assertEqual(bridge.get_live_hardware_overlays(), [])
 
     def test_bridge_reports_node_type_live_overlay_only_for_mismatches(self) -> None:

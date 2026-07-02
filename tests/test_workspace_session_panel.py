@@ -339,7 +339,7 @@ ui:
         section.begin_visual_update(window._bridge.get_runtime_robot_nodes())
         window._refresh_shared_node_status()
         self._app.processEvents()
-        self.assertEqual(badge.text(), "ESTOP")
+        self.assertEqual(badge.text(), "Emergency Button")
         self.assertIn("#2E9F58", badge.styleSheet())
         self.assertEqual(badge.focusPolicy(), Qt.FocusPolicy.NoFocus)
         self.assertTrue(_is_green(5))
@@ -361,7 +361,7 @@ ui:
         state["emergency"] = False
         window._refresh_shared_node_status()
         self._app.processEvents()
-        self.assertEqual(badge.text(), "Emergency Stop")
+        self.assertEqual(badge.text(), "Emergency Button")
         self.assertIn("#2E9F58", badge.styleSheet())
         self.assertFalse(badge.hasFocus())
 
