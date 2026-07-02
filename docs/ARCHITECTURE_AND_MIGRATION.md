@@ -198,6 +198,31 @@ UI/pages
   - genuine wrong-sensor and expected fault paths must still fail safely
   - live validation must confirm unrelated runtime traffic remains visible to runtime/global logging while Single Axis ignores it
 
+## Pilot update
+
+- Selected Phase 2B pilot:
+  - live UUID and PWM caller migration onto the unified parameter pipeline
+- Canonical owner:
+  - `ProductionParameterController` plus `ParameterDefinition` plus generic `ParameterRequest` orchestration
+  - Production workbook reporting continues through `IpqcExcelAdapter.write_programming_parameter_result(...)`
+- Existing path reused or replaced:
+  - reused the existing generic parameter pipeline already used by the Production workbook flow
+  - no new parameter framework or registry was introduced
+- Live caller migration completed:
+  - Production page UUID and PWM actions now rely on the generic `build_parameter_request(...)`, `write_parameters(...)`, `verify_parameters(...)`, and generic workbook result handling only
+  - centralized EEPROM decision remains unchanged: persistent writes first, one EEPROM save if needed, runtime-only PWM afterward
+- Legacy path retained:
+  - UUID/PWM wrapper APIs, legacy timers, compatibility signals, and UUID CSV helpers remain active for compatibility and test coverage
+  - they are not yet removed in this phase
+- Intentionally untouched:
+  - runtime node-info UUID inventory reads
+  - Mechanical PWM utility orchestration and EEPROM gating
+  - Production test-profile UUID verification flow
+- Deletion condition:
+  - no live callers remain
+  - focused UUID/PWM and workbook regression tests pass
+  - EEPROM behavior is validated live before deleting the legacy UUID/PWM wrapper internals
+
 ## E. Governing rule
 
 Every touched responsibility must end with fewer owners, fewer active paths, and a clear deletion plan.

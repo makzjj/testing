@@ -1710,6 +1710,117 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertTrue(page._workbook_parameter_write_pending)
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook write wiring tests.")
+    def test_production_page_live_uuid_pwm_write_path_uses_generic_parameter_pipeline_only(self) -> None:
+        runtime_window = _FakeRuntimeWindow(connected=True)
+        runtime_window.node_status[6] = {
+            "connected": True,
+            "firmware": "v1.0.0",
+            "uuid": "",
+            "type": "H",
+            "interrupt": "OK",
+        }
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            self._create_ipqc_workbook(workbook_path, with_optional_fields=False)
+
+            with patch(
+                "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
+                return_value=(str(workbook_path), "Excel Files (*.xlsx)"),
+            ):
+                page._handle_load_ipqc_workbook()
+                self._app.processEvents()
+
+            self._select_node(page, "Node 6 - H")
+
+            with patch.object(
+                page._parameter_controller,
+                "write_parameters",
+                wraps=page._parameter_controller.write_parameters,
+            ) as write_parameters, patch.object(
+                page._parameter_controller,
+                "write_uuid",
+                side_effect=AssertionError("Legacy write_uuid path should not be used by Production workbook actions."),
+            ), patch.object(
+                page._parameter_controller,
+                "write_loaded_uuid",
+                side_effect=AssertionError("Legacy write_loaded_uuid path should not be used by Production workbook actions."),
+            ), patch.object(
+                page._parameter_controller,
+                "write_pwm",
+                side_effect=AssertionError("Legacy write_pwm path should not be used by Production workbook actions."),
+            ), patch.object(
+                page._parameter_controller,
+                "verify_uuid",
+                side_effect=AssertionError("Legacy verify_uuid path should not be used by Production workbook actions."),
+            ), patch.object(
+                page._parameter_controller,
+                "verify_loaded_uuid",
+                side_effect=AssertionError("Legacy verify_loaded_uuid path should not be used by Production workbook actions."),
+            ), patch.object(
+                page._parameter_controller,
+                "verify_pwm",
+                side_effect=AssertionError("Legacy verify_pwm path should not be used by Production workbook actions."),
+            ):
+                page._handle_write_uuid()
+                self._app.processEvents()
+
+                self.assertEqual(
+                    [request.definition.name for request in write_parameters.call_args_list[0].args[0]],
+                    ["UUID"],
+                )
+                self.assertEqual(runtime_window.backend_client.sent_commands[0], (6, build_uuid_write_payload(1223303010)))
+
+                runtime_window.packet_received.emit(
+                    {
+                        "status": "ok",
+                        "type": "can_over_uart",
+                        "sender": 6,
+                        "cmd": 0xE0,
+                        "params": [0x3A, *build_uuid_write_payload(1223303010)[2:]],
+                    }
+                )
+                self._app.processEvents()
+
+                self.assertEqual(runtime_window.backend_client.sent_commands[1], (6, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]))
+
+                runtime_window.packet_received.emit(
+                    {
+                        "status": "ok",
+                        "type": "can_over_uart",
+                        "sender": 6,
+                        "cmd": EEPROM_SAVE_COMMAND,
+                        "params": [0x0A, 0x00],
+                    }
+                )
+                self._app.processEvents()
+
+                self.assertEqual(
+                    [request.definition.name for request in write_parameters.call_args_list[1].args[0]],
+                    ["PWM"],
+                )
+                self.assertEqual(runtime_window.backend_client.sent_commands[2], (6, build_pwm_write_payload(100)))
+
+                runtime_window.packet_received.emit(
+                    {
+                        "status": "ok",
+                        "type": "can_over_uart",
+                        "sender": 6,
+                        "cmd": 0x84,
+                        "params": [0x53, 0x00, 0x64],
+                    }
+                )
+                self._app.processEvents()
+
+            self.assertEqual(write_parameters.call_count, 2)
+            self.assertEqual(
+                runtime_window.backend_client.sent_commands.count((6, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX])),
+                1,
+            )
+
+    @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook write wiring tests.")
     def test_production_page_write_uuid_timeout_disables_verify_and_reports_quiet_mode_issue(self) -> None:
         runtime_window = _FakeRuntimeWindow()
         runtime_window.node_status[3] = {
@@ -1764,6 +1875,87 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertIn("[FAIL] Timed out waiting for EEPROM save ACK.", timeout_line)
             self.assertNotIn("Node", timeout_line)
             self.assertNotIn("Axis", timeout_line)
+
+    @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook verify wiring tests.")
+    def test_production_page_live_uuid_pwm_verify_path_uses_generic_parameter_pipeline_only(self) -> None:
+        runtime_window = _FakeRuntimeWindow(connected=True)
+        runtime_window.node_status[6] = {
+            "connected": True,
+            "firmware": "v1.0.0",
+            "uuid": "",
+            "type": "H",
+            "interrupt": "OK",
+        }
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+        definitions = {definition.name: definition for definition in default_workbook_parameter_definitions()}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            self._create_ipqc_workbook(workbook_path, with_optional_fields=False)
+
+            with patch(
+                "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
+                return_value=(str(workbook_path), "Excel Files (*.xlsx)"),
+            ):
+                page._handle_load_ipqc_workbook()
+                self._app.processEvents()
+
+            self._select_node(page, "Node 6 - H")
+
+            with patch.object(
+                page._parameter_controller,
+                "verify_parameters",
+                wraps=page._parameter_controller.verify_parameters,
+            ) as verify_parameters, patch.object(
+                page._parameter_controller,
+                "write_uuid",
+                side_effect=AssertionError("Legacy write_uuid path should not be used by Production workbook actions."),
+            ), patch.object(
+                page._parameter_controller,
+                "write_loaded_uuid",
+                side_effect=AssertionError("Legacy write_loaded_uuid path should not be used by Production workbook actions."),
+            ), patch.object(
+                page._parameter_controller,
+                "write_pwm",
+                side_effect=AssertionError("Legacy write_pwm path should not be used by Production workbook actions."),
+            ), patch.object(
+                page._parameter_controller,
+                "verify_uuid",
+                side_effect=AssertionError("Legacy verify_uuid path should not be used by Production workbook actions."),
+            ), patch.object(
+                page._parameter_controller,
+                "verify_loaded_uuid",
+                side_effect=AssertionError("Legacy verify_loaded_uuid path should not be used by Production workbook actions."),
+            ), patch.object(
+                page._parameter_controller,
+                "verify_pwm",
+                side_effect=AssertionError("Legacy verify_pwm path should not be used by Production workbook actions."),
+            ):
+                page._handle_verify_uuid()
+                self._app.processEvents()
+
+                self.assertEqual(
+                    [request.definition.name for request in verify_parameters.call_args.args[0]],
+                    ["UUID", "PWM"],
+                )
+                self.assertEqual(runtime_window.backend_client.sent_commands[0], (6, definitions["UUID"].build_read_command()))
+
+                runtime_window.packet_received.emit(self._build_parameter_verify_packet(definitions["UUID"], 1223303010))
+                self._app.processEvents()
+                self.assertEqual(runtime_window.backend_client.sent_commands[1], (6, definitions["PWM"].build_read_command()))
+
+                runtime_window.packet_received.emit(
+                    {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x85, "params": [0x00, 0x64]}
+                )
+                self._app.processEvents()
+
+            output_sheet = page._ipqc_excel_adapter._workbook["3X"]
+            self.assertEqual(output_sheet["C5"].value, "1223303010")
+            self.assertEqual(output_sheet["D5"].value, "PASS")
+            self.assertEqual(output_sheet["C6"].value, "100")
+            self.assertEqual(output_sheet["D6"].value, "PASS")
+            self.assertEqual(page.uuid_section.workbook_validation_text, "Workbook Validation: PASSED")
 
     def test_progress_log_coloring_uses_black_green_and_red(self) -> None:
         runtime_window = _FakeRuntimeWindow()
