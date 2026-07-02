@@ -2538,13 +2538,13 @@ class _NodeStatusSection(PanelFrame):
     def set_emergency_stop_state(self, active: bool | None) -> None:
         self._emergency_stop_active = active
         if active is True:
-            self._emergency_badge.setText("STOP")
+            self._emergency_badge.setText("EMERGENCY BUTTON")
             self._emergency_badge.setStyleSheet(
                 "background: #D92D20; color: white; border: 1px solid #B42318; "
                 "border-radius: 16px; font-weight: 700; padding: 8px 14px;"
             )
             return
-        self._emergency_badge.setText("Stop")
+        self._emergency_badge.setText("Emergency Button")
         self._emergency_badge.setStyleSheet(
             "background: #2E9F58; color: white; border: 1px solid #247A45; "
             "border-radius: 16px; font-weight: 600; padding: 8px 14px;"

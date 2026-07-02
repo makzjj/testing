@@ -29,7 +29,6 @@ class CommMonitorDialog(QDialog):
         self.pretest_active = False
         self.pretest_nodes_pending = set()
         self.pretest_nodes_to_query = []
-        self.node_versions = {}
         self.pretest_timer = QTimer(self)
         self.pretest_timer.setSingleShot(True)
         self.pretest_timer.timeout.connect(self.on_pretest_timeout)
@@ -44,9 +43,42 @@ class CommMonitorDialog(QDialog):
                 self.uart_baud_lbl.setText(self.main_window.baud_combo.currentText())
             
             # Update MCU Version
-            mcu_ver = getattr(self.main_window, 'mcu_version', "Unknown")
+            mcu_ver = self._current_mcu_version()
             self.mcu_ver_lbl.setText(str(mcu_ver))
         super().showEvent(event)
+
+    def _current_mcu_version(self):
+        if not self.main_window:
+            return "Unknown"
+        mcu_ver = getattr(self.main_window, "mcu_version", None)
+        return mcu_ver if mcu_ver not in (None, "") else "Unknown"
+
+    def _current_node_firmware_versions(self):
+        if not self.main_window:
+            return []
+
+        node_status = getattr(self.main_window, "node_status", None)
+        if not isinstance(node_status, dict):
+            return []
+
+        if self.active_nodes:
+            node_ids = sorted(int(node_id) for node_id in self.active_nodes)
+        else:
+            node_ids = sorted(
+                int(node_id)
+                for node_id, status in node_status.items()
+                if isinstance(status, dict) and status.get("firmware")
+            )
+
+        versions = []
+        for node_id in node_ids:
+            status = node_status.get(node_id, {})
+            if not isinstance(status, dict):
+                continue
+            firmware = str(status.get("firmware", "") or "").strip()
+            if firmware:
+                versions.append((node_id, firmware))
+        return versions
         
     def setup_ui(self):
         layout = QVBoxLayout()
@@ -210,7 +242,6 @@ class CommMonitorDialog(QDialog):
             self.pretest_active = True
             self.pretest_nodes_pending = set(selected_nodes)
             self.pretest_nodes_to_query = list(selected_nodes)
-            self.node_versions = {}
             self.report_btn.setEnabled(False)
             self.start_btn.setEnabled(False)
             
@@ -270,7 +301,7 @@ class CommMonitorDialog(QDialog):
 
     def handle_node_version(self, node_id, version):
         """Handle version response during pre-test or normal mode."""
-        self.node_versions[node_id] = version
+        _ = version
         if self.pretest_active and node_id in self.pretest_nodes_pending:
             self.pretest_nodes_pending.remove(node_id)
             if not self.pretest_nodes_pending:
@@ -492,7 +523,7 @@ class CommMonitorDialog(QDialog):
         lines.append(f"[          ] Timestamp: {now}")
         lines.append(f"[          ] MCU Firmware Version: {mcu_ver}")
         
-        for nid, ver in self.node_versions.items():
+        for nid, ver in self._current_node_firmware_versions():
             name = NODE_ID_MAPPING.get(nid, f"Node{nid}")
             lines.append(f"[          ] Node {name}({nid:02d}) Version: {ver}")
             

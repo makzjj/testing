@@ -105,6 +105,7 @@ class MainWindow(QMainWindow):
         self.comm_log_store = self.communication_log_store
         self.backend_client.serial_connection.set_communication_log_store(self.communication_log_store)
         self.packet_handler = RuntimePacketHandler()
+        self.runtime_system_state = {"mcu_version": None}
         self.rx_log_writer: RxLogWriter | None = None
         # Legacy dialogs still expect these attributes while MainWindow is being migrated.
         self.serial_conn = self.backend_client.serial_connection
@@ -163,7 +164,7 @@ class MainWindow(QMainWindow):
         self.setup_logging()
 
         self.mcu_version_queried = False  # Track if MCU version already queried
-        self.mcu_version = None  # Store the MCU version
+        self.mcu_version = None  # Store the MCU version in shared runtime state
 
         self.node_info_requested = set()  # Track which nodes have info requests pending
 
@@ -206,6 +207,15 @@ class MainWindow(QMainWindow):
         self.blink_counter = 0
 
         self.setup_timers()
+
+    @property
+    def mcu_version(self):
+        """Expose MCU firmware through one runtime-owned state slot."""
+        return self.runtime_system_state.get("mcu_version")
+
+    @mcu_version.setter
+    def mcu_version(self, value):
+        self.runtime_system_state["mcu_version"] = value
 
 
     def setup_ui(self):

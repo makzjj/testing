@@ -275,6 +275,10 @@ Temporary Items
 
 # Local documentation workspace
 docs/
+!docs/
+docs/*
+!docs/ARCHITECTURE_AND_MIGRATION.md
+!docs/CANONICAL_PIPELINE_REGISTRY.md
 
 # Local skills and notes
 skills/
