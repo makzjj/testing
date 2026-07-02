@@ -169,13 +169,18 @@ class IpqcExcelAdapterTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "serial number/UUID"):
                 adapter.read_expected_summary(strict=True)
 
-    def test_write_uuid_and_pwm_actual_and_checks(self) -> None:
+    def test_uuid_pwm_summary_wrapper_helpers_are_removed(self) -> None:
+        adapter = IpqcExcelAdapter()
+        self.assertFalse(hasattr(adapter, "write_uuid_actual_and_check"))
+        self.assertFalse(hasattr(adapter, "write_pwm_actual_and_check"))
+
+    def test_write_summary_result_maps_uuid_and_pwm_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             template_path = self._create_ipqc_template(tmpdir)
             adapter = IpqcExcelAdapter()
             adapter.load_template(template_path)
-            adapter.write_uuid_actual_and_check("1223303011", "PASS")
-            adapter.write_pwm_actual_and_check("98", "FAIL")
+            adapter.write_summary_result("S/N", "1223303011", "PASS")
+            adapter.write_summary_result("PWM", "98", "FAIL")
             output_path = Path(tmpdir) / "ipqc_completed.xlsx"
             adapter.save_completed_workbook(output_path)
 
@@ -308,7 +313,7 @@ class IpqcExcelAdapterTests(unittest.TestCase):
             template_path = self._create_ipqc_template(tmpdir)
             adapter = IpqcExcelAdapter()
             adapter.load_template(template_path)
-            adapter.write_uuid_actual_and_check("1223303011", "PASS")
+            adapter.write_summary_result("S/N", "1223303011", "PASS")
             output_path = Path(tmpdir) / "ipqc_completed.xlsx"
             saved_path = adapter.save_completed_workbook(output_path)
 

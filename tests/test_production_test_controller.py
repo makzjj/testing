@@ -1734,36 +1734,21 @@ class ProductionPageWorkflowTests(unittest.TestCase):
                 self._app.processEvents()
 
             self._select_node(page, "Node 6 - H")
+            for attr_name in (
+                "write_uuid",
+                "write_loaded_uuid",
+                "write_pwm",
+                "verify_uuid",
+                "verify_loaded_uuid",
+                "verify_pwm",
+            ):
+                self.assertFalse(hasattr(page._parameter_controller, attr_name), attr_name)
 
             with patch.object(
                 page._parameter_controller,
                 "write_parameters",
                 wraps=page._parameter_controller.write_parameters,
-            ) as write_parameters, patch.object(
-                page._parameter_controller,
-                "write_uuid",
-                side_effect=AssertionError("Legacy write_uuid path should not be used by Production workbook actions."),
-            ), patch.object(
-                page._parameter_controller,
-                "write_loaded_uuid",
-                side_effect=AssertionError("Legacy write_loaded_uuid path should not be used by Production workbook actions."),
-            ), patch.object(
-                page._parameter_controller,
-                "write_pwm",
-                side_effect=AssertionError("Legacy write_pwm path should not be used by Production workbook actions."),
-            ), patch.object(
-                page._parameter_controller,
-                "verify_uuid",
-                side_effect=AssertionError("Legacy verify_uuid path should not be used by Production workbook actions."),
-            ), patch.object(
-                page._parameter_controller,
-                "verify_loaded_uuid",
-                side_effect=AssertionError("Legacy verify_loaded_uuid path should not be used by Production workbook actions."),
-            ), patch.object(
-                page._parameter_controller,
-                "verify_pwm",
-                side_effect=AssertionError("Legacy verify_pwm path should not be used by Production workbook actions."),
-            ):
+            ) as write_parameters:
                 page._handle_write_uuid()
                 self._app.processEvents()
 
@@ -1902,36 +1887,21 @@ class ProductionPageWorkflowTests(unittest.TestCase):
                 self._app.processEvents()
 
             self._select_node(page, "Node 6 - H")
+            for attr_name in (
+                "write_uuid",
+                "write_loaded_uuid",
+                "write_pwm",
+                "verify_uuid",
+                "verify_loaded_uuid",
+                "verify_pwm",
+            ):
+                self.assertFalse(hasattr(page._parameter_controller, attr_name), attr_name)
 
             with patch.object(
                 page._parameter_controller,
                 "verify_parameters",
                 wraps=page._parameter_controller.verify_parameters,
-            ) as verify_parameters, patch.object(
-                page._parameter_controller,
-                "write_uuid",
-                side_effect=AssertionError("Legacy write_uuid path should not be used by Production workbook actions."),
-            ), patch.object(
-                page._parameter_controller,
-                "write_loaded_uuid",
-                side_effect=AssertionError("Legacy write_loaded_uuid path should not be used by Production workbook actions."),
-            ), patch.object(
-                page._parameter_controller,
-                "write_pwm",
-                side_effect=AssertionError("Legacy write_pwm path should not be used by Production workbook actions."),
-            ), patch.object(
-                page._parameter_controller,
-                "verify_uuid",
-                side_effect=AssertionError("Legacy verify_uuid path should not be used by Production workbook actions."),
-            ), patch.object(
-                page._parameter_controller,
-                "verify_loaded_uuid",
-                side_effect=AssertionError("Legacy verify_loaded_uuid path should not be used by Production workbook actions."),
-            ), patch.object(
-                page._parameter_controller,
-                "verify_pwm",
-                side_effect=AssertionError("Legacy verify_pwm path should not be used by Production workbook actions."),
-            ):
+            ) as verify_parameters:
                 page._handle_verify_uuid()
                 self._app.processEvents()
 
@@ -2134,7 +2104,12 @@ class ProductionPageWorkflowTests(unittest.TestCase):
                 self._app.processEvents()
 
             with patch.object(page._ipqc_excel_adapter, "write_programming_parameter_result", side_effect=OSError("disk full")):
-                page._update_uuid_cells_in_workbook_memory("1223303011", True)
+                definition = {definition.name: definition for definition in default_workbook_parameter_definitions()}["UUID"]
+                page._update_parameter_cells_in_workbook_memory(
+                    definition=definition,
+                    actual_value="1223303011",
+                    check_result="PASS",
+                )
                 self._app.processEvents()
 
             self.assertEqual(page.result_summary_section._status_label.text(), "REPORTING ERROR")
@@ -2437,7 +2412,12 @@ class ProductionPageWorkflowTests(unittest.TestCase):
                 page._handle_load_ipqc_workbook()
                 self._app.processEvents()
 
-            page._update_uuid_cells_in_workbook_memory("1223303010", True)
+            definition = {definition.name: definition for definition in default_workbook_parameter_definitions()}["UUID"]
+            page._update_parameter_cells_in_workbook_memory(
+                definition=definition,
+                actual_value="1223303010",
+                check_result="PASS",
+            )
             with patch(
                 "gui.workspace.pages.production_page.QFileDialog.getSaveFileName",
                 return_value=(str(output_path), "Excel Files (*.xlsx)"),
@@ -3980,39 +3960,61 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         self.assertEqual(controller._parameter_results, [])
         self.assertIsNone(controller._pending_eeprom_save)
         self.assertFalse(controller._eeprom_settle_active)
-        self.assertIsNone(controller.last_verify_actual_uuid)
-        self.assertEqual(controller.last_verify_actual_uuid_text, "")
-        self.assertEqual(controller.last_verify_raw_response_hex, "")
-        self.assertIsNone(controller.last_verify_actual_pwm)
-        self.assertEqual(controller.last_verify_actual_pwm_text, "")
-        self.assertEqual(controller.last_verify_pwm_raw_response_hex, "")
 
-    def test_write_pwm_sends_set_pwm_payload_to_selected_node(self) -> None:
+    def test_legacy_uuid_pwm_wrapper_api_has_been_removed(self) -> None:
         runtime_window = _FakeRuntimeWindow()
         bridge = _FakeBridge(runtime_window)
         controller = ProductionParameterController(bridge)
 
-        ok, _message = controller.write_pwm(6, "H", 100, expected_pwm_text="100")
+        for attr_name in (
+            "write_uuid",
+            "verify_uuid",
+            "write_loaded_uuid",
+            "verify_loaded_uuid",
+            "load_uuid_csv",
+            "write_pwm",
+            "verify_pwm",
+            "verification_finished",
+            "pwm_verification_finished",
+            "_verify_timer",
+            "_pwm_verify_timer",
+            "_handle_runtime_packet_uuid",
+            "_handle_runtime_packet_pwm",
+            "_send_pwm_verify_request",
+            "_start_verify_for_row",
+            "_start_pwm_verify_for_row",
+        ):
+            self.assertFalse(hasattr(controller, attr_name), attr_name)
+
+    def test_generic_pwm_write_sends_set_pwm_payload_to_selected_node(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        controller = ProductionParameterController(bridge)
+        definitions = {definition.name: definition for definition in default_workbook_parameter_definitions()}
+        request = controller.build_parameter_request(definitions["PWM"], 6, "H", "100")
+
+        ok, _message = controller.write_parameters([request])
         self.assertTrue(ok)
         self.assertEqual(runtime_window.backend_client.sent_commands[0], (6, [0x84, 0x00, 0x64]))
 
-    def test_verify_pwm_uses_getvel_and_decodes_response(self) -> None:
+    def test_generic_pwm_verify_uses_getvel_and_decodes_response(self) -> None:
         runtime_window = _FakeRuntimeWindow()
         bridge = _FakeBridge(runtime_window)
         controller = ProductionParameterController(bridge, timeout_ms=100)
-        events: list[tuple[bool, str]] = []
-        controller.pwm_verification_finished.connect(lambda passed, reason: events.append((passed, reason)))
+        definitions = {definition.name: definition for definition in default_workbook_parameter_definitions()}
+        events: list[tuple[bool, str, object]] = []
+        controller.parameter_verification_finished.connect(lambda passed, reason, results: events.append((passed, reason, results)))
+        request = controller.build_parameter_request(definitions["PWM"], 6, "H", "80")
 
-        self.assertTrue(controller.verify_pwm(6, "H", 80, expected_pwm_text="80"))
+        self.assertTrue(controller.verify_parameters([request]))
         self.assertEqual(runtime_window.backend_client.sent_commands[0], (6, [0x85]))
         runtime_window.packet_received.emit(
             {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x85, "params": [0x00, 0x50]}
         )
         self._app.processEvents()
         self.assertTrue(events)
-        self.assertTrue(events[-1][0])
-        self.assertEqual(controller.last_verify_actual_pwm, 80)
-        self.assertEqual(controller.last_verify_actual_pwm_text, "80")
+        self.assertTrue(events[-1][0], events[-1][1])
+        self.assertEqual(events[-1][2][0].actual_text, "80")
 
     def test_verify_pwm_accepts_expected_values_as_string_and_int(self) -> None:
         definitions = {definition.name: definition for definition in default_workbook_parameter_definitions()}
@@ -4057,31 +4059,6 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         self.assertTrue(events)
         self.assertFalse(events[-1][0])
         self.assertIn("expected 10, actual 80", events[-1][1])
-
-    def test_verify_loaded_uuid_times_out_when_response_is_missing(self) -> None:
-        runtime_window = _FakeRuntimeWindow()
-        bridge = _FakeBridge(runtime_window)
-        controller = ProductionParameterController(bridge, timeout_ms=20)
-        events: list[tuple[bool, str]] = []
-        controller.verification_finished.connect(lambda passed, reason: events.append((passed, reason)))
-
-        csv_text = "node_id,node_name,uuid\n6,H,1223306010\n"
-        with tempfile.TemporaryDirectory() as tmpdir:
-            csv_path = Path(tmpdir) / "uuid_valid.csv"
-            csv_path.write_text(csv_text, encoding="utf-8")
-            self.assertTrue(controller.load_uuid_csv(str(csv_path)))
-
-        self.assertTrue(controller.verify_loaded_uuid(6, "H"))
-        self.assertEqual(runtime_window.backend_client.sent_commands[0], (6, [0xE0, 0x3F]))
-
-        deadline = time.monotonic() + 0.5
-        while time.monotonic() < deadline and not events:
-            self._app.processEvents()
-            time.sleep(0.01)
-
-        self.assertTrue(events)
-        self.assertFalse(events[-1][0])
-        self.assertIn("Timed out", events[-1][1])
 
     def test_parameter_pipeline_verifies_uuid_and_pwm_with_shared_definitions(self) -> None:
         runtime_window = _FakeRuntimeWindow()
@@ -4282,115 +4259,13 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         self.assertTrue(controller.verify_parameters([request]))
         self.assertEqual(runtime_window.backend_client.sent_commands[-1], (6, [0xE0, 0x3F]))
 
-    def test_load_uuid_csv_validation_blocks_invalid_rows(self) -> None:
+    def test_production_page_no_longer_exposes_uuid_pwm_workbook_wrapper_methods(self) -> None:
         runtime_window = _FakeRuntimeWindow()
         bridge = _FakeBridge(runtime_window)
-        controller = ProductionParameterController(bridge)
+        page = ProductionPage(bridge)
 
-        csv_text = "node_id,node_name,uuid\n6,H,1223305010\n2,Y,1223302010\n"
-        with tempfile.TemporaryDirectory() as tmpdir:
-            csv_path = Path(tmpdir) / "uuid_invalid.csv"
-            csv_path.write_text(csv_text, encoding="utf-8")
-            is_valid = controller.load_uuid_csv(str(csv_path))
-
-        self.assertFalse(is_valid)
-        self.assertEqual(controller.rows, [])
-        self.assertGreaterEqual(len(controller.errors), 1)
-
-    def test_write_loaded_uuid_sends_write_payload_only(self) -> None:
-        runtime_window = _FakeRuntimeWindow()
-        bridge = _FakeBridge(runtime_window)
-        controller = ProductionParameterController(bridge)
-
-        csv_text = "node_id,node_name,uuid\n6,H,1223306010\n"
-        with tempfile.TemporaryDirectory() as tmpdir:
-            csv_path = Path(tmpdir) / "uuid_valid.csv"
-            csv_path.write_text(csv_text, encoding="utf-8")
-            self.assertTrue(controller.load_uuid_csv(str(csv_path)))
-
-        ok, _message = controller.write_loaded_uuid(6, "H")
-        self.assertTrue(ok)
-        self.assertEqual(
-            runtime_window.backend_client.sent_commands[0],
-            (6, [0xE0, 0x3D, 0x00, 0x48, 0xEA, 0x2B, 0x1A]),
-        )
-        self.assertEqual(len(runtime_window.backend_client.sent_commands), 1)
-
-    def test_verify_loaded_uuid_passes_for_matching_response(self) -> None:
-        runtime_window = _FakeRuntimeWindow()
-        bridge = _FakeBridge(runtime_window)
-        controller = ProductionParameterController(bridge, timeout_ms=100)
-        events: list[tuple[bool, str]] = []
-        controller.verification_finished.connect(lambda passed, reason: events.append((passed, reason)))
-
-        csv_text = "node_id,node_name,uuid\n6,H,1223306010\n"
-        with tempfile.TemporaryDirectory() as tmpdir:
-            csv_path = Path(tmpdir) / "uuid_valid.csv"
-            csv_path.write_text(csv_text, encoding="utf-8")
-            self.assertTrue(controller.load_uuid_csv(str(csv_path)))
-
-        self.assertTrue(controller.verify_loaded_uuid(6, "H"))
-        self.assertEqual(runtime_window.backend_client.sent_commands[0], (6, [0xE0, 0x3F]))
-        runtime_window.packet_received.emit(
-            {
-                "status": "ok",
-                "type": "can_over_uart",
-                "sender": 6,
-                "cmd": 0xE0,
-                "params": [0x3A, 0x00, 0x48, 0xEA, 0x2B, 0x1A],
-            }
-        )
-        self._app.processEvents()
-
-        self.assertTrue(events)
-        self.assertTrue(events[-1][0])
-
-    def test_verify_loaded_uuid_fails_for_wrong_node(self) -> None:
-        runtime_window = _FakeRuntimeWindow()
-        bridge = _FakeBridge(runtime_window)
-        controller = ProductionParameterController(bridge, timeout_ms=100)
-        events: list[tuple[bool, str]] = []
-        controller.verification_finished.connect(lambda passed, reason: events.append((passed, reason)))
-
-        csv_text = "node_id,node_name,uuid\n6,H,1223306010\n"
-        with tempfile.TemporaryDirectory() as tmpdir:
-            csv_path = Path(tmpdir) / "uuid_valid.csv"
-            csv_path.write_text(csv_text, encoding="utf-8")
-            self.assertTrue(controller.load_uuid_csv(str(csv_path)))
-
-        self.assertTrue(controller.verify_loaded_uuid(6, "H"))
-        runtime_window.packet_received.emit(
-            {
-                "status": "ok",
-                "type": "can_over_uart",
-                "sender": 5,
-                "cmd": 0xE0,
-                "params": [0x3A, 0x00, 0x48, 0xEA, 0x2B, 0x1A],
-            }
-        )
-        self._app.processEvents()
-
-        self.assertTrue(events)
-        self.assertFalse(events[-1][0])
-        self.assertIn("wrong node", events[-1][1])
-
-    def test_verify_loaded_uuid_fails_when_selected_node_missing_in_csv(self) -> None:
-        runtime_window = _FakeRuntimeWindow()
-        bridge = _FakeBridge(runtime_window)
-        controller = ProductionParameterController(bridge, timeout_ms=100)
-        events: list[tuple[bool, str]] = []
-        controller.verification_finished.connect(lambda passed, reason: events.append((passed, reason)))
-
-        csv_text = "node_id,node_name,uuid\n6,H,1223306010\n"
-        with tempfile.TemporaryDirectory() as tmpdir:
-            csv_path = Path(tmpdir) / "uuid_valid.csv"
-            csv_path.write_text(csv_text, encoding="utf-8")
-            self.assertTrue(controller.load_uuid_csv(str(csv_path)))
-
-        self.assertFalse(controller.verify_loaded_uuid(5, "V"))
-        self.assertTrue(events)
-        self.assertFalse(events[-1][0])
-        self.assertIn("No UUID CSV row found", events[-1][1])
+        self.assertFalse(hasattr(page, "_update_uuid_cells_in_workbook_memory"))
+        self.assertFalse(hasattr(page, "_update_pwm_cells_in_workbook_memory"))
 
     def test_uuid_section_removes_legacy_uuid_csv_controls_and_keeps_workbook_flow(self) -> None:
         runtime_window = _FakeRuntimeWindow()

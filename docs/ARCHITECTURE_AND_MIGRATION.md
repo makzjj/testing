@@ -223,6 +223,31 @@ UI/pages
   - focused UUID/PWM and workbook regression tests pass
   - EEPROM behavior is validated live before deleting the legacy UUID/PWM wrapper internals
 
+## Pilot update
+
+- Selected Phase 2C pilot:
+  - remove obsolete UUID/PWM legacy wrapper paths from the parameter controller
+- Canonical parameter owner:
+  - `ProductionParameterController` plus `ParameterDefinition` plus generic `ParameterRequest` orchestration
+  - generic read/write/read-back remains `build_parameter_request(...)`, `write_parameters(...)`, `verify_parameters(...)`, and `save_parameters_to_eeprom(...)`
+- Removed:
+  - legacy UUID/PWM wrapper pipeline components in `ProductionParameterController` that had no active callers
+  - UUID/PWM-specific wrapper methods, wrapper timers, wrapper signals, CSV-row state, wrapper packet handlers, and wrapper helper loops
+  - Production-page UUID/PWM workbook compatibility wrappers
+- Retained:
+  - UUID/PWM command-family builders and decoders because `ParameterDefinition` still uses them
+  - runtime node-info UUID inventory reads in `main_window.py`, owned by runtime inventory behavior
+  - Production test-profile UUID verification, retained as a specialized test-profile path rather than a parameter-programming path
+  - Mechanical PWM/PID/Ramp orchestration, retained as separate workflow ownership
+- UUID CSV outcome:
+  - removed with the wrapper pipeline because no live UI caller or supported Production workflow depended on it
+- Workbook helper outcome:
+  - canonical Production workbook path remains `IpqcExcelAdapter.write_programming_parameter_result(...)`
+  - UUID/PWM-specific workbook helper wrappers were removed after live callers were proven absent
+- Remaining deletion condition:
+  - none for the removed wrapper pipeline
+  - any later Mechanical parameter migration or test-profile UUID migration must be handled as separate responsibilities
+
 ## E. Governing rule
 
 Every touched responsibility must end with fewer owners, fewer active paths, and a clear deletion plan.

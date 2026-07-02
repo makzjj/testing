@@ -330,12 +330,6 @@ class IpqcExcelAdapter:
         sheet[f"C{row}"] = "" if actual_value is None else str(actual_value)
         sheet[f"D{row}"] = str(check_result)
 
-    def write_uuid_actual_and_check(self, actual_uuid: object, check_result: str) -> None:
-        self.write_summary_result("S/N", actual_uuid, check_result)
-
-    def write_pwm_actual_and_check(self, actual_pwm: object, check_result: str) -> None:
-        self.write_summary_result("PWM", actual_pwm, check_result)
-
     def write_summary_result(self, parameter_name: str, actual_value: object, check_result: str) -> None:
         sheet = self._require_base_sheet()
         row = self._resolve_summary_row(parameter_name)

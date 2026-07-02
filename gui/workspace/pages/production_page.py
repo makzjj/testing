@@ -1496,22 +1496,6 @@ class ProductionPage(BaseWorkspacePage):
         self._workbook_eeprom_settle_active = False
         self._refresh_workbook_action_states()
 
-    def _update_uuid_cells_in_workbook_memory(self, actual_value: str | int | None, passed: bool) -> bool:
-        """Compatibility wrapper for the UUID workbook row update path."""
-        return self._update_parameter_cells_in_workbook_memory(
-            definition=WORKBOOK_PARAMETER_DEFINITIONS["UUID"],
-            actual_value=actual_value,
-            check_result="PASS" if passed else "FAIL",
-        )
-
-    def _update_pwm_cells_in_workbook_memory(self, actual_value: str | int | None, passed: bool) -> bool:
-        """Compatibility wrapper for the PWM workbook row update path."""
-        return self._update_parameter_cells_in_workbook_memory(
-            definition=WORKBOOK_PARAMETER_DEFINITIONS["PWM"],
-            actual_value=actual_value,
-            check_result="PASS" if passed else "FAIL",
-        )
-
     def _reset_result_only(self) -> None:
         self._set_status_result("READY", "No test has been run yet.", append_to_log=False)
         self.progress_section.reset_steps(
