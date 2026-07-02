@@ -171,6 +171,10 @@ class SamplingTestController:
         return self._state
 
     @property
+    def current_wait_for(self) -> str | None:
+        return self._wait_for
+
+    @property
     def current_pwm(self) -> int:
         return self._current_pwm
 
@@ -556,6 +560,23 @@ class SamplingTestController:
         reason = f"Timed out waiting for {self._expected_response_description or 'sampling response'}."
         self._fail_with_stop(reason, resumable=True)
 
+    def accepts_workflow_packet(self, decoded_kind: str | None, decoded_value: object, *, sender: int | None) -> bool:
+        if not self._running or self._state in (self.S_FAILED, self.S_ABORTED, self.S_COMPLETED):
+            return False
+        if self._node_id is not None and sender is not None and int(sender) != int(self._node_id):
+            return False
+        if decoded_kind == "sys_mode":
+            return isinstance(decoded_value, dict) and str(decoded_value.get("text", "")).strip().lower() == "fault"
+        if self._wait_for == "vel_ack":
+            return self._state == self.S_HOME_WAIT_VEL_ACK and decoded_kind == "velocity_ack"
+        if self._wait_for == "run_started":
+            return self._state == self.S_SAMPLE_WAIT_ACK and decoded_kind == "run_started"
+        if self._wait_for == "tpos_status":
+            return self._state in (self.S_HOME_WAIT_TPOS, self.S_WAIT_MIDDLE_TPOS, self.S_SAMPLE_WAIT_SENSOR) and decoded_kind == "tpos_status"
+        if self._wait_for == "getpos":
+            return self._state in (self.S_HOME_WAIT_GETPOS, self.S_SAMPLE_WAIT_GETPOS) and decoded_kind == "getpos"
+        return False
+
     def handle_runtime_packet(self, packet: list[int] | bytes | bytearray | dict[str, Any]) -> None:
         if not self._running or self._state in (self.S_FAILED, self.S_ABORTED, self.S_COMPLETED):
             return
@@ -565,28 +586,15 @@ class SamplingTestController:
             return
 
         sender = packet_data["sender"]
-        if self._node_id is not None and sender is not None and int(sender) != int(self._node_id):
-            self._fail_with_stop(
-                f"Unexpected packet from node {int(sender)} while sampling node {int(self._node_id)}.",
-                resumable=False,
-            )
-            return
-
-        packet_node = sender if sender is not None else self._node_id
-        self.packet_message(f"[RX] Node {packet_node if packet_node is not None else '?'}: {packet_data['raw_hex']}")
-
         cmd = packet_data["cmd"]
         params = packet_data["params"]
         decoded_kind, decoded_value = decode_command(cmd, params)
 
-        if decoded_kind is None:
-            self._fail_with_stop(
-                self._build_unexpected_packet_reason(
-                    packet_data["raw_hex"], self._expected_response_description or "sampling response"
-                ),
-                resumable=False,
-            )
+        if not self.accepts_workflow_packet(decoded_kind, decoded_value, sender=sender):
             return
+
+        packet_node = sender if sender is not None else self._node_id
+        self.packet_message(f"[RX] Node {packet_node if packet_node is not None else '?'}: {packet_data['raw_hex']}")
 
         if decoded_kind == "velocity_ack":
             self._handle_velocity_ack(decoded_value)
@@ -603,13 +611,6 @@ class SamplingTestController:
         if decoded_kind == "sys_mode":
             self._handle_sys_mode(decoded_value)
             return
-
-        self._fail_with_stop(
-            self._build_unexpected_packet_reason(
-                packet_data["raw_hex"], self._expected_response_description or "sampling response"
-            ),
-            resumable=False,
-        )
 
     def _reset_runtime_state(self) -> None:
         self._wait_for = None

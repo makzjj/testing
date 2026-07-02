@@ -6,6 +6,7 @@ __all__ = [
     "RuntimePacketEvent",
     "RuntimePacketHandler",
     "RxLogWriter",
+    "SamplingTransportAdapter",
     "build_default_node_status",
     "connected_node_ids",
     "ensure_node_status",
@@ -36,6 +37,10 @@ def __getattr__(name: str):
         from .rx_log_writer import RxLogWriter
 
         return RxLogWriter
+    if name == "SamplingTransportAdapter":
+        from .sampling_transport_adapter import SamplingTransportAdapter
+
+        return SamplingTransportAdapter
     if name == "build_default_node_status":
         from .node_status_store import build_default_node_status
 

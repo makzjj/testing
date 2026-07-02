@@ -2810,6 +2810,107 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         self.assertIn("[TX] Node 6: 88 FF 42", packet_text)
         self.assertIn("[RX] Node 6: 88 53 FF 42", packet_text)
 
+    def test_sampling_runtime_ingress_adapter_ignores_unrelated_runtime_packets(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            ProductionPageWorkflowTests._create_ipqc_workbook(workbook_path)
+            self._load_workbook(page, workbook_path)
+            self._enable_single_axis_pass(page)
+            ProductionPageWorkflowTests._select_node(page, "Node 6 - H")
+            ProductionPageWorkflowTests._seed_sampling_context(page, node_id=6, nodeconfig=0x00)
+
+            page._handle_start_sampling_requested()
+            self._app.processEvents()
+            assert page._sampling_popup is not None
+            page._sampling_popup.start_button.click()
+            self._app.processEvents()
+
+        self.assertTrue(page._sampling_controller.is_active())
+        self.assertEqual(page._sampling_controller.state, SamplingTestController.S_HOME_WAIT_VEL_ACK)
+        self.assertEqual(runtime_window.backend_client.sent_commands[0], (6, [0x84, 0x00, 0x50]))
+
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 7, "cmd": 0x88, "params": [0x53, 0x00, 0x64]}
+        )
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0xC8, "params": [0x3A, 0x12, 0x30, 0x10]}
+        )
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0xD8, "params": [0x3A, 0x01, 0x00]}
+        )
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x86, "params": [0x3A]}
+        )
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "direct_uart", "node_id": 1, "raw_payload": [0xB5, 0x3A, 0x01, 0x05, 0x00]}
+        )
+        self._app.processEvents()
+
+        self.assertTrue(page._sampling_controller.is_active())
+        self.assertEqual(page._sampling_controller.state, SamplingTestController.S_HOME_WAIT_VEL_ACK)
+        self.assertEqual(runtime_window.backend_client.stop_commands, [])
+
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x84, "params": [0x53, 0x00, 0x50]}
+        )
+        self._app.processEvents()
+
+        self.assertTrue(page._sampling_controller.is_active())
+        self.assertEqual(page._sampling_controller.state, SamplingTestController.S_HOME_WAIT_TPOS)
+        self.assertEqual(runtime_window.backend_client.sent_commands[-1], (6, [0x81, 0x00, 0x00, 0x00, 0x00]))
+
+    def test_sampling_runtime_ingress_adapter_ignores_stale_same_node_packets_after_state_change(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            ProductionPageWorkflowTests._create_ipqc_workbook(workbook_path)
+            self._load_workbook(page, workbook_path)
+            self._enable_single_axis_pass(page)
+            ProductionPageWorkflowTests._select_node(page, "Node 6 - H")
+            ProductionPageWorkflowTests._seed_sampling_context(page, node_id=6, nodeconfig=0x00)
+
+            page._handle_start_sampling_requested()
+            self._app.processEvents()
+            assert page._sampling_popup is not None
+            page._sampling_popup.start_button.click()
+            self._app.processEvents()
+
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x84, "params": [0x53, 0x00, 0x50]}
+        )
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x81, "params": [0x45, 0x82, 0x00, 0x00, 0x00, 0x00]}
+        )
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x0A]}
+        )
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x88, "params": [0x53, 0x00, 0x64]}
+        )
+        self._app.processEvents()
+
+        self.assertEqual(page._sampling_controller.state, SamplingTestController.S_SAMPLE_WAIT_SENSOR)
+        command_count = len(runtime_window.backend_client.sent_commands)
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x88, "params": [0x53, 0x00, 0x64]}
+        )
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x46]}
+        )
+        self._app.processEvents()
+
+        self.assertTrue(page._sampling_controller.is_active())
+        self.assertEqual(page._sampling_controller.state, SamplingTestController.S_SAMPLE_WAIT_SENSOR)
+        self.assertEqual(len(runtime_window.backend_client.sent_commands), command_count)
+        self.assertEqual(runtime_window.backend_client.stop_commands, [])
+
     def test_stop_while_sampling_running_sends_dd(self) -> None:
         runtime_window = _FakeRuntimeWindow()
         bridge = _FakeBridge(runtime_window)
@@ -3291,12 +3392,32 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             self.assertFalse(popup.samples_per_pwm_combo.isEnabled())
             self.assertFalse(popup.pwm_selection_combo.isEnabled())
 
-            runtime_window.packet_received.emit([0x84, 0x53, 0x00, 0x50])
-            runtime_window.packet_received.emit([0x81, 0x53, 0x82, 0x00, 0x00, 0x00, 0x00])
+            runtime_window.packet_received.emit(
+                {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x84, "params": [0x53, 0x00, 0x50]}
+            )
+            runtime_window.packet_received.emit(
+                {
+                    "status": "ok",
+                    "type": "can_over_uart",
+                    "sender": 6,
+                    "cmd": 0x81,
+                    "params": [0x53, 0x82, 0x00, 0x00, 0x00, 0x00],
+                }
+            )
             self._app.processEvents()
-            runtime_window.packet_received.emit([0x81, 0x45, 0x82, 0x00, 0x00, 0x00, 0x00])
+            runtime_window.packet_received.emit(
+                {
+                    "status": "ok",
+                    "type": "can_over_uart",
+                    "sender": 6,
+                    "cmd": 0x81,
+                    "params": [0x45, 0x82, 0x00, 0x00, 0x00, 0x00],
+                }
+            )
             self._app.processEvents()
-            runtime_window.packet_received.emit([0x82, 0x00, 0x00, 0x00, 10])
+            runtime_window.packet_received.emit(
+                {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 10]}
+            )
             self._app.processEvents()
 
             self.assertEqual(runtime_window.backend_client.sent_commands[3][1], build_run(90))

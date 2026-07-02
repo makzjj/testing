@@ -20,6 +20,7 @@ from gui.workspace.controllers.sampling_test_controller import SamplingResumeCon
 from gui.workspace.pages.production_parameter_controller import build_run
 from services.ipqc_excel_adapter import IpqcExcelAdapter
 from services.node_sensor_profile import NodeSensorProfile
+from services.sampling_transport_adapter import SamplingTransportAdapter
 
 
 def _create_ipqc_workbook(path: Path) -> None:
@@ -218,6 +219,14 @@ class SamplingControllerTests(unittest.TestCase):
     @staticmethod
     def _assert_getpos_sent(controller: _RecordingSamplingController) -> None:
         assert controller.commands[-1] == [0x82]
+
+    @staticmethod
+    def _can_packet(sender: int, cmd: int, params: list[int]) -> dict[str, object]:
+        return {"status": "ok", "type": "can_over_uart", "sender": sender, "cmd": cmd, "params": list(params)}
+
+    @staticmethod
+    def _direct_uart_packet(node_id: int, payload: list[int]) -> dict[str, object]:
+        return {"status": "ok", "type": "direct_uart", "node_id": node_id, "raw_payload": list(payload)}
 
     @staticmethod
     def _build_resume_context(
@@ -611,7 +620,7 @@ class SamplingControllerTests(unittest.TestCase):
                     self.assertFalse(controller.failures)
                     self.assertTrue(controller.is_active())
 
-    def test_sampling_home_getpos_rejects_opposite_sensor_and_encoder_reset(self) -> None:
+    def test_sampling_home_getpos_ignores_opposite_sensor_and_encoder_reset(self) -> None:
         cases = [
             ("L", [0x81, 0x52]),
             ("L", [0x81, 0x49]),
@@ -629,14 +638,11 @@ class SamplingControllerTests(unittest.TestCase):
                     controller.handle_runtime_packet(self._tpos_home_packet(home_sensor))
                     controller.handle_runtime_packet(packet)
 
-                    self.assertFalse(controller.is_active())
-                    self.assertEqual(controller.commands[-1], [0xDD])
-                    self.assertTrue(controller.failures)
-                    if packet == [0x81, 0x49]:
-                        self.assertIn("Unexpected encoder reset", controller.failures[-1])
-                        self.assertFalse(controller.can_resume)
-                    else:
-                        self.assertIn("Unexpected packet", controller.failures[-1])
+                    self.assertTrue(controller.is_active())
+                    self.assertEqual(controller.state, controller.S_HOME_WAIT_GETPOS)
+                    self.assertEqual(controller.current_wait_for, "getpos")
+                    self.assertEqual(controller.commands[-1], [0x82])
+                    self.assertEqual(controller.failures, [])
 
     def test_sampling_run_signs_and_workbook_rows_follow_home_sensor_configuration(self) -> None:
         cases = [
@@ -942,7 +948,7 @@ class SamplingControllerTests(unittest.TestCase):
             self.assertTrue(controller.failures)
             self.assertIn("Unexpected packet", controller.failures[-1])
 
-    def test_sampling_opposite_sensor_while_waiting_for_getpos_still_fails(self) -> None:
+    def test_sampling_opposite_sensor_while_waiting_for_getpos_is_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             controller = self._build_sampling_controller(tmpdir, [0.0, 0.05], samples_per_direction=1)
 
@@ -952,10 +958,11 @@ class SamplingControllerTests(unittest.TestCase):
             controller.handle_runtime_packet([0x81, 0x52])
             controller.handle_runtime_packet([0x81, 0x4C])
 
-            self.assertFalse(controller.is_active())
-            self.assertEqual(controller.commands[-1], [0xDD])
-            self.assertTrue(controller.failures)
-            self.assertIn("Unexpected packet", controller.failures[-1])
+            self.assertTrue(controller.is_active())
+            self.assertEqual(controller.state, controller.S_SAMPLE_WAIT_GETPOS)
+            self.assertEqual(controller.current_wait_for, "getpos")
+            self.assertEqual(controller.commands[-1], [0x82])
+            self.assertEqual(controller.failures, [])
 
     def test_sampling_same_sensor_profile_outward_first_l_advances_to_getpos(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1211,7 +1218,7 @@ class SamplingControllerTests(unittest.TestCase):
             self.assertTrue(controller.failures)
             self.assertIn("Timed out", controller.failures[-1])
 
-    def test_sampling_encoder_reset_is_non_resumable_and_does_not_repeat_dd(self) -> None:
+    def test_sampling_encoder_reset_while_waiting_for_getpos_is_ignored_and_timeout_still_stops_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             adapter = self._build_adapter(tmpdir)
             controller = _RecordingSamplingController(
@@ -1227,19 +1234,14 @@ class SamplingControllerTests(unittest.TestCase):
             self.assertEqual(controller.commands[-1], [0x82])
             controller.handle_runtime_packet([0x81, 0x49])
 
-            self.assertFalse(controller.is_active())
-            self.assertEqual(controller.state, controller.S_FAILED)
-            self.assertEqual(controller.commands[-1], [0xDD])
-            self.assertEqual(controller.commands.count([0xDD]), 1)
-            self.assertTrue(controller.failures)
-            self.assertIn("Unexpected encoder reset", controller.failures[-1])
+            self.assertTrue(controller.is_active())
+            self.assertEqual(controller.state, controller.S_SAMPLE_WAIT_GETPOS)
+            self.assertEqual(controller.commands[-1], [0x82])
+            self.assertEqual(controller.commands.count([0xDD]), 0)
+            self.assertEqual(controller.failures, [])
             self.assertFalse(controller.can_resume)
-            self.assertFalse(controller.resume_availability(node_id=8, node_name="RZ", base_group="3X")[0])
-            self.assertIsNotNone(controller.last_terminal_result)
-            self.assertEqual(controller.last_terminal_result.final_status, "FAILED")
-            self.assertEqual(controller.last_terminal_result.reason, "Unexpected encoder reset during sampling.")
-            self.assertEqual(controller.last_terminal_result.failure_context, "PWM 100 | Direction + | Sample 1")
-            self.assertEqual(controller.last_terminal_result.resume_text, "Unavailable - encoder reset requires a fresh start.")
+            self.assertEqual(controller.resume_availability(node_id=8, node_name="RZ", base_group="3X")[0], False)
+            self.assertIsNone(controller.last_terminal_result)
 
             controller.on_timeout()
             controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 20])
@@ -1264,7 +1266,7 @@ class SamplingControllerTests(unittest.TestCase):
             self.assertFalse(controller.abort_by_user())
             self.assertEqual(controller.commands.count([0xDD]), 1)
 
-    def test_sampling_rejects_unexpected_packet_while_waiting_for_ack(self) -> None:
+    def test_sampling_ignores_unexpected_packet_while_waiting_for_ack(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             adapter = self._build_adapter(tmpdir)
             clock = _SamplingManualClock([0.0])
@@ -1277,7 +1279,93 @@ class SamplingControllerTests(unittest.TestCase):
             self.assertTrue(controller.start(8, "RZ"))
             controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 1])
 
+            self.assertTrue(controller.is_active())
+            self.assertEqual(controller.state, controller.S_HOME_WAIT_VEL_ACK)
+            self.assertEqual(controller.commands, [[0x84, 0x00, 0x50]])
+            self.assertEqual(controller.failures, [])
+
+    def test_sampling_transport_adapter_ignores_wrong_node_and_runtime_only_packets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controller = self._build_sampling_controller(tmpdir, [0.0])
+            ingress = SamplingTransportAdapter(controller)
+
+            self.assertTrue(controller.start(8, "RZ"))
+            baseline_commands = list(controller.commands)
+
+            ignored_packets = [
+                self._can_packet(7, 0x88, [0x53, 0x00, 0x64]),
+                self._can_packet(7, 0x81, [0x52]),
+                self._can_packet(7, 0x82, [0x00, 0x00, 0x00, 0x46]),
+                self._direct_uart_packet(1, [0xB5, 0x3A, 0x01, 0x05, 0x00]),
+                self._can_packet(8, 0xC8, [0x3A, 0x12, 0x30, 0x10]),
+                self._can_packet(8, 0x86, [0x3A]),
+                self._can_packet(8, 0xD8, [0x3A, 0x01, 0x00]),
+                self._can_packet(8, 0xE0, [0x3A, 0x00, 0x00, 0x00, 0x00, 0x01]),
+                self._can_packet(8, 0xCD, [0x3A, 0x07]),
+                self._can_packet(8, 0xC4, [0x3A, 0x00]),
+            ]
+
+            for packet in ignored_packets:
+                ingress._on_packet_received(packet)
+
+            self.assertTrue(controller.is_active())
+            self.assertEqual(controller.state, controller.S_HOME_WAIT_VEL_ACK)
+            self.assertEqual(controller.commands, baseline_commands)
+            self.assertEqual(controller.failures, [])
+
+    def test_sampling_transport_adapter_ignores_stale_same_node_packets_after_state_advance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controller = self._build_sampling_controller(tmpdir, [0.0])
+            ingress = SamplingTransportAdapter(controller)
+
+            self.assertTrue(controller.start(8, "RZ"))
+            ingress._on_packet_received(self._can_packet(8, 0x84, [0x53, 0x00, 0x50]))
+            ingress._on_packet_received(self._can_packet(8, 0x81, [0x45, 0x82, 0x00, 0x00, 0x00, 0x00]))
+            ingress._on_packet_received(self._can_packet(8, 0x82, [0x00, 0x00, 0x00, 0x0A]))
+            self.assertEqual(controller.state, controller.S_SAMPLE_WAIT_ACK)
+            self.assertEqual(controller.current_wait_for, "run_started")
+
+            command_count = len(controller.commands)
+            ingress._on_packet_received(self._can_packet(8, 0x82, [0x00, 0x00, 0x00, 0x46]))
+            ingress._on_packet_received(self._can_packet(8, 0x81, [0x52]))
+            ingress._on_packet_received(self._can_packet(8, 0x88, [0x53, 0x00, 0x64]))
+            self.assertEqual(controller.state, controller.S_SAMPLE_WAIT_SENSOR)
+            self.assertEqual(controller.current_wait_for, "tpos_status")
+
+            ingress._on_packet_received(self._can_packet(8, 0x88, [0x53, 0x00, 0x64]))
+            ingress._on_packet_received(self._can_packet(8, 0x82, [0x00, 0x00, 0x00, 0x46]))
+            self.assertEqual(controller.state, controller.S_SAMPLE_WAIT_SENSOR)
+            self.assertEqual(len(controller.commands), command_count)
+            self.assertEqual(controller.failures, [])
+
+    def test_sampling_transport_adapter_forwards_expected_packets_and_active_node_fault(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controller = self._build_sampling_controller(tmpdir, [0.0, 0.05])
+            ingress = SamplingTransportAdapter(controller)
+
+            self.assertTrue(controller.start(8, "RZ"))
+            self.assertEqual(controller.commands[0], [0x84, 0x00, 0x50])
+
+            ingress._on_packet_received(self._can_packet(8, 0x84, [0x53, 0x00, 0x50]))
+            self.assertEqual(controller.state, controller.S_HOME_WAIT_TPOS)
+            self.assertEqual(controller.commands[1], [0x81, 0x00, 0x00, 0x00, 0x00])
+
+            ingress._on_packet_received(self._can_packet(8, 0x81, [0x45, 0x82, 0x00, 0x00, 0x00, 0x00]))
+            self._assert_getpos_sent(controller)
+            ingress._on_packet_received(self._can_packet(8, 0x82, [0x00, 0x00, 0x00, 0x0A]))
+            self.assertEqual(controller.commands[3], [0x88, 0x00, 0x64])
+
+            ingress._on_packet_received(self._can_packet(8, 0x88, [0x53, 0x00, 0x64]))
+            self.assertEqual(controller.state, controller.S_SAMPLE_WAIT_SENSOR)
+            ingress._on_packet_received(self._can_packet(8, 0x81, [0x52]))
+            self._assert_getpos_sent(controller)
+            ingress._on_packet_received(self._can_packet(8, 0x82, [0x00, 0x00, 0x00, 0x46]))
+            self.assertEqual(controller.commands[-1], [0x88, 0xFF, 0x9C])
+
+            ingress._on_packet_received(self._can_packet(8, 0xB5, [0x3A, 0x08, 0x02, 0x00]))
+            self.assertTrue(controller.is_active())
+            ingress._on_packet_received(self._can_packet(8, 0xB5, [0x3A, 0x08, 0x05, 0x00]))
             self.assertFalse(controller.is_active())
-            self.assertEqual(controller.commands[-1], [0xDD])
+            self.assertEqual(controller.state, controller.S_FAILED)
             self.assertTrue(controller.failures)
-            self.assertIn("Unexpected packet", controller.failures[-1])
+            self.assertIn("Motor fault", controller.failures[-1])

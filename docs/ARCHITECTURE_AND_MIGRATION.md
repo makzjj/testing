@@ -151,6 +151,27 @@ UI/pages
   - `python -m pytest tests/test_workspace_session_panel.py tests/test_workspace_runtime_bridge.py`
   - `python -m pytest tests/test_backend_runtime_services.py tests/test_workspace_runtime_bridge.py tests/test_workspace_session_panel.py tests/test_comm_monitor.py tests/test_single_axis_functional_controller.py tests/test_sampling_controller.py`
 
+## Pilot update
+
+- Selected Phase 1B pilot:
+  - narrow Sampling workflow ingress adapter
+- Canonical owner:
+  - runtime layer still owns global/status packets and runtime state updates
+  - `services/sampling_transport_adapter.py` owns Sampling relevance filtering on the shared packet bus
+  - `SamplingTestController` owns Sampling workflow state only
+- Existing path reused or replaced:
+  - reused existing parsed packet bus and existing runtime handling
+  - replaced direct Production-page raw packet subscription to `SamplingTestController.handle_runtime_packet(...)`
+- Legacy path removed:
+  - Production page no longer subscribes Sampling directly to raw global packet fan-out
+- Remaining limitation:
+  - `MainWindow.packet_received` still emits before runtime handling updates shared runtime state
+  - this phase adds a narrow Sampling adapter only; it is not yet a general request router
+- Tests and live validation required:
+  - wrong-node, runtime-only, and stale same-node packets must not fail or advance Sampling
+  - expected Sampling packets must still advance the workflow
+  - live validation must confirm runtime status/firmware/emergency updates continue while Sampling runs
+
 ## E. Governing rule
 
 Every touched responsibility must end with fewer owners, fewer active paths, and a clear deletion plan.

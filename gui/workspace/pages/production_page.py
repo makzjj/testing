@@ -36,6 +36,7 @@ from .single_axis_functional_popup import SingleAxisFunctionalPopup
 from services.ipqc_excel_adapter import IpqcExcelAdapter
 from services.node_motion_polarity import NodeMotionPolarity
 from services.node_sensor_profile import NodeSensorProfile
+from services.sampling_transport_adapter import SamplingTransportAdapter
 from myconfig.node_display import ML20_NODE_MAP
 from .base_page import BaseWorkspacePage
 from .production_parameter_controller import (
@@ -120,6 +121,7 @@ class ProductionPage(BaseWorkspacePage):
         self._sampling_popup: SamplingTestPopup | None = None
         self._single_axis_passed = False
         self._sampling_controller = SamplingTestController(self._ipqc_excel_adapter, SamplingTestConfig())
+        self._sampling_transport_adapter = SamplingTransportAdapter(self._sampling_controller)
         self._sampling_motion_polarity: NodeMotionPolarity | None = None
         self._sampling_sensor_profile: NodeSensorProfile | None = None
         self._sampling_session: _SamplingSession | None = None
@@ -796,20 +798,10 @@ class ProductionPage(BaseWorkspacePage):
             popup.set_stop_available(False)
 
     def _attach_sampling_runtime_window(self, runtime_window) -> None:
-        if runtime_window is None or not hasattr(runtime_window, "packet_received"):
-            return
-        try:
-            runtime_window.packet_received.connect(self._sampling_controller.handle_runtime_packet)
-        except (TypeError, RuntimeError):
-            pass
+        self._sampling_transport_adapter.attach_runtime_window(runtime_window)
 
     def _detach_sampling_runtime_window(self, *, preserve_session: bool = False) -> None:
-        runtime_window = self._sampling_session.runtime_window if self._sampling_session is not None else None
-        if runtime_window is not None and hasattr(runtime_window, "packet_received"):
-            try:
-                runtime_window.packet_received.disconnect(self._sampling_controller.handle_runtime_packet)
-            except (TypeError, RuntimeError):
-                pass
+        self._sampling_transport_adapter.detach_runtime_window()
         if not preserve_session:
             self._sampling_session = None
 
