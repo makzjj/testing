@@ -25,6 +25,11 @@ class BinaryCommandBuilderTests(unittest.TestCase):
     def test_hunting_timeout_builder_10000(self):
         self.assertEqual(build_hunting_timeout(10000), [0xC3, 0x21, 0x27, 0x10])
 
+    def test_hunting_timeout_builder_coerces_and_clamps(self):
+        self.assertEqual(build_hunting_timeout("10000"), [0xC3, 0x21, 0x27, 0x10])
+        self.assertEqual(build_hunting_timeout(-1), [0xC3, 0x21, 0x00, 0x00])
+        self.assertEqual(build_hunting_timeout(999999), [0xC3, 0x21, 0xFF, 0xFF])
+
     def test_getpos_builder(self):
         self.assertEqual(build_getpos(), [0x82])
 
@@ -33,6 +38,11 @@ class BinaryCommandBuilderTests(unittest.TestCase):
 
     def test_run_builder_negative_190(self):
         self.assertEqual(build_run(-190), [0x88, 0xFF, 0x42])
+
+    def test_run_builder_clamps_out_of_range_like_legacy_production_builder(self):
+        self.assertEqual(build_run(40000), [0x88, 0x7F, 0xFF])
+        self.assertEqual(build_run(-40000), [0x88, 0x80, 0x00])
+        self.assertEqual(build_run("90"), [0x88, 0x00, 0x5A])
 
     def test_vel_builder_positive_80(self):
         self.assertEqual(build_vel(80), [0x84, 0x00, 0x50])
@@ -45,6 +55,9 @@ class BinaryCommandBuilderTests(unittest.TestCase):
         # Compute two's complement big-endian
         expected = [0x81] + list(((val & 0xFFFFFFFF).to_bytes(4, 'big', signed=False)))
         self.assertEqual(build_tpos(val), expected)
+
+    def test_tpos_builder_coerces_int_like_legacy_production_builder(self):
+        self.assertEqual(build_tpos("5000"), [0x81, 0x00, 0x00, 0x13, 0x88])
 
     def test_stopmotor_builder(self):
         self.assertEqual(build_stopmotor(), [0xDD])

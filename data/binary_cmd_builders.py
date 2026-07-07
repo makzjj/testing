@@ -8,9 +8,7 @@ this stable module path.
 from __future__ import annotations
 
 def build_hunting_timeout(timeout_ms: int) -> list[int]:
-    if not isinstance(timeout_ms, int):
-        raise TypeError("timeout_ms must be int")
-    timeout_ms = max(0, min(0xFFFF, timeout_ms))
+    timeout_ms = max(0, min(0xFFFF, int(timeout_ms)))
     hi = (timeout_ms >> 8) & 0xFF
     lo = timeout_ms & 0xFF
     return [0xC3, 0x21, hi, lo]
@@ -26,9 +24,11 @@ def _twos_complement_16(value: int) -> tuple[int, int]:
 
 
 def build_run(velocity: int) -> list[int]:
-    if not isinstance(velocity, int):
-        raise TypeError("velocity must be int")
-    vel = velocity & 0xFFFF
+    vel = int(velocity)
+    if vel < -32768:
+        vel = -32768
+    if vel > 32767:
+        vel = 32767
     hi, lo = _twos_complement_16(vel)
     return [0x88, hi, lo]
 
@@ -42,9 +42,7 @@ def build_vel(velocity: int) -> list[int]:
 
 
 def build_tpos(position: int) -> list[int]:
-    if not isinstance(position, int):
-        raise TypeError("position must be int")
-    b = list((position & 0xFFFFFFFF).to_bytes(4, byteorder="big", signed=False))
+    b = list((int(position) & 0xFFFFFFFF).to_bytes(4, byteorder="big", signed=False))
     return [0x81] + b
 
 

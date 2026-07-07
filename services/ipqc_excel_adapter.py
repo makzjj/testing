@@ -483,12 +483,6 @@ class IpqcExcelAdapter:
         self._last_output_path = target
         return target
 
-    def write_raw_samples(self, *_args: object, **_kwargs: object) -> None:
-        raise NotImplementedError("Raw sample writing is reserved for a later phase.")
-
-    def write_analysis_values(self, *_args: object, **_kwargs: object) -> None:
-        raise NotImplementedError("Analysis/statistics writing is reserved for a later phase.")
-
     def _require_template_path(self) -> Path:
         if self._template_path is None:
             raise RuntimeError("No IPQC workbook template is loaded.")

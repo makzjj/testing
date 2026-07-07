@@ -14,10 +14,9 @@ try:
 except ImportError:  # pragma: no cover - environment dependent.
     _HAS_OPENPYXL = False
 
-from data.binary_cmd_builders import build_tpos, build_vel
+from data.binary_cmd_builders import build_run, build_tpos, build_vel
 from data.binary_cmd_parser import decode_nodeconfig_motion_polarity
 from gui.workspace.controllers.sampling_test_controller import SamplingResumeContext, SamplingTestConfig, SamplingTestController
-from gui.workspace.pages.production_parameter_controller import build_run
 from services.ipqc_excel_adapter import IpqcExcelAdapter
 from services.node_sensor_profile import NodeSensorProfile
 from services.sampling_transport_adapter import SamplingTransportAdapter

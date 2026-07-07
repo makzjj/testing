@@ -34,7 +34,6 @@ from gui.workspace.pages.production_parameter_controller import (
     build_eeprom_save_payload,
     build_pwm_read_payload,
     build_pwm_write_payload,
-    build_run,
     build_uuid_read_payload,
     build_uuid_write_payload,
     decode_eeprom_save_response,
@@ -47,6 +46,7 @@ from gui.workspace.pages.production_parameter_controller import (
     validate_uuid_format,
 )
 from services.communication_log_store import CommunicationLogStore
+from data.binary_cmd_builders import build_getpos, build_hunting_timeout, build_run, build_stopmotor, build_tpos
 from data.binary_cmd_parser import decode_nodeconfig_motion_polarity
 from services.node_sensor_profile import NodeSensorProfile
 from services.node_sensor_profile import NodeSensorProfile
@@ -3985,6 +3985,27 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             "_start_pwm_verify_for_row",
         ):
             self.assertFalse(hasattr(controller, attr_name), attr_name)
+
+    def test_production_parameter_controller_no_longer_exposes_duplicate_motor_builders(self) -> None:
+        import gui.workspace.pages.production_parameter_controller as production_parameter_controller
+
+        for attr_name in (
+            "build_hunting_timeout",
+            "build_getpos",
+            "build_run",
+            "build_tpos",
+            "build_stopmotor",
+        ):
+            self.assertFalse(hasattr(production_parameter_controller, attr_name), attr_name)
+
+    def test_canonical_motor_builders_match_production_expected_bytes(self) -> None:
+        self.assertEqual(build_hunting_timeout(10000), [0xC3, 0x21, 0x27, 0x10])
+        self.assertEqual(build_getpos(), [0x82])
+        self.assertEqual(build_run(90), [0x88, 0x00, 0x5A])
+        self.assertEqual(build_run(-190), [0x88, 0xFF, 0x42])
+        self.assertEqual(build_tpos(5000), [0x81, 0x00, 0x00, 0x13, 0x88])
+        self.assertEqual(build_tpos(-44000), [0x81, 0xFF, 0xFF, 0x54, 0x20])
+        self.assertEqual(build_stopmotor(), [0xDD])
 
     def test_generic_pwm_write_sends_set_pwm_payload_to_selected_node(self) -> None:
         runtime_window = _FakeRuntimeWindow()

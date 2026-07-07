@@ -329,47 +329,6 @@ def build_eeprom_save_payload() -> list[int]:
     return [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]
 
 
-# --- Consolidated motor-control command builders ---
-# These helpers were previously introduced in data/binary_cmd_builders.py.
-# To keep a single source of truth for payload builders (consistent with
-# existing UUID/PWM helpers), we co-locate them here next to other builders.
-
-def build_hunting_timeout(timeout_ms: int) -> list[int]:
-    """Build HUNTING timeout payload: C3 21 <hi> <lo>.
-
-    The timeout is clamped to 0..65535 ms.
-    """
-    value = max(0, min(0xFFFF, int(timeout_ms)))
-    return [0xC3, 0x21, (value >> 8) & 0xFF, value & 0xFF]
-
-
-def build_getpos() -> list[int]:
-    """Build GETPOS command: 82."""
-    return [0x82]
-
-
-def build_run(velocity: int) -> list[int]:
-    """Build RUN command: 88 <vel_hi> <vel_lo>, signed int16 big-endian."""
-    vel = int(velocity)
-    if vel < -32768:
-        vel = -32768
-    if vel > 32767:
-        vel = 32767
-    vel &= 0xFFFF
-    return [0x88, (vel >> 8) & 0xFF, vel & 0xFF]
-
-
-def build_tpos(position: int) -> list[int]:
-    """Build TPOS absolute: 81 <pos_b3> <pos_b2> <pos_b1> <pos_b0> (signed int32 BE)."""
-    pos = int(position) & 0xFFFFFFFF
-    return [0x81, (pos >> 24) & 0xFF, (pos >> 16) & 0xFF, (pos >> 8) & 0xFF, pos & 0xFF]
-
-
-def build_stopmotor() -> list[int]:
-    """Build STOPMOTOR command: DD."""
-    return [0xDD]
-
-
 def decode_pwm_response(payload: list[int] | tuple[int, ...]) -> tuple[bool, int | None, str]:
     if not payload:
         return False, None, "PWM response payload is empty."

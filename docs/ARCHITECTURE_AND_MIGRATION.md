@@ -434,6 +434,21 @@ UI/pages
   - `python -m pytest tests/test_single_axis_transport_integration.py -q`
   - broader regression remains required before closeout
 
+## Cleanup update
+
+- Selected Phase L2A.5 cleanup:
+  - ProductionParameterController command-builder consolidation
+- Canonical owner:
+  - shared `RUN` / `TPOS` / `GETPOS` / `HUNTING` / `STOPMOTOR` builders remain in `data/binary_cmd_builders.py`
+- What changed:
+  - removed duplicate local generic motion-command builder definitions from `ProductionParameterController`
+  - Production parameter sequencing and workbook behavior stayed unchanged
+- Explicitly unchanged:
+  - Production parameter workflow logic
+  - Production test workflow logic
+  - runtime ownership
+  - packet routing and ingress structure
+
 ## E. Governing rule
 
 Every touched responsibility must end with fewer owners, fewer active paths, and a clear deletion plan.
