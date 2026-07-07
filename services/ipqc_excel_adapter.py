@@ -60,6 +60,11 @@ class SamplingWorkbookLayout:
 class IpqcExcelAdapter:
     """Loads an IPQC workbook template and reads/writes summary-sheet values."""
 
+    _SAMPLING_REQUIRED_SECTIONS: tuple[str, ...] = ("range", "speed", "time")
+    _SAMPLING_EXPECTED_PWM_VALUES: tuple[int, ...] = (100, 90, 80, 70, 60)
+    _SAMPLING_DIRECTIONS: tuple[str, ...] = ("+", "-")
+    _SAMPLING_MAX_SAMPLES = 32
+
     _PROGRAMMING_ROW_LOOKUP: dict[str, int] = {
         "operator": 3,
         "uuid": 5,
@@ -255,7 +260,7 @@ class IpqcExcelAdapter:
         if get_column_letter is None:
             raise RuntimeError("openpyxl is required for sampling workbook support but is not installed.")
         index = int(sample_index)
-        if index < 1 or index > 32:
+        if index < 1 or index > self._SAMPLING_MAX_SAMPLES:
             raise ValueError(f"Sampling index must be between 1 and 32, got {sample_index}.")
         return get_column_letter(index + 1)
 
@@ -266,6 +271,7 @@ class IpqcExcelAdapter:
             raise ValueError(f"Sampling sheet '{sheet_name}' is missing from workbook.")
         sheet = workbook[sheet_name]
         section_headers: dict[str, int] = {}
+        pwm_header_rows: dict[tuple[str, int], int] = {}
         row_lookup: dict[tuple[str, int, str], int] = {}
         raw_labels: list[str] = []
         current_section: str | None = None
@@ -280,24 +286,43 @@ class IpqcExcelAdapter:
             raw_labels.append(label)
             normalized = self._normalize_programming_label(label)
             if section_pattern.match(normalized):
+                if normalized in section_headers:
+                    raise ValueError(
+                        f"Sampling sheet '{sheet_name}' contains duplicate section header '{label}' in column A."
+                    )
                 current_section = normalized
                 section_headers[current_section] = row
                 continue
             if current_section is None:
                 continue
-            if pwm_pattern.match(normalized):
+            pwm_match = pwm_pattern.match(normalized)
+            if pwm_match:
+                pwm_value = int(pwm_match.group(1))
+                pwm_key = (current_section, pwm_value)
+                if pwm_key not in pwm_header_rows:
+                    pwm_header_rows[pwm_key] = row
                 continue
             sample_match = sample_pattern.match(label.strip())
             if not sample_match:
                 continue
             direction = sample_match.group(1)
             pwm_value = int(sample_match.group(2))
-            row_lookup[(current_section, pwm_value, direction)] = row
+            row_key = (current_section, pwm_value, direction)
+            if row_key not in row_lookup:
+                row_lookup[row_key] = row
 
         if not row_lookup:
             raise ValueError(
                 f"No supported sampling rows were found in sheet '{sheet_name}'. Labels found: {raw_labels}"
             )
+        self._validate_sampling_layout(
+            sheet=sheet,
+            sheet_name=sheet_name,
+            section_headers=section_headers,
+            pwm_header_rows=pwm_header_rows,
+            row_lookup=row_lookup,
+            raw_labels=raw_labels,
+        )
         return SamplingWorkbookLayout(
             sheet_name=sheet_name,
             section_headers=section_headers,
@@ -323,6 +348,16 @@ class IpqcExcelAdapter:
         cell_ref = f"{column}{row}"
         sheet[cell_ref] = actual_value
         return cell_ref
+
+    def clear_sampling_results(self, base_group: str | None = None) -> int:
+        workbook = self._require_workbook()
+        layout = self.discover_sampling_layout(base_group)
+        sheet = workbook[layout.sheet_name]
+        cleared_cells = 0
+        for _section, _pwm_value, _direction, _sample_index, cell_ref in self._iter_sampling_raw_cell_refs(layout):
+            sheet[cell_ref] = None
+            cleared_cells += 1
+        return cleared_cells
 
     def write_programming_parameter_result(self, parameter_name: str, actual_value: object, check_result: str) -> None:
         sheet = self._require_base_sheet()
@@ -360,6 +395,56 @@ class IpqcExcelAdapter:
     @staticmethod
     def _normalize_programming_label(value: str) -> str:
         return " ".join(str(value).strip().casefold().split())
+
+    def _validate_sampling_layout(
+        self,
+        *,
+        sheet: Worksheet,
+        sheet_name: str,
+        section_headers: dict[str, int],
+        pwm_header_rows: dict[tuple[str, int], int],
+        row_lookup: dict[tuple[str, int, str], int],
+        raw_labels: list[str],
+    ) -> None:
+        for section_name in self._SAMPLING_REQUIRED_SECTIONS:
+            if section_name not in section_headers:
+                raise ValueError(
+                    f"Sampling sheet '{sheet_name}' is missing required section '{section_name.title()}' in column A. "
+                    f"Labels found: {raw_labels}"
+                )
+            for pwm_value in self._SAMPLING_EXPECTED_PWM_VALUES:
+                pwm_key = (section_name, pwm_value)
+                if pwm_key not in pwm_header_rows:
+                    raise ValueError(
+                        f"Sampling sheet '{sheet_name}' section '{section_name.title()}' is missing label "
+                        f"'PWM {pwm_value}' in column A."
+                    )
+                for direction in self._SAMPLING_DIRECTIONS:
+                    row_key = (section_name, pwm_value, direction)
+                    row = row_lookup.get(row_key)
+                    if row is None:
+                        raise ValueError(
+                            f"Sampling sheet '{sheet_name}' section '{section_name.title()}' is missing label "
+                            f"'{direction}{pwm_value}' in column A."
+                        )
+                    for sample_index in range(1, self._SAMPLING_MAX_SAMPLES + 1):
+                        cell_ref = f"{self.sample_index_to_column(sample_index)}{row}"
+                        cell = sheet[cell_ref]
+                        if cell.data_type == "f" or (isinstance(cell.value, str) and cell.value.startswith("=")):
+                            raise ValueError(
+                                f"Sampling sheet '{sheet_name}' raw sample cell '{cell_ref}' for "
+                                f"section '{section_name.title()}', label '{direction}{pwm_value}', "
+                                f"sample {sample_index} contains a formula. Raw measurement cells must be writable values."
+                            )
+
+    def _iter_sampling_raw_cell_refs(self, layout: SamplingWorkbookLayout):
+        for section_name in self._SAMPLING_REQUIRED_SECTIONS:
+            for pwm_value in self._SAMPLING_EXPECTED_PWM_VALUES:
+                for direction in self._SAMPLING_DIRECTIONS:
+                    row = layout.resolve_row(section_name, pwm_value, direction)
+                    for sample_index in range(1, self._SAMPLING_MAX_SAMPLES + 1):
+                        column = self.sample_index_to_column(sample_index)
+                        yield section_name, pwm_value, direction, sample_index, f"{column}{row}"
 
     def _read_programming_label_value(self, sheet: Worksheet, label: str) -> str:
         row = self._find_programming_label_row(sheet, label)

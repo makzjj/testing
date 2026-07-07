@@ -258,6 +258,112 @@ UI/pages
   - return error
   - midpoint target
   - `Z` / `PZ` safe park target
+
+## Pilot update
+
+- Selected Phase LED-0A pilot:
+  - runtime interrupt-state ownership
+- Canonical owner:
+  - `services/runtime_packet_handler.py` updates per-node interrupt state inside shared runtime `node_status`
+  - workspace pages read interrupt state through `WorkspaceRuntimeBridge`
+- Runtime interrupt-state coverage in this phase:
+  - `0x81` decoded `Z/L` and `Z/R` events mark the sender node sensor as cut
+  - `0xD8` interrupt responses update canonical `INT0`, `INT1`, and left/right cut state
+- Mechanical outcome:
+  - Mechanical page no longer owns canonical interrupt LED state
+  - Mechanical sensor LEDs render runtime-owned interrupt state only
+  - Mechanical utility reads and writes remain page-owned
+- Explicitly not added in this phase:
+  - no global `0xD8` polling
+  - no release-watch polling workflow
+  - no general runtime request router
+- Tests run:
+  - `python -m pytest tests/test_backend_runtime_services.py tests/test_workspace_runtime_bridge.py tests/test_mechanical_page.py -q`
+  - `python -m pytest tests/test_sampling_controller.py tests/test_single_axis_functional_controller.py tests/test_production_test_controller.py tests/test_comm_monitor.py -k "not test_production_page_robot_power_button_order_and_connection_state" -q`
+- Remaining limitation:
+  - bounded `0xD8` release-watch polling is still unimplemented and must remain workflow-owned when introduced later
+
+## Pilot update
+
+- Selected Phase LED-0B pilot:
+  - shared bounded interrupt release-watch helper
+- Canonical owner:
+  - `services/runtime_packet_handler.py` remains the canonical owner of per-node interrupt state
+  - `services/release_watch_helper.py` owns bounded `0xD8` polling only when a workflow explicitly opts in
+- Helper scope in this phase:
+  - starts an optional release-watch for one node and one expected sensor
+  - sends one immediate `0xD8 0x3F` query, then bounded repeat queries on a fixed interval until release, timeout, disconnect, or caller stop
+  - observes release through runtime-owned interrupt state exposed by `WorkspaceRuntimeBridge`
+- Explicitly not added in this phase:
+  - no global `0xD8` polling
+  - no runtime-owned polling loop
+  - no workflow auto-integration
+  - no general runtime request router
+- Workflow ownership outcome:
+  - Mechanical, Single Axis, and Sampling remain unchanged in this phase
+  - future workflows may opt into the helper individually without moving interrupt ownership out of runtime state
+- Tests run:
+  - `python -m pytest tests/test_backend_runtime_services.py -q`
+  - `python -m pytest tests/test_workspace_runtime_bridge.py tests/test_sampling_controller.py tests/test_single_axis_functional_controller.py tests/test_mechanical_page.py tests/test_comm_monitor.py -q`
+  - `python -m pytest tests/test_production_test_controller.py -k "not test_production_page_robot_power_button_order_and_connection_state" -q`
+- Remaining limitation:
+  - no workflow currently starts release-watch automatically
+  - release-watch cancellation on workflow abort/completion/node-change must be wired by each workflow when it explicitly adopts the helper
+
+## Pilot update
+
+- Selected Phase LED-0C pilot:
+  - Mechanical-only opt-in release-watch integration
+- Canonical owners:
+  - `services/runtime_packet_handler.py` remains the canonical owner of per-node interrupt state
+  - `services/release_watch_helper.py` remains the only bounded `0xD8` polling owner
+  - `gui/workspace/pages/mechanical_page.py` now decides whether one Mechanical movement should opt into release-watch
+- Mechanical integration in this phase:
+  - only popup `Run +` and `Run -` actions opt in
+  - release-watch starts only after a live RUN send and only when movement is away from a currently cut runtime-known sensor
+  - popup `Stop` and selected-node changes cancel any active Mechanical release-watch
+- Explicitly unchanged:
+  - no global `0xD8` polling
+  - no runtime-owned polling loop
+  - no Sampling release-watch
+  - no Single Axis release-watch
+  - no Production workflow change
+  - no new packet-routing layer
+- Tests run:
+  - `python -m pytest tests/test_mechanical_page.py -q`
+  - `python -m pytest tests/test_backend_runtime_services.py tests/test_workspace_runtime_bridge.py tests/test_sampling_controller.py tests/test_single_axis_functional_controller.py tests/test_comm_monitor.py -q`
+  - `python -m pytest tests/test_production_test_controller.py -k "not test_production_page_robot_power_button_order_and_connection_state" -q`
+- Remaining limitation:
+  - Mechanical release-watch is limited to popup RUN direction where away-from-sensor mapping is explicit
+  - popup Home, absolute move, and relative move remain unintegrated in this phase
+
+## Pilot update
+
+- Selected Phase LED-0C-Fix pilot:
+  - NODECONFIG-aware Mechanical release-watch mapping
+- Canonical owners remain:
+  - `services/runtime_packet_handler.py` owns interrupt state
+  - `services/release_watch_helper.py` owns bounded polling only
+  - `WorkspaceRuntimeBridge` resolves canonical NODECONFIG/home-direction interpretation for callers
+- Behavior change in this fix:
+  - RUN command behavior is unchanged
+  - Mechanical release-watch no longer assumes a fixed RUN-sign-to-sensor mapping
+  - Mechanical now starts release-watch only when bridge-exposed NODECONFIG polarity confirms that the current RUN sign is moving away from the currently cut sensor
+- Mapping source:
+  - runtime `node_status[node_id]["nodeconfig"]` when available
+  - otherwise current project config `node_config`
+  - no node IDs or observed rig-specific NODECONFIG values are hardcoded
+- Safety rule:
+  - when NODECONFIG polarity is unknown, unsupported, or interrupt state is ambiguous, Mechanical still sends RUN normally and skips release-watch
+- Explicitly unchanged:
+  - no Sampling or Single Axis release-watch adoption
+  - no global `0xD8` polling
+  - no general router
+  - no workbook or Production workflow change
+- Tests run:
+  - `python -m pytest tests/test_mechanical_page.py -q`
+  - `python -m pytest tests/test_backend_runtime_services.py tests/test_workspace_runtime_bridge.py tests/test_sampling_controller.py tests/test_single_axis_functional_controller.py tests/test_comm_monitor.py -q`
+  - `python -m pytest tests/test_production_test_controller.py -k "not test_production_page_robot_power_button_order_and_connection_state" -q`
 - Existing path reused or replaced:
   - reused Single Axis and Sampling controllers as workflow owners
   - added one narrow pure-helper module for identical endpoint math only
@@ -279,6 +385,54 @@ UI/pages
 - Deferred:
   - Sampling aggregate statistics ownership
   - `2/4/8/16/32` formula-range and workbook-template audit
+
+## Pilot update
+
+- Selected Phase LED-0D pilot:
+  - Single Axis popup runtime-backed interrupt LED migration
+- Canonical owner unchanged:
+  - `services/runtime_packet_handler.py` plus shared runtime node status own per-node interrupt state
+  - `WorkspaceRuntimeBridge` remains the popup/runtime access path
+  - `SingleAxisFunctionalTestController` remains the owner of Single Axis workflow state only
+- Existing path reused or replaced:
+  - reused the existing runtime interrupt state and bridge exposure already adopted by Mechanical
+  - removed active controller-to-popup LED truth wiring from `SingleAxisFunctionalPopup`
+- Single Axis popup behavior in this phase:
+  - popup L/R LEDs now render from runtime interrupt state for the active/selected node
+  - `0x81` cut events and `0xD8` interrupt responses update the popup only through runtime state refresh
+  - no release-watch polling was added to Single Axis
+- Explicitly unchanged:
+  - Single Axis workflow sequencing
+  - HUNTING / RUN / TPOS / GETPOS / STOPMOTOR behavior
+  - timeout values
+  - Sampling, Mechanical release-watch, and Production workflow behavior
+- Tests run:
+  - `python -m pytest tests/test_single_axis_functional_popup.py -q`
+  - `python -m pytest tests/test_single_axis_transport_integration.py -q`
+  - broader regression remains required before closeout
+
+## Pilot update
+
+- Selected Phase LED-0E pilot:
+  - Single Axis popup opt-in release-watch for operator visibility only
+- Canonical owners remain:
+  - `services/runtime_packet_handler.py` plus shared runtime node status own interrupt state
+  - `WorkspaceRuntimeBridge` exposes interrupt state and NODECONFIG-derived motion polarity
+  - `services/release_watch_helper.py` owns bounded `0xD8` polling only
+  - `SingleAxisFunctionalTestController` still owns workflow state, sequencing, and pass/fail logic only
+- Single Axis behavior in this phase:
+  - popup may start bounded release-watch after a movement command only when runtime interrupt state and shared polarity confirm the move is away from the currently cut sensor
+  - release-watch exists only to keep runtime-backed popup LEDs fresh for operator visibility
+  - release-watch timeout, release, cancel, or disconnect do not block, advance, fail, pass, or otherwise alter the Single Axis state machine
+- Explicitly unchanged:
+  - Single Axis workflow correctness and timeout policy
+  - Mechanical release-watch behavior
+  - Sampling behavior
+  - no global `0xD8` polling
+- Tests run:
+  - `python -m pytest tests/test_single_axis_functional_popup.py -q`
+  - `python -m pytest tests/test_single_axis_transport_integration.py -q`
+  - broader regression remains required before closeout
 
 ## E. Governing rule
 

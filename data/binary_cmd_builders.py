@@ -86,3 +86,8 @@ def build_rflag_query_payload() -> list[int]:
     - Response: CA 3A <flags>
     """
     return [0xCA, 0x3F]
+
+
+def build_interrupt_query_payload() -> list[int]:
+    """Build interrupt-state (D8) query payload."""
+    return [0xD8, 0x3F]

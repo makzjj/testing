@@ -210,6 +210,195 @@ mcu:
             with patch.object(bridge, "get_runtime_window", return_value=runtime_window):
                 self.assertTrue(bridge.get_runtime_emergency_stop_state(create_if_missing=False))
 
+    def test_bridge_exposes_per_node_interrupt_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "demo.yaml"
+            config_path.write_text("project:\n  name: demo\n", encoding="utf-8")
+
+            project = ProjectDefinition(name="demo", display_name="Demo", config_path=config_path)
+            bridge = WorkspaceRuntimeBridge(project)
+            runtime_window = SimpleNamespace(
+                node_status={
+                    8: {
+                        "interrupt_state": {
+                            "int0": 0,
+                            "int1": 1,
+                            "left_cut": True,
+                            "right_cut": False,
+                            "last_source": "d8_query",
+                        }
+                    },
+                    9: {
+                        "interrupt_state": {
+                            "int0": None,
+                            "int1": None,
+                            "left_cut": None,
+                            "right_cut": True,
+                            "last_source": "tpos_cut",
+                        }
+                    },
+                }
+            )
+
+            with patch.object(bridge, "get_runtime_window", return_value=runtime_window):
+                node8 = bridge.get_runtime_node_interrupt_state(8, create_if_missing=False)
+                node9 = bridge.get_runtime_node_interrupt_state(9, create_if_missing=False)
+                unknown = bridge.get_runtime_node_interrupt_state(10, create_if_missing=False)
+
+            self.assertEqual(node8["int0"], 0)
+            self.assertEqual(node8["int1"], 1)
+            self.assertTrue(node8["left_cut"])
+            self.assertFalse(node8["right_cut"])
+            self.assertEqual(node8["left_state"], "cut")
+            self.assertEqual(node8["right_state"], "not_cut")
+            self.assertEqual(node9["left_state"], "unknown")
+            self.assertEqual(node9["right_state"], "cut")
+            self.assertIsNone(unknown["left_cut"])
+            self.assertEqual(unknown["left_state"], "unknown")
+
+    def test_bridge_exposes_symmetric_cut_and_not_cut_states_after_left_cut(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "demo.yaml"
+            config_path.write_text("project:\n  name: demo\n", encoding="utf-8")
+
+            project = ProjectDefinition(name="demo", display_name="Demo", config_path=config_path)
+            bridge = WorkspaceRuntimeBridge(project)
+            runtime_window = SimpleNamespace(
+                node_status={
+                    9: {
+                        "interrupt_state": {
+                            "left_cut": True,
+                            "right_cut": False,
+                            "last_source": "tpos_cut",
+                        }
+                    }
+                }
+            )
+
+            with patch.object(bridge, "get_runtime_window", return_value=runtime_window):
+                state = bridge.get_runtime_node_interrupt_state(9, create_if_missing=False)
+
+            self.assertEqual(state["left_state"], "cut")
+            self.assertEqual(state["right_state"], "not_cut")
+
+    def test_bridge_exposes_symmetric_cut_and_not_cut_states_after_right_cut(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "demo.yaml"
+            config_path.write_text("project:\n  name: demo\n", encoding="utf-8")
+
+            project = ProjectDefinition(name="demo", display_name="Demo", config_path=config_path)
+            bridge = WorkspaceRuntimeBridge(project)
+            runtime_window = SimpleNamespace(
+                node_status={
+                    9: {
+                        "interrupt_state": {
+                            "left_cut": False,
+                            "right_cut": True,
+                            "last_source": "tpos_cut",
+                        }
+                    }
+                }
+            )
+
+            with patch.object(bridge, "get_runtime_window", return_value=runtime_window):
+                state = bridge.get_runtime_node_interrupt_state(9, create_if_missing=False)
+
+            self.assertEqual(state["left_state"], "not_cut")
+            self.assertEqual(state["right_state"], "cut")
+
+    def test_bridge_exposes_runtime_node_motion_polarity_from_runtime_nodeconfig(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "demo.yaml"
+            config_path.write_text(
+                """
+project:
+  name: demo
+robot:
+  axes:
+    x:
+      node_id: 6
+      node_config: "00"
+""".strip(),
+                encoding="utf-8",
+            )
+
+            project = ProjectDefinition(name="demo", display_name="Demo", config_path=config_path)
+            bridge = WorkspaceRuntimeBridge(project)
+            runtime_window = SimpleNamespace(
+                node_status={
+                    6: {"nodeconfig": 0x02},
+                }
+            )
+
+            with patch.object(bridge, "get_runtime_window", return_value=runtime_window):
+                polarity = bridge.get_runtime_node_motion_polarity(6, create_if_missing=False)
+
+            self.assertTrue(polarity["known"])
+            self.assertEqual(polarity["source"], "runtime")
+            self.assertEqual(polarity["nodeconfig_raw"], 0x02)
+            self.assertEqual(polarity["home_sensor"], "L")
+            self.assertEqual(polarity["negative_run_sensor"], "R")
+            self.assertEqual(polarity["positive_run_sensor"], "L")
+
+    def test_bridge_exposes_runtime_node_motion_polarity_from_config_when_runtime_nodeconfig_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "demo.yaml"
+            config_path.write_text(
+                """
+project:
+  name: demo
+robot:
+  axes:
+    x:
+      node_id: 6
+      node_config: "00"
+""".strip(),
+                encoding="utf-8",
+            )
+
+            project = ProjectDefinition(name="demo", display_name="Demo", config_path=config_path)
+            bridge = WorkspaceRuntimeBridge(project)
+            runtime_window = SimpleNamespace(node_status={6: {}})
+
+            with patch.object(bridge, "get_runtime_window", return_value=runtime_window):
+                polarity = bridge.get_runtime_node_motion_polarity(6, create_if_missing=False)
+
+            self.assertTrue(polarity["known"])
+            self.assertEqual(polarity["source"], "config")
+            self.assertEqual(polarity["nodeconfig_raw"], 0x00)
+            self.assertEqual(polarity["home_sensor"], "L")
+            self.assertEqual(polarity["negative_run_sensor"], "L")
+            self.assertEqual(polarity["positive_run_sensor"], "R")
+
+    def test_bridge_parses_binary_style_nodeconfig_string_for_motion_polarity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "demo.yaml"
+            config_path.write_text(
+                """
+project:
+  name: demo
+robot:
+  axes:
+    pz:
+      node_id: 9
+      node_config: "0010"
+""".strip(),
+                encoding="utf-8",
+            )
+
+            project = ProjectDefinition(name="demo", display_name="Demo", config_path=config_path)
+            bridge = WorkspaceRuntimeBridge(project)
+            runtime_window = SimpleNamespace(node_status={9: {}})
+
+            with patch.object(bridge, "get_runtime_window", return_value=runtime_window):
+                polarity = bridge.get_runtime_node_motion_polarity(9, create_if_missing=False)
+
+            self.assertTrue(polarity["known"])
+            self.assertEqual(polarity["source"], "config")
+            self.assertEqual(polarity["nodeconfig_raw"], 0x02)
+            self.assertEqual(polarity["negative_run_sensor"], "R")
+            self.assertEqual(polarity["positive_run_sensor"], "L")
+
     def test_bridge_loads_editor_model_from_accuess_style_yaml(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "ACCuESS.yaml"

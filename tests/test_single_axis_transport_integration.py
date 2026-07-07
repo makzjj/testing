@@ -45,14 +45,43 @@ class _FakeRuntimeWindow(QObject):
     def __init__(self, backend_client: _FakeBackendClient):
         super().__init__()
         self.backend_client = backend_client
+        self.node_status: dict[int, dict[str, object]] = {}
 
 
 class _FakeBridge:
     def __init__(self, runtime_window: _FakeRuntimeWindow | None) -> None:
         self._runtime_window = runtime_window
+        self.polarity_by_node: dict[int, dict[str, object]] = {}
 
     def get_runtime_window(self, *, create_if_missing: bool = False):
         return self._runtime_window
+
+    def get_runtime_connection_state(self, *, create_if_missing: bool = False) -> tuple[bool, bool]:
+        runtime_window = self._runtime_window
+        if runtime_window is None:
+            return False, False
+        connected = runtime_window.backend_client.is_connected()
+        return connected, connected
+
+    def get_runtime_node_interrupt_state(self, node_id: int, *, create_if_missing: bool = False) -> dict[str, object]:
+        if self._runtime_window is None:
+            return {"node_id": int(node_id), "left_cut": None, "right_cut": None, "left_state": "unknown", "right_state": "unknown"}
+        state = self._runtime_window.node_status.get(int(node_id), {}).get("interrupt_state", {})
+        left_cut = state.get("left_cut") if isinstance(state, dict) else None
+        right_cut = state.get("right_cut") if isinstance(state, dict) else None
+        return {
+            "node_id": int(node_id),
+            "left_cut": left_cut,
+            "right_cut": right_cut,
+            "left_state": "cut" if left_cut is True else "not_cut" if left_cut is False else "unknown",
+            "right_state": "cut" if right_cut is True else "not_cut" if right_cut is False else "unknown",
+        }
+
+    def get_runtime_node_motion_polarity(self, node_id: int, *, create_if_missing: bool = False) -> dict[str, object]:
+        return self.polarity_by_node.get(
+            int(node_id),
+            {"node_id": int(node_id), "known": False, "negative_run_sensor": None, "positive_run_sensor": None},
+        )
 
 
 def _emit_can(runtime_window: _FakeRuntimeWindow, sender: int, cmd: int, params: list[int]):
@@ -320,3 +349,42 @@ def test_wrong_sensor_during_active_movement_wait_still_reaches_controller_and_f
     text = popup.status_block.toPlainText()
     assert f"RX Node {node_id}: 81 4C - Left sensor has been cut" in text
     assert "FAILED" in text or "Functional test FAILED" in text
+
+
+def test_live_run_away_from_tpos_cut_starts_release_watch_and_sends_d8(monkeypatch):
+    _suppress_boxes(monkeypatch)
+    node_id = 9
+    backend = _FakeBackendClient(connected=True)
+    runtime_window = _FakeRuntimeWindow(backend)
+    runtime_window.node_status = {
+        node_id: {"interrupt_state": {"left_cut": True, "right_cut": False, "last_source": "tpos_cut"}}
+    }
+    bridge = _FakeBridge(runtime_window)
+    bridge.polarity_by_node[node_id] = {
+        "node_id": node_id,
+        "known": True,
+        "source": "config",
+        "nodeconfig_raw": 0x02,
+        "negative_run_sensor": "R",
+        "positive_run_sensor": "L",
+    }
+
+    popup = SingleAxisFunctionalPopup(node_options=[(node_id, "PZ")], bridge=bridge)
+    popup.node_combo.setCurrentIndex(1)
+    popup._handle_run_clicked()
+
+    # After nodeconfig/hunting/home/zero/flags, controller sends outward RUN -190 for this polarity.
+    _emit_can(runtime_window, node_id, 0xC4, [0x3A, 0x02])
+    _emit_can(runtime_window, node_id, 0xC3, [0x41])
+    _emit_can(runtime_window, node_id, 0x81, [ord("L")])
+    _emit_can(runtime_window, node_id, 0x81, [ord("I")])
+    _emit_can(runtime_window, node_id, 0x82, [0x00, 0x00, 0x00, 0x00])
+    _emit_can(runtime_window, node_id, 0xC9, [0x3A, 0x09])
+    _emit_can(runtime_window, node_id, 0xCA, [0x3A, 0x09])
+
+    assert (node_id, [0x88, 0xFF, 0x42]) in backend.sent
+    assert (node_id, [0xD8, 0x3F]) in backend.sent
+    run_index = backend.sent.index((node_id, [0x88, 0xFF, 0x42]))
+    d8_index = backend.sent.index((node_id, [0xD8, 0x3F]))
+    assert run_index < d8_index
+    assert "[ReleaseWatch] Started for Node 9 sensor L" in popup.status_block.toPlainText()

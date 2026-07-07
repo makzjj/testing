@@ -2,6 +2,7 @@ import sys
 import types
 
 import pytest
+from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from gui.workspace.pages.single_axis_functional_popup import SingleAxisFunctionalPopup
@@ -9,7 +10,7 @@ from gui.workspace.controllers.single_axis_functional_test_controller import (
     FunctionalTestConfig,
     SingleAxisFunctionalTestController,
 )
-from data.binary_cmd_builders import build_hunting_timeout, build_nodeconfig_query_payload, build_tpos
+from data.binary_cmd_builders import build_hunting_timeout, build_nodeconfig_query_payload, build_run, build_tpos
 from data.binary_cmd_parser import decode_nodeconfig_motion_polarity
 from services.node_sensor_profile import NodeSensorProfile
 
@@ -30,6 +31,141 @@ def _qt_app():
 def _suppress_message_boxes(monkeypatch):
     monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
     monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+
+
+class _FakeRuntimeWindow(QObject):
+    packet_received = pyqtSignal(object)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.node_status: dict[int, dict[str, object]] = {}
+
+
+class _FakeInterruptBridge:
+    def __init__(self, runtime_window: _FakeRuntimeWindow | None = None) -> None:
+        self.runtime_window = runtime_window
+        self.polarity_by_node: dict[int, dict[str, object]] = {}
+
+    def get_runtime_window(self, *, create_if_missing: bool = False):
+        return self.runtime_window
+
+    def get_runtime_connection_state(self, *, create_if_missing: bool = False) -> tuple[bool, bool]:
+        return True, True
+
+    def get_runtime_node_interrupt_state(self, node_id: int, *, create_if_missing: bool = False) -> dict[str, object]:
+        if self.runtime_window is None:
+            return {
+                "node_id": int(node_id),
+                "int0": None,
+                "int1": None,
+                "left_cut": None,
+                "right_cut": None,
+                "last_source": None,
+                "left_state": "unknown",
+                "right_state": "unknown",
+            }
+        state = self.runtime_window.node_status.get(int(node_id), {}).get("interrupt_state", {})
+        left_cut = state.get("left_cut") if isinstance(state, dict) else None
+        right_cut = state.get("right_cut") if isinstance(state, dict) else None
+        return {
+            "node_id": int(node_id),
+            "int0": state.get("int0") if isinstance(state, dict) else None,
+            "int1": state.get("int1") if isinstance(state, dict) else None,
+            "left_cut": left_cut,
+            "right_cut": right_cut,
+            "last_source": state.get("last_source") if isinstance(state, dict) else None,
+            "left_state": "cut" if left_cut is True else "not_cut" if left_cut is False else "unknown",
+            "right_state": "cut" if right_cut is True else "not_cut" if right_cut is False else "unknown",
+        }
+
+    def get_runtime_node_motion_polarity(self, node_id: int, *, create_if_missing: bool = False) -> dict[str, object]:
+        return self.polarity_by_node.get(
+            int(node_id),
+            {
+                "node_id": int(node_id),
+                "known": False,
+                "source": None,
+                "nodeconfig_raw": None,
+                "home_sensor": None,
+                "opposite_sensor": None,
+                "hunting_sign": None,
+                "outward_sign": None,
+                "return_home_sign": None,
+                "negative_run_sensor": None,
+                "positive_run_sensor": None,
+            },
+        )
+
+
+class _FakeReleaseWatchHelper:
+    def __init__(self) -> None:
+        self.is_active = False
+        self.active_node_id: int | None = None
+        self.expected_sensor: str | None = None
+        self.start_calls: list[tuple[int, str]] = []
+        self.stop_calls: list[str] = []
+        self.sent_queries: list[list[int]] = []
+        self._on_released = None
+        self._on_timeout = None
+        self._on_stopped = None
+
+    def start_release_watch(
+        self,
+        node_id: int,
+        expected_sensor: str,
+        send_query,
+        *,
+        on_released=None,
+        on_timeout=None,
+        on_stopped=None,
+    ) -> bool:
+        if self.is_active:
+            return False
+        self.is_active = True
+        self.active_node_id = int(node_id)
+        self.expected_sensor = str(expected_sensor)
+        self.start_calls.append((int(node_id), str(expected_sensor)))
+        self._on_released = on_released
+        self._on_timeout = on_timeout
+        self._on_stopped = on_stopped
+        send_query([0xD8, 0x3F])
+        self.sent_queries.append([0xD8, 0x3F])
+        return True
+
+    def stop_release_watch(self, reason: str = "cancelled") -> bool:
+        if not self.is_active:
+            return False
+        node_id = self.active_node_id
+        sensor = self.expected_sensor
+        self.is_active = False
+        self.active_node_id = None
+        self.expected_sensor = None
+        self.stop_calls.append(str(reason))
+        if self._on_stopped is not None and node_id is not None and sensor is not None:
+            self._on_stopped(node_id, sensor, str(reason))
+        return True
+
+    def trigger_timeout(self) -> None:
+        node_id = self.active_node_id
+        sensor = self.expected_sensor
+        self.is_active = False
+        self.active_node_id = None
+        self.expected_sensor = None
+        if self._on_stopped is not None and node_id is not None and sensor is not None:
+            self._on_stopped(node_id, sensor, "timeout")
+        if self._on_timeout is not None and node_id is not None and sensor is not None:
+            self._on_timeout(node_id, sensor)
+
+    def trigger_released(self) -> None:
+        node_id = self.active_node_id
+        sensor = self.expected_sensor
+        self.is_active = False
+        self.active_node_id = None
+        self.expected_sensor = None
+        if self._on_stopped is not None and node_id is not None and sensor is not None:
+            self._on_stopped(node_id, sensor, "released")
+        if self._on_released is not None and node_id is not None and sensor is not None:
+            self._on_released(node_id, sensor)
 
 
 def test_run_with_selected_node_starts_controller(monkeypatch):
@@ -96,17 +232,519 @@ def test_status_and_command_logging(monkeypatch):
     assert "TX requested: C3 21 27 10" in popup.status_block.toPlainText()
 
 
-def test_flag_leds_light_on_events(monkeypatch):
+def test_popup_leds_render_from_runtime_interrupt_state(monkeypatch):
     _suppress_message_boxes(monkeypatch)
-    popup = SingleAxisFunctionalPopup(node_options=[(2, "Axis")], allow_safe_tx=True)
+    runtime_window = _FakeRuntimeWindow()
+    runtime_window.node_status = {
+        2: {
+            "interrupt_state": {
+                "left_cut": True,
+                "right_cut": False,
+                "last_source": "tpos_cut",
+            }
+        }
+    }
+    popup = SingleAxisFunctionalPopup(node_options=[(2, "Axis")], bridge=_FakeInterruptBridge(runtime_window))
+    popup.node_combo.setCurrentIndex(1)
+    popup._refresh_interrupt_leds()
+
+    assert SingleAxisFunctionalPopup._ACTIVE_FLAG_COLOR in popup.left_flag_led.styleSheet()
+    assert SingleAxisFunctionalPopup._INACTIVE_FLAG_COLOR in popup.right_flag_led.styleSheet()
+
+    runtime_window.node_status[2]["interrupt_state"] = {
+        "left_cut": False,
+        "right_cut": True,
+        "last_source": "tpos_cut",
+    }
+    runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 2, "cmd": 0x81, "params": [ord("R")]})
+    get_app().processEvents()
+
+    assert SingleAxisFunctionalPopup._ACTIVE_FLAG_COLOR in popup.right_flag_led.styleSheet()
+    assert SingleAxisFunctionalPopup._INACTIVE_FLAG_COLOR in popup.left_flag_led.styleSheet()
+
+
+def test_popup_unknown_state_is_neutral_until_runtime_data_arrives(monkeypatch):
+    _suppress_message_boxes(monkeypatch)
+    popup = SingleAxisFunctionalPopup(node_options=[(2, "Axis")], bridge=_FakeInterruptBridge(_FakeRuntimeWindow()))
+    popup.node_combo.setCurrentIndex(1)
+    popup._refresh_interrupt_leds()
+
+    assert SingleAxisFunctionalPopup._UNKNOWN_FLAG_COLOR in popup.left_flag_led.styleSheet()
+    assert SingleAxisFunctionalPopup._UNKNOWN_FLAG_COLOR in popup.right_flag_led.styleSheet()
+
+
+def test_popup_reopening_shows_latest_runtime_state_for_selected_node(monkeypatch):
+    _suppress_message_boxes(monkeypatch)
+    runtime_window = _FakeRuntimeWindow()
+    runtime_window.node_status = {
+        4: {
+            "interrupt_state": {
+                "left_cut": False,
+                "right_cut": True,
+                "last_source": "tpos_cut",
+            }
+        }
+    }
+    popup = SingleAxisFunctionalPopup(node_options=[(4, "Axis")], bridge=_FakeInterruptBridge(runtime_window))
+    popup.node_combo.setCurrentIndex(1)
+    popup.hide()
+    popup.show()
+    get_app().processEvents()
+
+    assert SingleAxisFunctionalPopup._ACTIVE_FLAG_COLOR in popup.right_flag_led.styleSheet()
+    assert SingleAxisFunctionalPopup._INACTIVE_FLAG_COLOR in popup.left_flag_led.styleSheet()
+
+
+def test_popup_node_switch_updates_runtime_backed_led_state(monkeypatch):
+    _suppress_message_boxes(monkeypatch)
+    runtime_window = _FakeRuntimeWindow()
+    runtime_window.node_status = {
+        2: {"interrupt_state": {"left_cut": True, "right_cut": False, "last_source": "tpos_cut"}},
+        3: {"interrupt_state": {"left_cut": False, "right_cut": True, "last_source": "tpos_cut"}},
+    }
+    popup = SingleAxisFunctionalPopup(
+        node_options=[(2, "AxisX"), (3, "AxisY")],
+        bridge=_FakeInterruptBridge(runtime_window),
+    )
+    popup.node_combo.setCurrentIndex(1)
+    popup._refresh_interrupt_leds()
+    assert SingleAxisFunctionalPopup._ACTIVE_FLAG_COLOR in popup.left_flag_led.styleSheet()
+
+    popup.node_combo.setCurrentIndex(2)
+    get_app().processEvents()
+    assert SingleAxisFunctionalPopup._ACTIVE_FLAG_COLOR in popup.right_flag_led.styleSheet()
+    assert SingleAxisFunctionalPopup._INACTIVE_FLAG_COLOR in popup.left_flag_led.styleSheet()
+
+
+def test_popup_d8_response_refreshes_leds_from_runtime_state(monkeypatch):
+    _suppress_message_boxes(monkeypatch)
+    runtime_window = _FakeRuntimeWindow()
+    runtime_window.node_status = {
+        5: {"interrupt_state": {"left_cut": True, "right_cut": False, "last_source": "tpos_cut"}}
+    }
+    popup = SingleAxisFunctionalPopup(node_options=[(5, "Axis")], bridge=_FakeInterruptBridge(runtime_window))
+    popup.node_combo.setCurrentIndex(1)
+    popup._refresh_interrupt_leds()
+
+    runtime_window.node_status[5]["interrupt_state"] = {
+        "int0": 1,
+        "int1": 0,
+        "left_cut": False,
+        "right_cut": True,
+        "last_source": "d8_query",
+    }
+    runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 5, "cmd": 0xD8, "params": [0x3A, 0x01, 0x00]})
+    get_app().processEvents()
+
+    assert SingleAxisFunctionalPopup._ACTIVE_FLAG_COLOR in popup.right_flag_led.styleSheet()
+    assert SingleAxisFunctionalPopup._INACTIVE_FLAG_COLOR in popup.left_flag_led.styleSheet()
+
+
+def test_popup_controller_sensor_callbacks_no_longer_override_runtime_led_truth(monkeypatch):
+    _suppress_message_boxes(monkeypatch)
+    runtime_window = _FakeRuntimeWindow()
+    runtime_window.node_status = {
+        2: {"interrupt_state": {"left_cut": False, "right_cut": True, "last_source": "tpos_cut"}}
+    }
+    popup = SingleAxisFunctionalPopup(node_options=[(2, "Axis")], bridge=_FakeInterruptBridge(runtime_window))
+    popup.node_combo.setCurrentIndex(1)
+    popup._refresh_interrupt_leds()
+
+    popup.controller.handle_runtime_packet([0x81, ord("L")])
+
+    assert SingleAxisFunctionalPopup._ACTIVE_FLAG_COLOR in popup.right_flag_led.styleSheet()
+    assert SingleAxisFunctionalPopup._INACTIVE_FLAG_COLOR in popup.left_flag_led.styleSheet()
+
+
+def test_release_watch_starts_for_left_cut_when_run_moves_away(monkeypatch):
+    _suppress_message_boxes(monkeypatch)
+    runtime_window = _FakeRuntimeWindow()
+    runtime_window.node_status = {
+        9: {"interrupt_state": {"left_cut": True, "right_cut": False, "last_source": "tpos_cut"}}
+    }
+    bridge = _FakeInterruptBridge(runtime_window)
+    bridge.polarity_by_node[9] = {
+        "node_id": 9,
+        "known": True,
+        "source": "config",
+        "nodeconfig_raw": 0x02,
+        "negative_run_sensor": "R",
+        "positive_run_sensor": "L",
+    }
+    helper = _FakeReleaseWatchHelper()
+    popup = SingleAxisFunctionalPopup(
+        node_options=[(9, "PZ")],
+        bridge=bridge,
+        allow_safe_tx=True,
+        release_watch_helper=helper,
+    )
     popup.node_combo.setCurrentIndex(1)
     popup._handle_run_clicked()
 
-    # Simulate left/right sensor events arriving at controller
-    popup.controller.handle_runtime_packet([0x81, ord('L')])
-    assert SingleAxisFunctionalPopup._ACTIVE_FLAG_COLOR in popup.left_flag_led.styleSheet()
-    popup.controller.handle_runtime_packet([0x81, ord('R')])
-    assert SingleAxisFunctionalPopup._ACTIVE_FLAG_COLOR in popup.right_flag_led.styleSheet()
+    popup.controller.command_requested(build_run(-100))
+
+    assert helper.start_calls == [(9, "L")]
+    assert helper.sent_queries == [[0xD8, 0x3F]]
+    assert popup._tx_log[-2:] == [build_run(-100), [0xD8, 0x3F]]
+    assert "[ReleaseWatch] Started for Node 9 sensor L" in popup.status_block.toPlainText()
+
+
+def test_release_watch_starts_for_right_cut_when_run_moves_away(monkeypatch):
+    _suppress_message_boxes(monkeypatch)
+    runtime_window = _FakeRuntimeWindow()
+    runtime_window.node_status = {
+        8: {"interrupt_state": {"left_cut": False, "right_cut": True, "last_source": "tpos_cut"}}
+    }
+    bridge = _FakeInterruptBridge(runtime_window)
+    bridge.polarity_by_node[8] = {
+        "node_id": 8,
+        "known": True,
+        "source": "config",
+        "nodeconfig_raw": 0x00,
+        "negative_run_sensor": "L",
+        "positive_run_sensor": "R",
+    }
+    helper = _FakeReleaseWatchHelper()
+    popup = SingleAxisFunctionalPopup(
+        node_options=[(8, "Axis")],
+        bridge=bridge,
+        allow_safe_tx=True,
+        release_watch_helper=helper,
+    )
+    popup.node_combo.setCurrentIndex(1)
+    popup._handle_run_clicked()
+
+    popup.controller.command_requested(build_run(-190))
+
+    assert helper.start_calls == [(8, "R")]
+    assert helper.sent_queries == [[0xD8, 0x3F]]
+
+
+def test_release_watch_moving_toward_cut_sensor_skips_with_reason(monkeypatch):
+    _suppress_message_boxes(monkeypatch)
+    runtime_window = _FakeRuntimeWindow()
+    runtime_window.node_status = {
+        9: {"interrupt_state": {"left_cut": True, "right_cut": False, "last_source": "tpos_cut"}}
+    }
+    bridge = _FakeInterruptBridge(runtime_window)
+    bridge.polarity_by_node[9] = {
+        "node_id": 9,
+        "known": True,
+        "source": "config",
+        "nodeconfig_raw": 0x02,
+        "negative_run_sensor": "R",
+        "positive_run_sensor": "L",
+    }
+    helper = _FakeReleaseWatchHelper()
+    popup = SingleAxisFunctionalPopup(
+        node_options=[(9, "PZ")],
+        bridge=bridge,
+        allow_safe_tx=True,
+        release_watch_helper=helper,
+    )
+    popup.node_combo.setCurrentIndex(1)
+    popup._handle_run_clicked()
+
+    popup.controller.command_requested(build_run(100))
+
+    assert helper.start_calls == []
+    assert "[ReleaseWatch] Skipped: moving toward cut sensor" in popup.status_block.toPlainText()
+
+
+def test_release_watch_unknown_interrupt_state_skips_with_reason(monkeypatch):
+    _suppress_message_boxes(monkeypatch)
+    runtime_window = _FakeRuntimeWindow()
+    runtime_window.node_status = {
+        9: {"interrupt_state": {"left_cut": True, "right_cut": None, "last_source": "tpos_cut"}}
+    }
+    bridge = _FakeInterruptBridge(runtime_window)
+    bridge.polarity_by_node[9] = {
+        "node_id": 9,
+        "known": True,
+        "source": "config",
+        "nodeconfig_raw": 0x02,
+        "negative_run_sensor": "R",
+        "positive_run_sensor": "L",
+    }
+    helper = _FakeReleaseWatchHelper()
+    popup = SingleAxisFunctionalPopup(
+        node_options=[(9, "PZ")],
+        bridge=bridge,
+        allow_safe_tx=True,
+        release_watch_helper=helper,
+    )
+    popup.node_combo.setCurrentIndex(1)
+    popup._handle_run_clicked()
+
+    popup.controller.command_requested(build_run(-100))
+
+    assert helper.start_calls == []
+    assert "[ReleaseWatch] Skipped: unknown interrupt state" in popup.status_block.toPlainText()
+
+
+def test_release_watch_unknown_polarity_skips_with_reason(monkeypatch):
+    _suppress_message_boxes(monkeypatch)
+    runtime_window = _FakeRuntimeWindow()
+    runtime_window.node_status = {
+        9: {"interrupt_state": {"left_cut": True, "right_cut": False, "last_source": "tpos_cut"}}
+    }
+    bridge = _FakeInterruptBridge(runtime_window)
+    helper = _FakeReleaseWatchHelper()
+    popup = SingleAxisFunctionalPopup(
+        node_options=[(9, "PZ")],
+        bridge=bridge,
+        allow_safe_tx=True,
+        release_watch_helper=helper,
+    )
+    popup.node_combo.setCurrentIndex(1)
+    popup._handle_run_clicked()
+
+    popup.controller.command_requested(build_run(-100))
+
+    assert helper.start_calls == []
+    assert "[ReleaseWatch] Skipped: unknown motion polarity" in popup.status_block.toPlainText()
+
+
+def test_release_watch_no_cut_sensor_skips(monkeypatch):
+    _suppress_message_boxes(monkeypatch)
+    runtime_window = _FakeRuntimeWindow()
+    runtime_window.node_status = {
+        9: {"interrupt_state": {"left_cut": False, "right_cut": False, "last_source": "d8_query"}}
+    }
+    bridge = _FakeInterruptBridge(runtime_window)
+    bridge.polarity_by_node[9] = {
+        "node_id": 9,
+        "known": True,
+        "source": "config",
+        "nodeconfig_raw": 0x02,
+        "negative_run_sensor": "R",
+        "positive_run_sensor": "L",
+    }
+    helper = _FakeReleaseWatchHelper()
+    popup = SingleAxisFunctionalPopup(
+        node_options=[(9, "PZ")],
+        bridge=bridge,
+        allow_safe_tx=True,
+        release_watch_helper=helper,
+    )
+    popup.node_combo.setCurrentIndex(1)
+    popup._handle_run_clicked()
+
+    popup.controller.command_requested(build_run(-100))
+
+    assert helper.start_calls == []
+    assert "[ReleaseWatch] Skipped: no cut sensor" in popup.status_block.toPlainText()
+
+
+def test_release_watch_both_cut_skips(monkeypatch):
+    _suppress_message_boxes(monkeypatch)
+    runtime_window = _FakeRuntimeWindow()
+    runtime_window.node_status = {
+        9: {"interrupt_state": {"left_cut": True, "right_cut": True, "last_source": "d8_query"}}
+    }
+    bridge = _FakeInterruptBridge(runtime_window)
+    bridge.polarity_by_node[9] = {
+        "node_id": 9,
+        "known": True,
+        "source": "config",
+        "nodeconfig_raw": 0x02,
+        "negative_run_sensor": "R",
+        "positive_run_sensor": "L",
+    }
+    helper = _FakeReleaseWatchHelper()
+    popup = SingleAxisFunctionalPopup(
+        node_options=[(9, "PZ")],
+        bridge=bridge,
+        allow_safe_tx=True,
+        release_watch_helper=helper,
+    )
+    popup.node_combo.setCurrentIndex(1)
+    popup._handle_run_clicked()
+
+    popup.controller.command_requested(build_run(-100))
+
+    assert helper.start_calls == []
+    assert "[ReleaseWatch] Skipped: both sensors cut" in popup.status_block.toPlainText()
+
+
+def test_release_watch_no_duplicate_watch_is_started(monkeypatch):
+    _suppress_message_boxes(monkeypatch)
+    runtime_window = _FakeRuntimeWindow()
+    runtime_window.node_status = {
+        9: {"interrupt_state": {"left_cut": True, "right_cut": False, "last_source": "tpos_cut"}}
+    }
+    bridge = _FakeInterruptBridge(runtime_window)
+    bridge.polarity_by_node[9] = {
+        "node_id": 9,
+        "known": True,
+        "source": "config",
+        "nodeconfig_raw": 0x02,
+        "negative_run_sensor": "R",
+        "positive_run_sensor": "L",
+    }
+    helper = _FakeReleaseWatchHelper()
+    popup = SingleAxisFunctionalPopup(
+        node_options=[(9, "PZ")],
+        bridge=bridge,
+        allow_safe_tx=True,
+        release_watch_helper=helper,
+    )
+    popup.node_combo.setCurrentIndex(1)
+    popup._handle_run_clicked()
+
+    popup.controller.command_requested(build_run(-100))
+    popup.controller.command_requested(build_run(-100))
+
+    assert helper.start_calls == [(9, "L")]
+    assert popup.status_block.toPlainText().count("[ReleaseWatch] Skipped: duplicate watch active") >= 1
+
+
+def test_release_watch_timeout_does_not_fail_or_advance_controller(monkeypatch):
+    _suppress_message_boxes(monkeypatch)
+    runtime_window = _FakeRuntimeWindow()
+    runtime_window.node_status = {
+        9: {"interrupt_state": {"left_cut": True, "right_cut": False, "last_source": "tpos_cut"}}
+    }
+    bridge = _FakeInterruptBridge(runtime_window)
+    bridge.polarity_by_node[9] = {
+        "node_id": 9,
+        "known": True,
+        "source": "config",
+        "nodeconfig_raw": 0x02,
+        "negative_run_sensor": "R",
+        "positive_run_sensor": "L",
+    }
+    helper = _FakeReleaseWatchHelper()
+    popup = SingleAxisFunctionalPopup(
+        node_options=[(9, "PZ")],
+        bridge=bridge,
+        allow_safe_tx=True,
+        release_watch_helper=helper,
+    )
+    popup.node_combo.setCurrentIndex(1)
+    popup._handle_run_clicked()
+    popup.controller._state = popup.controller.S_WAIT_LEFT
+    popup.controller._wait_for = "left_sensor"
+
+    popup.controller.command_requested(build_run(-100))
+    before_state = popup.controller._state
+    before_wait = popup.controller.current_wait_for
+    helper.trigger_timeout()
+
+    assert popup.controller._state == before_state
+    assert popup.controller.current_wait_for == before_wait
+    assert popup._is_running is True
+    assert popup.controller._state != popup.controller.S_FAILED
+    assert "[ReleaseWatch] Timeout waiting for Node 9 sensor L" in popup.status_block.toPlainText()
+
+
+def test_release_watch_release_does_not_advance_controller(monkeypatch):
+    _suppress_message_boxes(monkeypatch)
+    runtime_window = _FakeRuntimeWindow()
+    runtime_window.node_status = {
+        8: {"interrupt_state": {"left_cut": False, "right_cut": True, "last_source": "tpos_cut"}}
+    }
+    bridge = _FakeInterruptBridge(runtime_window)
+    bridge.polarity_by_node[8] = {
+        "node_id": 8,
+        "known": True,
+        "source": "config",
+        "nodeconfig_raw": 0x00,
+        "negative_run_sensor": "L",
+        "positive_run_sensor": "R",
+    }
+    helper = _FakeReleaseWatchHelper()
+    popup = SingleAxisFunctionalPopup(
+        node_options=[(8, "Axis")],
+        bridge=bridge,
+        allow_safe_tx=True,
+        release_watch_helper=helper,
+    )
+    popup.node_combo.setCurrentIndex(1)
+    popup._handle_run_clicked()
+    popup.controller._state = popup.controller.S_WAIT_RIGHT
+    popup.controller._wait_for = "right_sensor"
+
+    popup.controller.command_requested(build_run(-190))
+    before_state = popup.controller._state
+    before_wait = popup.controller.current_wait_for
+    helper.trigger_released()
+
+    assert popup.controller._state == before_state
+    assert popup.controller.current_wait_for == before_wait
+    assert "[ReleaseWatch] Release detected for Node 8 sensor R" in popup.status_block.toPlainText()
+
+
+def test_release_watch_stop_completion_failure_and_node_change_cancel(monkeypatch):
+    _suppress_message_boxes(monkeypatch)
+    runtime_window = _FakeRuntimeWindow()
+    runtime_window.node_status = {
+        9: {"interrupt_state": {"left_cut": True, "right_cut": False, "last_source": "tpos_cut"}},
+        10: {"interrupt_state": {"left_cut": False, "right_cut": True, "last_source": "tpos_cut"}},
+    }
+    bridge = _FakeInterruptBridge(runtime_window)
+    bridge.polarity_by_node[9] = {
+        "node_id": 9,
+        "known": True,
+        "source": "config",
+        "nodeconfig_raw": 0x02,
+        "negative_run_sensor": "R",
+        "positive_run_sensor": "L",
+    }
+    bridge.polarity_by_node[10] = {
+        "node_id": 10,
+        "known": True,
+        "source": "config",
+        "nodeconfig_raw": 0x00,
+        "negative_run_sensor": "L",
+        "positive_run_sensor": "R",
+    }
+    helper = _FakeReleaseWatchHelper()
+    popup = SingleAxisFunctionalPopup(
+        node_options=[(9, "PZ"), (10, "Axis")],
+        bridge=bridge,
+        allow_safe_tx=True,
+        release_watch_helper=helper,
+    )
+    popup.node_combo.setCurrentIndex(1)
+    popup._handle_run_clicked()
+    popup.controller.command_requested(build_run(-100))
+    popup.stop_button.click()
+    assert "user_stop" in helper.stop_calls
+
+    popup._handle_run_clicked()
+    popup.controller.command_requested(build_run(-100))
+    popup.mark_failed("oops")
+    assert "run_finished" in helper.stop_calls
+
+    popup._handle_run_clicked()
+    popup.controller.command_requested(build_run(-100))
+    popup.mark_passed = lambda: None  # prevent modal path if accidentally invoked
+    popup._finish_run_ui()
+    assert helper.stop_calls.count("run_finished") >= 2
+
+    popup._handle_run_clicked()
+    popup.controller.command_requested(build_run(-100))
+    popup.node_combo.setCurrentIndex(2)
+    assert "node_changed" in helper.stop_calls
+
+
+def test_release_watch_close_cancels_when_popup_is_not_running(monkeypatch):
+    _suppress_message_boxes(monkeypatch)
+    helper = _FakeReleaseWatchHelper()
+    popup = SingleAxisFunctionalPopup(
+        node_options=[(9, "PZ")],
+        bridge=_FakeInterruptBridge(_FakeRuntimeWindow()),
+        allow_safe_tx=True,
+        release_watch_helper=helper,
+    )
+    helper.is_active = True
+    helper.active_node_id = 9
+    helper.expected_sensor = "L"
+
+    popup.close()
+
+    assert "popup_closed" in helper.stop_calls
 
 
 def test_position_and_range_difference_updates(monkeypatch):

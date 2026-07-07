@@ -24,6 +24,7 @@ from .raw_project_config_reader import RawProjectConfigReader
 from .workspace_snapshot_factory import WorkspaceSnapshotFactory
 from services.robot_backend_client import RobotBackendClient
 from services.communication_log_store import CommunicationLogStore
+from data.binary_cmd_parser import decode_nodeconfig_motion_polarity
 
 _ALLOWED_CONFIG_SUFFIXES = {".yaml", ".yml"}
 
@@ -463,6 +464,137 @@ class WorkspaceRuntimeBridge:
                 }
             )
         return {"connected_nodes": connected_nodes, "detected_nodes": detected_nodes, "rows": rows}
+
+    def get_runtime_node_interrupt_state(self, node_id: int, *, create_if_missing: bool = False) -> dict[str, object]:
+        """Return one node's canonical runtime interrupt state."""
+        runtime_window = self.get_runtime_window(create_if_missing=create_if_missing)
+        if runtime_window is None:
+            return {
+                "node_id": int(node_id),
+                "int0": None,
+                "int1": None,
+                "left_cut": None,
+                "right_cut": None,
+                "last_source": None,
+                "left_state": "unknown",
+                "right_state": "unknown",
+            }
+
+        node_status = getattr(runtime_window, "node_status", {}) or {}
+        status = node_status.get(int(node_id), {}) if isinstance(node_status, dict) else {}
+        interrupt_state = status.get("interrupt_state", {}) if isinstance(status, dict) else {}
+        int0 = interrupt_state.get("int0") if isinstance(interrupt_state, dict) else None
+        int1 = interrupt_state.get("int1") if isinstance(interrupt_state, dict) else None
+        left_cut = interrupt_state.get("left_cut") if isinstance(interrupt_state, dict) else None
+        right_cut = interrupt_state.get("right_cut") if isinstance(interrupt_state, dict) else None
+        last_source = interrupt_state.get("last_source") if isinstance(interrupt_state, dict) else None
+        return {
+            "node_id": int(node_id),
+            "int0": int0,
+            "int1": int1,
+            "left_cut": left_cut,
+            "right_cut": right_cut,
+            "last_source": last_source,
+            "left_state": self._format_interrupt_display_state(left_cut),
+            "right_state": self._format_interrupt_display_state(right_cut),
+        }
+
+    @staticmethod
+    def _format_interrupt_display_state(is_cut: object) -> str:
+        if is_cut is True:
+            return "cut"
+        if is_cut is False:
+            return "not_cut"
+        return "unknown"
+
+    def get_runtime_node_motion_polarity(self, node_id: int, *, create_if_missing: bool = False) -> dict[str, object]:
+        """Return canonical NODECONFIG-derived motion polarity for one node when known."""
+        raw_value, source = self._resolve_runtime_nodeconfig_value(int(node_id), create_if_missing=create_if_missing)
+        if raw_value is None:
+            return {
+                "node_id": int(node_id),
+                "known": False,
+                "source": source,
+                "nodeconfig_raw": None,
+                "home_sensor": None,
+                "opposite_sensor": None,
+                "hunting_sign": None,
+                "outward_sign": None,
+                "return_home_sign": None,
+                "negative_run_sensor": None,
+                "positive_run_sensor": None,
+            }
+        try:
+            model = decode_nodeconfig_motion_polarity(int(raw_value))
+        except Exception:
+            return {
+                "node_id": int(node_id),
+                "known": False,
+                "source": source,
+                "nodeconfig_raw": int(raw_value) & 0xFF,
+                "home_sensor": None,
+                "opposite_sensor": None,
+                "hunting_sign": None,
+                "outward_sign": None,
+                "return_home_sign": None,
+                "negative_run_sensor": None,
+                "positive_run_sensor": None,
+            }
+        return {
+            "node_id": int(node_id),
+            "known": True,
+            "source": source,
+            "nodeconfig_raw": model.nodeconfig_raw,
+            "home_sensor": model.home_sensor,
+            "opposite_sensor": model.opposite_sensor,
+            "hunting_sign": model.hunting_sign,
+            "outward_sign": model.outward_sign,
+            "return_home_sign": model.return_home_sign,
+            "negative_run_sensor": model.negative_run_sensor,
+            "positive_run_sensor": model.positive_run_sensor,
+        }
+
+    def _resolve_runtime_nodeconfig_value(self, node_id: int, *, create_if_missing: bool) -> tuple[int | None, str | None]:
+        runtime_window = self.get_runtime_window(create_if_missing=create_if_missing)
+        if runtime_window is not None:
+            node_status = getattr(runtime_window, "node_status", {}) or {}
+            status = node_status.get(int(node_id), {}) if isinstance(node_status, dict) else {}
+            runtime_value = status.get("nodeconfig") if isinstance(status, dict) else None
+            normalized_runtime = self._normalize_nodeconfig_value(runtime_value)
+            if normalized_runtime is not None:
+                return normalized_runtime, "runtime"
+
+        axis_data = self._axis_config_for_node(int(node_id))
+        if axis_data is None:
+            return None, None
+        config_value = self._normalize_nodeconfig_value(axis_data.get("node_config"))
+        if config_value is not None:
+            return config_value, "config"
+        return None, "config"
+
+    def _axis_config_for_node(self, node_id: int) -> dict | None:
+        axes = self._schema_adapter.extract_axis_section(self._raw_config)
+        for axis_data in axes.values():
+            if isinstance(axis_data, dict) and axis_data.get("node_id") == int(node_id):
+                return axis_data
+        return None
+
+    @staticmethod
+    def _normalize_nodeconfig_value(value: object) -> int | None:
+        if isinstance(value, int):
+            return int(value) & 0xFF
+        text = str(value).strip()
+        if not text or text.lower() == "n/a":
+            return None
+        if all(ch in "01" for ch in text) and len(text) in {4, 8}:
+            try:
+                return int(text, 2) & 0xFF
+            except ValueError:
+                return None
+        try:
+            return int(text, 16) & 0xFF
+        except ValueError:
+            return None
 
     def request_runtime_node_scan(self) -> bool:
         """Trigger runtime node scan/query flow when the legacy runtime exposes one."""

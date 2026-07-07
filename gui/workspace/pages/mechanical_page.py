@@ -32,10 +32,13 @@ from data.binary_cmd_builders import (
     build_getpos,
     build_lflag_query_payload,
     build_nodeconfig_query_payload,
+    build_run,
     build_rflag_query_payload,
+    build_stopmotor,
 )
 from data.binary_cmd_parser import decode_command
 from services.functional_transport_adapter import FunctionalTransportAdapter
+from services.release_watch_helper import ReleaseWatchHelper
 
 from ..bridges import WorkspaceRuntimeBridge
 from ..widgets import LabeledControl, PanelFrame, ResponsiveRow
@@ -328,12 +331,11 @@ class MechanicalPage(BaseWorkspacePage):
         self._parameter_actual_texts: dict[str, str] = {}
         self._sensor_state_cache: dict[str, int | None] = {"left": None, "right": None}
         self._sensor_state_node_id: int | None = None
-        self._sensor_interrupt_cache: dict[str, bool] = {"left": False, "right": False}
-        self._sensor_interrupt_node_id: int | None = None
         self._actual_nodeconfig_value: int | None = None
         self._pending_nodeconfig_value: int | None = None
         self._updating_nodeconfig_editor = False
         self._runtime_packet_window: QObject | None = None
+        self._release_watch_helper = ReleaseWatchHelper(self._bridge)
         self._parameter_definitions = {
             definition.name: definition
             for definition in default_workbook_parameter_definitions()
@@ -778,6 +780,9 @@ class MechanicalPage(BaseWorkspacePage):
         self._refresh_from_selected_node()
         if self._movement_popup is not None:
             self._movement_popup.set_node_options(self._node_entries)
+            self._bind_movement_popup()
+            self._sync_movement_popup_selection_from_page()
+            self._sync_movement_popup_controls()
         self._update_control_states()
 
     def _populate_node_combo(self) -> None:
@@ -809,10 +814,13 @@ class MechanicalPage(BaseWorkspacePage):
         return data if isinstance(data, dict) else None
 
     def _handle_selected_node_changed(self) -> None:
+        self._cancel_release_watch("node_change")
         self._parameter_actual_texts = {}
         self._persistent_write_pending = False
         self._reset_sensor_state()
         self._refresh_from_selected_node()
+        self._sync_movement_popup_selection_from_page()
+        self._sync_movement_popup_controls()
         self._update_control_states()
 
     def _refresh_from_selected_node(self) -> None:
@@ -896,12 +904,211 @@ class MechanicalPage(BaseWorkspacePage):
     def _open_motor_movement_popup(self) -> None:
         if self._movement_popup is None:
             self._movement_popup = MotorMovementControlPopup(self, self._node_entries)
+            self._bind_movement_popup()
         else:
             self._movement_popup.set_node_options(self._node_entries)
+        self._sync_movement_popup_selection_from_page()
+        self._sync_movement_popup_controls()
         self._movement_popup.show()
         self._movement_popup.raise_()
         self._movement_popup.activateWindow()
         self._append_log("Opened Motor Movement Control popup.")
+
+    def _bind_movement_popup(self) -> None:
+        popup = self._movement_popup
+        if popup is None or getattr(popup, "_mechanical_bound", False):
+            return
+        popup.node_combo.currentIndexChanged.connect(self._handle_popup_node_changed)
+        popup.run_positive_button.clicked.connect(self._handle_popup_run_positive_clicked)
+        popup.run_negative_button.clicked.connect(self._handle_popup_run_negative_clicked)
+        popup.stop_button.clicked.connect(self._handle_popup_stop_clicked)
+        popup._mechanical_bound = True
+
+    def _handle_popup_node_changed(self) -> None:
+        node_id = self._popup_selected_node_id()
+        if node_id is not None:
+            self._set_selected_node_id(node_id)
+        self._sync_movement_popup_controls()
+
+    def _handle_popup_run_positive_clicked(self) -> None:
+        popup = self._movement_popup
+        if popup is None:
+            return
+        velocity = abs(int(popup.pwm_input.value()))
+        self._send_popup_run_command(velocity)
+
+    def _handle_popup_run_negative_clicked(self) -> None:
+        popup = self._movement_popup
+        if popup is None:
+            return
+        velocity = -abs(int(popup.pwm_input.value()))
+        self._send_popup_run_command(velocity)
+
+    def _handle_popup_stop_clicked(self) -> None:
+        self._cancel_release_watch("stop")
+        node_id = self._popup_selected_node_id()
+        if node_id is None or not self._has_supported_live_node_id(node_id):
+            self._append_log("[Mechanical] Stop failed: no valid connected Mechanical node is selected.")
+            return
+        self._set_selected_node_id(node_id)
+        adapter = self._ensure_transport_adapter(node_id)
+        if adapter is None:
+            self._append_log("[Mechanical] Stop failed: serial transport is unavailable.")
+            return
+        adapter.send(build_stopmotor())
+        self._append_log(f"[Mechanical] Stop sent for Node {node_id:02d}.")
+
+    def _send_popup_run_command(self, velocity: int) -> None:
+        node_id = self._popup_selected_node_id()
+        if node_id is None or not self._has_supported_live_node_id(node_id):
+            self._append_log("[Mechanical] Run failed: no valid connected Mechanical node is selected.")
+            return
+        self._set_selected_node_id(node_id)
+        adapter = self._ensure_transport_adapter(node_id)
+        if adapter is None:
+            self._append_log("[Mechanical] Run failed: serial transport is unavailable.")
+            return
+        adapter.send(build_run(int(velocity)))
+        direction = "+" if int(velocity) > 0 else "-"
+        self._append_log(f"[Mechanical] Run {direction} sent for Node {node_id:02d} at {abs(int(velocity))}.")
+        self._maybe_start_release_watch_for_run(node_id, int(velocity))
+
+    def _maybe_start_release_watch_for_run(self, node_id: int, velocity: int) -> None:
+        if self._release_watch_helper.is_active:
+            self._append_log(f"[Mechanical] Release-watch skipped for Node {node_id:02d}: duplicate watch already active.")
+            return
+        expected_sensor = self._release_watch_sensor_for_run(node_id, velocity)
+        if expected_sensor is None:
+            return
+        started = self._release_watch_helper.start_release_watch(
+            int(node_id),
+            expected_sensor,
+            lambda payload: self._send_release_watch_query(int(node_id), payload),
+            on_released=self._handle_release_watch_released,
+            on_timeout=self._handle_release_watch_timeout,
+            on_stopped=self._handle_release_watch_stopped,
+        )
+        if started:
+            self._append_log(
+                f"[Mechanical] Release-watch started for Node {int(node_id):02d} sensor {expected_sensor}."
+            )
+
+    def _release_watch_sensor_for_run(self, node_id: int, velocity: int) -> str | None:
+        if velocity == 0:
+            return None
+        interrupt_state = self._runtime_interrupt_state_for_node(node_id)
+        left_cut = interrupt_state.get("left_cut")
+        right_cut = interrupt_state.get("right_cut")
+        if left_cut is None or right_cut is None:
+            self._append_log(f"[Mechanical] Release-watch skipped for Node {node_id:02d}: interrupt state is incomplete.")
+            return None
+        if left_cut is True and right_cut is True:
+            self._append_log(f"[Mechanical] Release-watch skipped for Node {node_id:02d}: both sensors are cut.")
+            return None
+        if left_cut is False and right_cut is False:
+            self._append_log(f"[Mechanical] Release-watch skipped for Node {node_id:02d}: no cut sensor is active.")
+            return None
+
+        polarity = self._bridge.get_runtime_node_motion_polarity(node_id, create_if_missing=False)
+        if not bool(polarity.get("known")):
+            self._append_log(f"[Mechanical] Release-watch skipped for Node {node_id:02d}: NODECONFIG mapping is unknown.")
+            return None
+
+        toward_sensor = polarity.get("positive_run_sensor") if velocity > 0 else polarity.get("negative_run_sensor")
+        if toward_sensor not in {"L", "R"}:
+            self._append_log(f"[Mechanical] Release-watch skipped for Node {node_id:02d}: RUN direction mapping is unknown.")
+            return None
+
+        cut_sensor = "L" if left_cut is True else "R"
+        if toward_sensor == cut_sensor:
+            self._append_log(
+                f"[Mechanical] Release-watch skipped for Node {node_id:02d}: RUN sign moves toward cut sensor {cut_sensor}."
+            )
+            return None
+        return cut_sensor
+
+    def _send_release_watch_query(self, node_id: int, payload: list[int]) -> None:
+        adapter = self._ensure_transport_adapter(int(node_id))
+        if adapter is None:
+            return
+        adapter.send(list(payload))
+
+    def _cancel_release_watch(self, reason: str) -> None:
+        self._release_watch_helper.stop_release_watch(str(reason))
+
+    def _handle_release_watch_released(self, node_id: int, sensor: str) -> None:
+        self._append_log(f"[Mechanical] Release detected for Node {node_id:02d} sensor {sensor}.")
+
+    def _handle_release_watch_timeout(self, node_id: int, sensor: str) -> None:
+        self._append_log(f"[Mechanical] Release-watch timeout for Node {node_id:02d} sensor {sensor}.")
+
+    def _handle_release_watch_stopped(self, node_id: int, sensor: str, reason: str) -> None:
+        if reason in {"released", "timeout"}:
+            return
+        self._append_log(
+            f"[Mechanical] Release-watch cancelled for Node {node_id:02d} sensor {sensor} ({reason})."
+        )
+
+    def _sync_movement_popup_selection_from_page(self) -> None:
+        popup = self._movement_popup
+        node_id = self._selected_node_id()
+        if popup is None or node_id is None:
+            return
+        popup.node_combo.blockSignals(True)
+        try:
+            for index in range(popup.node_combo.count()):
+                data = popup.node_combo.itemData(index)
+                if isinstance(data, dict) and int(data.get("node_id", -1)) == int(node_id):
+                    popup.node_combo.setCurrentIndex(index)
+                    break
+        finally:
+            popup.node_combo.blockSignals(False)
+
+    def _popup_selected_node_id(self) -> int | None:
+        popup = self._movement_popup
+        if popup is None:
+            return None
+        return popup._current_node_id()
+
+    def _set_selected_node_id(self, node_id: int) -> None:
+        current = self._selected_node_id()
+        if current == int(node_id):
+            return
+        self.node_combo.blockSignals(True)
+        try:
+            for index in range(self.node_combo.count()):
+                data = self.node_combo.itemData(index)
+                if isinstance(data, dict) and int(data.get("node_id", -1)) == int(node_id):
+                    self.node_combo.setCurrentIndex(index)
+                    break
+        finally:
+            self.node_combo.blockSignals(False)
+        self._handle_selected_node_changed()
+
+    def _sync_movement_popup_controls(self) -> None:
+        popup = self._movement_popup
+        if popup is None:
+            return
+        enabled = False
+        node_id = self._popup_selected_node_id()
+        if node_id is not None:
+            enabled = self._has_supported_live_node_id(node_id)
+        popup.run_positive_button.setEnabled(enabled)
+        popup.run_negative_button.setEnabled(enabled)
+        popup.stop_button.setEnabled(enabled)
+
+    def _has_supported_live_node_id(self, node_id: int | None) -> bool:
+        if node_id is None or not (MIN_TESTABLE_NODE_ID <= int(node_id) <= MAX_TESTABLE_NODE_ID):
+            return False
+        connected = False
+        if hasattr(self._bridge, "get_runtime_connection_state"):
+            serial_connected, _mcu_connected = self._bridge.get_runtime_connection_state(create_if_missing=False)
+            connected = bool(serial_connected)
+        else:
+            runtime_window = self._bridge.get_runtime_window(create_if_missing=False)
+            backend_client = getattr(runtime_window, "backend_client", None) if runtime_window is not None else None
+            connected = bool(backend_client and backend_client.is_connected())
+        return connected
 
     def _clear_log(self) -> None:
         self.log_output.clear()
@@ -1503,17 +1710,12 @@ class MechanicalPage(BaseWorkspacePage):
     def _reset_sensor_state(self) -> None:
         self._sensor_state_node_id = self._selected_node_id()
         self._sensor_state_cache = {"left": None, "right": None}
-        self._sensor_interrupt_node_id = self._selected_node_id()
-        self._sensor_interrupt_cache = {"left": False, "right": False}
 
     def _render_sensor_state(self) -> None:
         selected_node_id = self._selected_node_id()
         if self._sensor_state_node_id != selected_node_id:
             self._sensor_state_cache = {"left": None, "right": None}
             self._sensor_state_node_id = selected_node_id
-        if self._sensor_interrupt_node_id != selected_node_id:
-            self._sensor_interrupt_cache = {"left": False, "right": False}
-            self._sensor_interrupt_node_id = selected_node_id
         self._apply_sensor_value("left", self.left_flag_led, self.left_flag_state_value, self.left_flag_setting_selector)
         self._apply_sensor_value("right", self.right_flag_led, self.right_flag_state_value, self.right_flag_setting_selector)
 
@@ -1539,11 +1741,28 @@ class MechanicalPage(BaseWorkspacePage):
         return {"text": f"0x{int(raw_value) & 0xFF:02X}"}
 
     def _sensor_led_state(self, side: str) -> dict[str, Any]:
-        is_active = bool(self._sensor_interrupt_cache.get(side, False))
+        interrupt_state = self._selected_runtime_interrupt_state()
+        is_cut = interrupt_state.get(f"{side}_cut")
         return {
-            "color": "#F39C12" if is_active else "#777777",
-            "active": is_active,
+            "color": "#F39C12" if is_cut is True else "#777777",
+            "active": is_cut is True,
+            "known": is_cut is not None,
         }
+
+    def _selected_runtime_interrupt_state(self) -> dict[str, object]:
+        selected_node_id = self._selected_node_id()
+        if selected_node_id is None:
+            return {
+                "left_cut": None,
+                "right_cut": None,
+                "int0": None,
+                "int1": None,
+                "last_source": None,
+            }
+        return self._runtime_interrupt_state_for_node(selected_node_id)
+
+    def _runtime_interrupt_state_for_node(self, node_id: int) -> dict[str, object]:
+        return self._bridge.get_runtime_node_interrupt_state(int(node_id), create_if_missing=False)
 
     def _attach_runtime_packet_listener(self) -> None:
         runtime_window = self._bridge.get_runtime_window(create_if_missing=False)
@@ -1565,27 +1784,24 @@ class MechanicalPage(BaseWorkspacePage):
             return
         selected_node_id = self._selected_node_id()
         sender = packet.get("sender")
-        if selected_node_id is None or sender is None or int(sender) != selected_node_id:
+        if selected_node_id is None or sender is None:
             return
-        key, value = decode_command(int(packet.get("cmd", 0)) & 0xFF, list(packet.get("params") or []))
-        if key != "tpos_status" or not isinstance(value, dict):
+        sender_id = int(sender)
+        if sender_id != selected_node_id:
+            pending = self._pending_request
+            if pending is not None and pending.family == "simple_read":
+                raw_cmd = int(packet.get("cmd", -1))
+                raw_params = [int(value) & 0xFF for value in list(packet.get("params") or [])]
+                raw_hex = " ".join(f"{value:02X}" for value in [raw_cmd, *raw_params])
+                self._append_log(f"ignored packet: node={sender_id}, payload={raw_hex}, reason=wrong node {sender_id}")
             return
-        event = value.get("event")
-        if event == "L":
-            self._set_sensor_interrupt_state("left", True)
-        elif event == "R":
-            self._set_sensor_interrupt_state("right", True)
-        elif event == "Z":
-            cleared_by = value.get("by")
-            if cleared_by == "L":
-                self._set_sensor_interrupt_state("left", False)
-            elif cleared_by == "R":
-                self._set_sensor_interrupt_state("right", False)
+        if int(packet.get("cmd", 0)) & 0xFF not in (0x81, 0xD8):
+            return
+        QTimer.singleShot(0, self._render_sensor_state)
 
-    def _set_sensor_interrupt_state(self, side: str, is_active: bool) -> None:
-        self._sensor_interrupt_node_id = self._selected_node_id()
-        self._sensor_interrupt_cache[side] = bool(is_active)
-        self._render_sensor_state()
+    def closeEvent(self, event) -> None:
+        self._cancel_release_watch("page_closed")
+        super().closeEvent(event)
 
     def _align_top_card_heights(self) -> None:
         equal_height = max(self.node_header_panel.sizeHint().height(), self.sensor_panel.sizeHint().height())

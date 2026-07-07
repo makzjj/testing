@@ -5,6 +5,7 @@ __all__ = [
     "CommunicationLogStore",
     "RuntimePacketEvent",
     "RuntimePacketHandler",
+    "ReleaseWatchHelper",
     "RxLogWriter",
     "SamplingTransportAdapter",
     "build_default_node_status",
@@ -33,6 +34,10 @@ def __getattr__(name: str):
         from .runtime_packet_handler import RuntimePacketHandler
 
         return RuntimePacketHandler
+    if name == "ReleaseWatchHelper":
+        from .release_watch_helper import ReleaseWatchHelper
+
+        return ReleaseWatchHelper
     if name == "RxLogWriter":
         from .rx_log_writer import RxLogWriter
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -276,6 +277,85 @@ class IpqcExcelAdapterTests(unittest.TestCase):
         self.assertIn("+100", layout.raw_labels)
         self.assertIn("-60", layout.raw_labels)
 
+    def test_discover_sampling_layout_rejects_missing_sampling_sheet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template_path = self._create_ipqc_template(tmpdir)
+            workbook = load_workbook(template_path)
+            del workbook["3X_D"]
+            workbook.save(template_path)
+            adapter = IpqcExcelAdapter()
+            adapter.load_template(template_path)
+
+            with self.assertRaisesRegex(ValueError, "Sampling sheet '3X_D' is missing from workbook"):
+                adapter.discover_sampling_layout()
+
+    def test_discover_sampling_layout_rejects_missing_range_section(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template_path = self._create_ipqc_template(tmpdir)
+            workbook = load_workbook(template_path)
+            workbook["3X_D"]["A1"] = ""
+            workbook.save(template_path)
+            adapter = IpqcExcelAdapter()
+            adapter.load_template(template_path)
+
+            with self.assertRaisesRegex(ValueError, "missing required section 'Range'"):
+                adapter.discover_sampling_layout()
+
+    def test_discover_sampling_layout_rejects_missing_speed_section(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template_path = self._create_ipqc_template(tmpdir)
+            workbook = load_workbook(template_path)
+            workbook["3X_D"]["A18"] = ""
+            workbook.save(template_path)
+            adapter = IpqcExcelAdapter()
+            adapter.load_template(template_path)
+
+            with self.assertRaisesRegex(ValueError, "missing required section 'Speed'"):
+                adapter.discover_sampling_layout()
+
+    def test_discover_sampling_layout_rejects_missing_time_section(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template_path = self._create_ipqc_template(tmpdir)
+            workbook = load_workbook(template_path)
+            workbook["3X_D"]["A35"] = ""
+            workbook.save(template_path)
+            adapter = IpqcExcelAdapter()
+            adapter.load_template(template_path)
+
+            with self.assertRaisesRegex(ValueError, "missing required section 'Time'"):
+                adapter.discover_sampling_layout()
+
+    def test_discover_sampling_layout_rejects_missing_pwm_and_sample_labels(self) -> None:
+        cases = [
+            ("A2", "missing label 'PWM 100'"),
+            ("A3", "missing label '+100'"),
+            ("A4", "missing label '-100'"),
+        ]
+        for cell_ref, error_text in cases:
+            with self.subTest(cell_ref=cell_ref):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    template_path = self._create_ipqc_template(tmpdir)
+                    workbook = load_workbook(template_path)
+                    workbook["3X_D"][cell_ref] = ""
+                    workbook.save(template_path)
+                    adapter = IpqcExcelAdapter()
+                    adapter.load_template(template_path)
+
+                    with self.assertRaisesRegex(ValueError, re.escape(error_text)):
+                        adapter.discover_sampling_layout()
+
+    def test_discover_sampling_layout_rejects_formula_in_raw_sample_cell(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template_path = self._create_ipqc_template(tmpdir)
+            workbook = load_workbook(template_path)
+            workbook["3X_D"]["B3"] = "=SUM(B4:B5)"
+            workbook.save(template_path)
+            adapter = IpqcExcelAdapter()
+            adapter.load_template(template_path)
+
+            with self.assertRaisesRegex(ValueError, "raw sample cell 'B3'.*contains a formula"):
+                adapter.discover_sampling_layout()
+
     def test_write_sampling_result_writes_to_sampling_sheet_cells(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             template_path = self._create_ipqc_template(tmpdir)
@@ -294,6 +374,43 @@ class IpqcExcelAdapterTests(unittest.TestCase):
         self.assertEqual(sampling["B3"].value, 512)
         self.assertEqual(sampling["AG20"].value, 123.5)
         self.assertEqual(sampling["E50"].value, 0.456)
+
+    def test_clear_sampling_results_removes_stale_values_for_supported_sample_counts_and_preserves_formulas(self) -> None:
+        for sample_count in (2, 4, 8, 16, 32):
+            with self.subTest(sample_count=sample_count):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    template_path = self._create_ipqc_template(tmpdir)
+                    adapter = IpqcExcelAdapter()
+                    adapter.load_template(template_path)
+                    sampling = adapter._workbook["3X_D"]
+                    for sample_index in range(1, sample_count + 1):
+                        column = adapter.sample_index_to_column(sample_index)
+                        sampling[f"{column}3"] = sample_index
+                        sampling[f"{column}20"] = sample_index * 10
+                        sampling[f"{column}37"] = float(sample_index) / 10.0
+                    if sample_count < 32:
+                        stale_column = adapter.sample_index_to_column(sample_count + 1)
+                        sampling[f"{stale_column}3"] = 999
+                        sampling[f"{stale_column}20"] = 999
+                        sampling[f"{stale_column}37"] = 999.0
+                    sampling["AH3"] = "=SUM(B3:AG3)"
+                    sampling["AH20"] = "=SUM(B20:AG20)"
+                    sampling["AH37"] = "=SUM(B37:AG37)"
+
+                    cleared_cells = adapter.clear_sampling_results()
+                    output_path = Path(tmpdir) / f"cleared_{sample_count}.xlsx"
+                    adapter.save_completed_workbook(output_path)
+                    reloaded = load_workbook(output_path, data_only=False)["3X_D"]
+
+                self.assertEqual(cleared_cells, 3 * 5 * 2 * 32)
+                for sample_index in range(1, 33):
+                    column = adapter.sample_index_to_column(sample_index)
+                    self.assertIsNone(reloaded[f"{column}3"].value)
+                    self.assertIsNone(reloaded[f"{column}20"].value)
+                    self.assertIsNone(reloaded[f"{column}37"].value)
+                self.assertEqual(reloaded["AH3"].value, "=SUM(B3:AG3)")
+                self.assertEqual(reloaded["AH20"].value, "=SUM(B20:AG20)")
+                self.assertEqual(reloaded["AH37"].value, "=SUM(B37:AG37)")
 
     def test_write_programming_parameter_result_writes_row_cells(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

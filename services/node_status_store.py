@@ -17,7 +17,19 @@ def build_default_node_state() -> dict[str, Any]:
         "uuid": "",
         "type": "",
         "interrupt": "",
+        "interrupt_state": build_default_interrupt_state(),
         "info_requested": False,
+    }
+
+
+def build_default_interrupt_state() -> dict[str, Any]:
+    """Create the canonical runtime interrupt-state record for one node."""
+    return {
+        "int0": None,
+        "int1": None,
+        "left_cut": None,
+        "right_cut": None,
+        "last_source": None,
     }
 
 

@@ -487,6 +487,23 @@ class SamplingTestController:
             self.sampling_failed(reason)
             return False
 
+        try:
+            self._adapter.clear_sampling_results(self._base_group)
+        except Exception as exc:
+            reason = f"Sampling workbook raw sample clearing failed: {exc}"
+            self.log_message(f"[Sampling] {reason}")
+            self._latest_terminal_result = self._build_terminal_result(
+                terminal_state=self.S_FAILED,
+                final_status="FAILED",
+                status_text="FAILED",
+                reason=reason,
+                failure_context="-",
+                resume_text="Unavailable - sampling requires a fresh start.",
+                resumable=False,
+            )
+            self.sampling_failed(reason)
+            return False
+
         self._clear_resume_context()
         self._latest_terminal_result = None
         self._run_pwm_values = run_pwm_values

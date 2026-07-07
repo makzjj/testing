@@ -6,8 +6,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from PyQt6.QtCore import QCoreApplication
+
 from services import (
     NodeDiscoveryCoordinator,
+    ReleaseWatchHelper,
     RuntimePacketHandler,
     RxLogWriter,
     build_default_node_status,
@@ -147,6 +150,306 @@ class RuntimePacketHandlerTests(unittest.TestCase):
 
         self.assertTrue(any(event.kind == "emergency_stop" and event.value is True for event in active_events))
         self.assertTrue(any(event.kind == "emergency_stop" and event.value is False for event in released_events))
+
+    def test_tpos_zl_sets_left_cut_and_right_not_cut_for_sender_only(self) -> None:
+        packet = {
+            "status": "ok",
+            "type": "can_over_uart",
+            "sender": 8,
+            "cmd": 0x81,
+            "params": [0x5A, 0x4C],
+        }
+
+        self.handler.handle_packet(packet, self.node_status)
+
+        self.assertTrue(self.node_status[8]["interrupt_state"]["left_cut"])
+        self.assertFalse(self.node_status[8]["interrupt_state"]["right_cut"])
+        self.assertEqual(self.node_status[8]["interrupt_state"]["last_source"], "tpos_cut")
+        self.assertIsNone(self.node_status[7]["interrupt_state"]["left_cut"])
+
+    def test_tpos_zr_sets_right_cut_and_left_not_cut(self) -> None:
+        self.node_status[8]["interrupt_state"]["left_cut"] = True
+        packet = {
+            "status": "ok",
+            "type": "can_over_uart",
+            "sender": 8,
+            "cmd": 0x81,
+            "params": [0x5A, 0x52],
+        }
+
+        self.handler.handle_packet(packet, self.node_status)
+
+        self.assertFalse(self.node_status[8]["interrupt_state"]["left_cut"])
+        self.assertTrue(self.node_status[8]["interrupt_state"]["right_cut"])
+        self.assertEqual(self.node_status[8]["interrupt_state"]["last_source"], "tpos_cut")
+
+    def test_tpos_direct_left_event_sets_left_cut_and_right_not_cut(self) -> None:
+        packet = {
+            "status": "ok",
+            "type": "can_over_uart",
+            "sender": 9,
+            "cmd": 0x81,
+            "params": [0x4C],
+        }
+
+        self.handler.handle_packet(packet, self.node_status)
+
+        self.assertTrue(self.node_status[9]["interrupt_state"]["left_cut"])
+        self.assertFalse(self.node_status[9]["interrupt_state"]["right_cut"])
+
+    def test_tpos_direct_right_event_sets_right_cut_and_left_not_cut(self) -> None:
+        packet = {
+            "status": "ok",
+            "type": "can_over_uart",
+            "sender": 9,
+            "cmd": 0x81,
+            "params": [0x52],
+        }
+
+        self.handler.handle_packet(packet, self.node_status)
+
+        self.assertFalse(self.node_status[9]["interrupt_state"]["left_cut"])
+        self.assertTrue(self.node_status[9]["interrupt_state"]["right_cut"])
+
+    def test_d8_interrupt_response_updates_both_sensor_states_and_raw_int_values(self) -> None:
+        packet = {
+            "status": "ok",
+            "type": "can_over_uart",
+            "sender": 6,
+            "cmd": 0xD8,
+            "params": [0x3A, 0x00, 0x01],
+        }
+
+        self.handler.handle_packet(packet, self.node_status)
+
+        interrupt_state = self.node_status[6]["interrupt_state"]
+        self.assertEqual(interrupt_state["int0"], 0x00)
+        self.assertEqual(interrupt_state["int1"], 0x01)
+        self.assertTrue(interrupt_state["left_cut"])
+        self.assertFalse(interrupt_state["right_cut"])
+        self.assertEqual(interrupt_state["last_source"], "d8_query")
+
+    def test_d8_interrupt_response_updates_right_cut_and_left_not_cut_for_1_0(self) -> None:
+        packet = {
+            "status": "ok",
+            "type": "can_over_uart",
+            "sender": 6,
+            "cmd": 0xD8,
+            "params": [0x3A, 0x01, 0x00],
+        }
+
+        self.handler.handle_packet(packet, self.node_status)
+
+        interrupt_state = self.node_status[6]["interrupt_state"]
+        self.assertEqual(interrupt_state["int0"], 0x01)
+        self.assertEqual(interrupt_state["int1"], 0x00)
+        self.assertFalse(interrupt_state["left_cut"])
+        self.assertTrue(interrupt_state["right_cut"])
+        self.assertEqual(interrupt_state["last_source"], "d8_query")
+
+    def test_nodeconfig_response_is_stored_in_runtime_node_status(self) -> None:
+        packet = {
+            "status": "ok",
+            "type": "can_over_uart",
+            "sender": 6,
+            "cmd": 0xC4,
+            "params": [0x3A, 0x02],
+        }
+
+        self.handler.handle_packet(packet, self.node_status)
+
+        self.assertEqual(self.node_status[6]["nodeconfig"], 0x02)
+
+
+class _ManualTime:
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def __call__(self) -> float:
+        return self.value
+
+    def advance_ms(self, milliseconds: int) -> None:
+        self.value += float(milliseconds) / 1000.0
+
+
+class _FakeReleaseWatchBridge:
+    def __init__(self) -> None:
+        self.connected = True
+        self.state_by_node: dict[int, dict[str, object]] = {}
+
+    def get_runtime_connection_state(self, *, create_if_missing: bool = False) -> tuple[bool, bool]:
+        return self.connected, self.connected
+
+    def get_runtime_node_interrupt_state(self, node_id: int, *, create_if_missing: bool = False) -> dict[str, object]:
+        state = self.state_by_node.get(int(node_id), {})
+        return {
+            "node_id": int(node_id),
+            "int0": state.get("int0"),
+            "int1": state.get("int1"),
+            "left_cut": state.get("left_cut"),
+            "right_cut": state.get("right_cut"),
+            "last_source": state.get("last_source"),
+        }
+
+
+class ReleaseWatchHelperTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._app = QCoreApplication.instance() or QCoreApplication([])
+
+    def setUp(self) -> None:
+        self.bridge = _FakeReleaseWatchBridge()
+        self.clock = _ManualTime()
+        self.sent_payloads: list[list[int]] = []
+        self.released: list[tuple[int, str]] = []
+        self.timed_out: list[tuple[int, str]] = []
+        self.stopped: list[tuple[int, str, str]] = []
+        self.helper = ReleaseWatchHelper(
+            self.bridge,
+            poll_interval_ms=50,
+            timeout_ms=160,
+            time_source=self.clock,
+        )
+
+    def _send_query(self, payload: list[int]) -> None:
+        self.sent_payloads.append(list(payload))
+
+    def _on_released(self, node_id: int, sensor: str) -> None:
+        self.released.append((node_id, sensor))
+
+    def _on_timeout(self, node_id: int, sensor: str) -> None:
+        self.timed_out.append((node_id, sensor))
+
+    def _on_stopped(self, node_id: int, sensor: str, reason: str) -> None:
+        self.stopped.append((node_id, sensor, reason))
+
+    def test_release_watch_starts_with_immediate_d8_query(self) -> None:
+        self.bridge.state_by_node[8] = {"left_cut": True, "right_cut": False}
+
+        started = self.helper.start_release_watch(
+            8,
+            "L",
+            self._send_query,
+            on_released=self._on_released,
+            on_timeout=self._on_timeout,
+            on_stopped=self._on_stopped,
+        )
+
+        self.assertTrue(started)
+        self.assertTrue(self.helper.is_active)
+        self.assertEqual(self.sent_payloads, [[0xD8, 0x3F]])
+        self.assertEqual(self.helper.query_count, 1)
+
+    def test_release_watch_stops_when_runtime_state_shows_release(self) -> None:
+        self.bridge.state_by_node[8] = {"left_cut": True, "right_cut": False}
+        self.helper.start_release_watch(
+            8,
+            "L",
+            self._send_query,
+            on_released=self._on_released,
+            on_timeout=self._on_timeout,
+            on_stopped=self._on_stopped,
+        )
+
+        self.bridge.state_by_node[8]["left_cut"] = False
+        self.bridge.state_by_node[8]["right_cut"] = False
+        self.clock.advance_ms(50)
+        self.helper._handle_poll_tick()
+
+        self.assertFalse(self.helper.is_active)
+        self.assertEqual(self.released, [(8, "L")])
+        self.assertEqual(self.timed_out, [])
+        self.assertEqual(self.stopped, [(8, "L", "released")])
+
+    def test_release_watch_times_out_with_bounded_poll_count(self) -> None:
+        self.bridge.state_by_node[8] = {"left_cut": True, "right_cut": False}
+        self.helper.start_release_watch(
+            8,
+            "L",
+            self._send_query,
+            on_released=self._on_released,
+            on_timeout=self._on_timeout,
+            on_stopped=self._on_stopped,
+        )
+
+        self.clock.advance_ms(50)
+        self.helper._handle_poll_tick()
+        self.clock.advance_ms(50)
+        self.helper._handle_poll_tick()
+        self.clock.advance_ms(60)
+        self.helper._handle_poll_tick()
+
+        self.assertFalse(self.helper.is_active)
+        self.assertEqual(self.released, [])
+        self.assertEqual(self.timed_out, [(8, "L")])
+        self.assertEqual(self.stopped, [(8, "L", "timeout")])
+        self.assertEqual(self.helper.query_count, 3)
+        self.assertEqual(self.sent_payloads, [[0xD8, 0x3F], [0xD8, 0x3F], [0xD8, 0x3F]])
+
+    def test_release_watch_rejects_duplicate_active_session(self) -> None:
+        self.bridge.state_by_node[8] = {"left_cut": True, "right_cut": False}
+        self.assertTrue(self.helper.start_release_watch(8, "L", self._send_query))
+        self.assertFalse(self.helper.start_release_watch(8, "L", self._send_query))
+        self.assertEqual(self.sent_payloads, [[0xD8, 0x3F]])
+
+    def test_release_watch_stop_cancels_future_polling(self) -> None:
+        self.bridge.state_by_node[8] = {"left_cut": True, "right_cut": False}
+        self.helper.start_release_watch(8, "L", self._send_query, on_stopped=self._on_stopped)
+
+        self.assertTrue(self.helper.stop_release_watch("workflow_abort"))
+        self.clock.advance_ms(50)
+        self.helper._handle_poll_tick()
+
+        self.assertFalse(self.helper.is_active)
+        self.assertEqual(self.sent_payloads, [[0xD8, 0x3F]])
+        self.assertEqual(self.stopped, [(8, "L", "workflow_abort")])
+
+    def test_release_watch_stops_on_disconnect(self) -> None:
+        self.bridge.state_by_node[8] = {"left_cut": True, "right_cut": False}
+        self.helper.start_release_watch(8, "L", self._send_query, on_stopped=self._on_stopped)
+        self.bridge.connected = False
+
+        self.clock.advance_ms(50)
+        self.helper._handle_poll_tick()
+
+        self.assertFalse(self.helper.is_active)
+        self.assertEqual(self.stopped, [(8, "L", "disconnect")])
+
+    def test_release_watch_continues_when_watched_sensor_releases_but_opposite_sensor_is_still_cut(self) -> None:
+        self.bridge.state_by_node[8] = {"left_cut": True, "right_cut": True}
+        self.helper.start_release_watch(8, "L", self._send_query, on_released=self._on_released, on_stopped=self._on_stopped)
+
+        self.bridge.state_by_node[8]["left_cut"] = False
+        self.clock.advance_ms(50)
+        self.helper._handle_poll_tick()
+
+        self.assertTrue(self.helper.is_active)
+        self.assertEqual(self.released, [])
+        self.assertEqual(self.sent_payloads, [[0xD8, 0x3F], [0xD8, 0x3F]])
+
+    def test_release_watch_stops_only_when_both_sensors_are_not_cut(self) -> None:
+        self.bridge.state_by_node[8] = {"left_cut": True, "right_cut": True}
+        self.helper.start_release_watch(8, "L", self._send_query, on_released=self._on_released, on_stopped=self._on_stopped)
+
+        self.bridge.state_by_node[8]["left_cut"] = False
+        self.bridge.state_by_node[8]["right_cut"] = False
+        self.clock.advance_ms(50)
+        self.helper._handle_poll_tick()
+
+        self.assertFalse(self.helper.is_active)
+        self.assertEqual(self.released, [(8, "L")])
+        self.assertEqual(self.stopped, [(8, "L", "released")])
+
+    def test_release_watch_continues_when_other_side_is_unknown(self) -> None:
+        self.bridge.state_by_node[8] = {"left_cut": True, "right_cut": None}
+        self.helper.start_release_watch(8, "L", self._send_query, on_released=self._on_released)
+
+        self.bridge.state_by_node[8]["left_cut"] = False
+        self.clock.advance_ms(50)
+        self.helper._handle_poll_tick()
+
+        self.assertTrue(self.helper.is_active)
+        self.assertEqual(self.released, [])
 
 
 class RxLogWriterTests(unittest.TestCase):

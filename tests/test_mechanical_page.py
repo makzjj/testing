@@ -8,6 +8,7 @@ import unittest
 from PyQt6.QtCore import QObject, QPoint, QtMsgType, pyqtSignal, qInstallMessageHandler
 from PyQt6.QtWidgets import QApplication, QCheckBox, QComboBox, QLabel, QLineEdit, QPushButton, QRadioButton, QWidget
 
+from data.binary_cmd_builders import build_run, build_stopmotor
 from gui.workspace.pages.mechanical_page import COUNTS_PER_REV, PRESET_COUNTS, MechanicalPage, MotorMovementControlPopup
 from gui.workspace.pages.production_parameter_controller import (
     EEPROM_SAVE_COMMAND,
@@ -52,6 +53,35 @@ class _FakeRuntimeWindow(QObject):
     def __init__(self, *, connected: bool = True) -> None:
         super().__init__()
         self.backend_client = _FakeBackendClient(connected=connected)
+        self.node_status = {
+            6: {
+                "interrupt_state": {
+                    "int0": None,
+                    "int1": None,
+                    "left_cut": None,
+                    "right_cut": None,
+                    "last_source": None,
+                }
+            },
+            8: {
+                "interrupt_state": {
+                    "int0": None,
+                    "int1": None,
+                    "left_cut": None,
+                    "right_cut": None,
+                    "last_source": None,
+                }
+            },
+            9: {
+                "interrupt_state": {
+                    "int0": None,
+                    "int1": None,
+                    "left_cut": None,
+                    "right_cut": None,
+                    "last_source": None,
+                }
+            }
+        }
 
 
 class _FakeBridge:
@@ -71,6 +101,18 @@ class _FakeBridge:
                         "ramp_down_min_velocity": 28,
                         "ramp_down_target_offset": 38,
                         "ramp_down_region": 48,
+                    },
+                    "pz": {
+                        "node_id": 9,
+                        "node_config": "0010",
+                        "pos_kp": 0.9,
+                        "pos_ki": 0.45,
+                        "pos_kd": 0.2,
+                        "ramp_down_slope": 9,
+                        "ramp_down_step": 19,
+                        "ramp_down_min_velocity": 29,
+                        "ramp_down_target_offset": 39,
+                        "ramp_down_region": 49,
                     },
                     "rz": {
                         "node_id": 8,
@@ -97,22 +139,177 @@ class _FakeBridge:
         connected = self.runtime_window.backend_client.is_connected()
         return connected, connected
 
+    def get_runtime_node_interrupt_state(self, node_id: int, *, create_if_missing: bool = False) -> dict[str, object]:
+        if self.runtime_window is None:
+            return {
+                "node_id": int(node_id),
+                "int0": None,
+                "int1": None,
+                "left_cut": None,
+                "right_cut": None,
+                "last_source": None,
+                "left_state": "unknown",
+                "right_state": "unknown",
+            }
+        state = self.runtime_window.node_status.get(int(node_id), {}).get("interrupt_state", {})
+        left_cut = state.get("left_cut")
+        right_cut = state.get("right_cut")
+        return {
+            "node_id": int(node_id),
+            "int0": state.get("int0"),
+            "int1": state.get("int1"),
+            "left_cut": left_cut,
+            "right_cut": right_cut,
+            "last_source": state.get("last_source"),
+            "left_state": "cut" if left_cut is True else "not_cut" if left_cut is False else "unknown",
+            "right_state": "cut" if right_cut is True else "not_cut" if right_cut is False else "unknown",
+        }
+
+    def get_runtime_node_motion_polarity(self, node_id: int, *, create_if_missing: bool = False) -> dict[str, object]:
+        node_id = int(node_id)
+        if node_id == 6:
+            return {
+                "node_id": 6,
+                "known": True,
+                "source": "config",
+                "nodeconfig_raw": 0x00,
+                "home_sensor": "L",
+                "opposite_sensor": "R",
+                "hunting_sign": -1,
+                "outward_sign": 1,
+                "return_home_sign": -1,
+                "negative_run_sensor": "L",
+                "positive_run_sensor": "R",
+            }
+        if node_id == 8:
+            return {
+                "node_id": 8,
+                "known": True,
+                "source": "config",
+                "nodeconfig_raw": 0x02,
+                "home_sensor": "L",
+                "opposite_sensor": "R",
+                "hunting_sign": 1,
+                "outward_sign": -1,
+                "return_home_sign": 1,
+                "negative_run_sensor": "R",
+                "positive_run_sensor": "L",
+            }
+        if node_id == 9:
+            return {
+                "node_id": 9,
+                "known": True,
+                "source": "config",
+                "nodeconfig_raw": 0x02,
+                "home_sensor": "L",
+                "opposite_sensor": "R",
+                "hunting_sign": 1,
+                "outward_sign": -1,
+                "return_home_sign": 1,
+                "negative_run_sensor": "R",
+                "positive_run_sensor": "L",
+            }
+        return {
+            "node_id": node_id,
+            "known": False,
+            "source": None,
+            "nodeconfig_raw": None,
+            "home_sensor": None,
+            "opposite_sensor": None,
+            "hunting_sign": None,
+            "outward_sign": None,
+            "return_home_sign": None,
+            "negative_run_sensor": None,
+            "positive_run_sensor": None,
+        }
+
+
+class _FakeReleaseWatchHelper:
+    def __init__(self) -> None:
+        self.is_active = False
+        self.start_calls: list[tuple[int, str]] = []
+        self.stop_calls: list[str] = []
+        self.sent_queries: list[list[int]] = []
+        self._on_released = None
+        self._on_timeout = None
+        self._on_stopped = None
+        self._node_id: int | None = None
+        self._sensor: str | None = None
+
+    def start_release_watch(
+        self,
+        node_id: int,
+        expected_sensor: str,
+        send_query,
+        *,
+        on_released=None,
+        on_timeout=None,
+        on_stopped=None,
+    ) -> bool:
+        if self.is_active:
+            return False
+        self.is_active = True
+        self.start_calls.append((int(node_id), str(expected_sensor)))
+        self._node_id = int(node_id)
+        self._sensor = str(expected_sensor)
+        self._on_released = on_released
+        self._on_timeout = on_timeout
+        self._on_stopped = on_stopped
+        send_query([0xD8, 0x3F])
+        self.sent_queries.append([0xD8, 0x3F])
+        return True
+
+    def stop_release_watch(self, reason: str = "cancelled") -> bool:
+        if not self.is_active:
+            return False
+        self.is_active = False
+        self.stop_calls.append(str(reason))
+        if self._on_stopped is not None and self._node_id is not None and self._sensor is not None:
+            self._on_stopped(self._node_id, self._sensor, str(reason))
+        return True
+
+    def trigger_released(self) -> None:
+        if self._on_released is None or self._node_id is None or self._sensor is None:
+            return
+        self.is_active = False
+        if self._on_stopped is not None:
+            self._on_stopped(self._node_id, self._sensor, "released")
+        self._on_released(self._node_id, self._sensor)
+
+    def trigger_timeout(self) -> None:
+        if self._on_timeout is None or self._node_id is None or self._sensor is None:
+            return
+        self.is_active = False
+        if self._on_stopped is not None:
+            self._on_stopped(self._node_id, self._sensor, "timeout")
+        self._on_timeout(self._node_id, self._sensor)
+
 
 class MechanicalPageTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls._app = QApplication.instance() or QApplication([])
 
-    def _build_connected_page(self) -> tuple[MechanicalPage, _FakeRuntimeWindow]:
+    def _build_connected_page(self, *, node_id: int = 8) -> tuple[MechanicalPage, _FakeRuntimeWindow]:
         runtime_window = _FakeRuntimeWindow(connected=True)
         page = MechanicalPage(_FakeBridge(runtime_window))
         page.resize(1440, 980)
         page.show()
         node_combo = page.findChild(QComboBox, "MechanicalNodeCombo")
         assert node_combo is not None
-        node_combo.setCurrentIndex(5)
+        node_combo.setCurrentIndex(int(node_id) - 3)
         self._app.processEvents()
         return page, runtime_window
+
+    def _open_connected_popup(self, *, node_id: int = 8) -> tuple[MechanicalPage, _FakeRuntimeWindow, MotorMovementControlPopup]:
+        page, runtime_window = self._build_connected_page(node_id=node_id)
+        open_button = page.findChild(QPushButton, "MechanicalOpenMotorMovementControlButton")
+        assert open_button is not None
+        open_button.click()
+        self._app.processEvents()
+        popup = page._movement_popup
+        assert popup is not None
+        return page, runtime_window, popup
 
     def _build_center_viewport_page(self, *, connected: bool = False) -> tuple[MechanicalPage, _FakeRuntimeWindow | None]:
         runtime_window = _FakeRuntimeWindow(connected=True) if connected else None
@@ -1136,49 +1333,84 @@ class MechanicalPageTests(unittest.TestCase):
         self.assertIn("#777777", right_led.styleSheet())
 
     def test_sensor_led_mapping_uses_runtime_interrupt_state_only(self) -> None:
-        page = MechanicalPage(_FakeBridge())
+        page, runtime_window = self._build_connected_page()
         self.assertEqual(page._sensor_display_from_raw(0x09)["text"], "0x09")
         self.assertEqual(page._sensor_display_from_raw(0x01)["text"], "0x01")
         self.assertEqual(page._sensor_display_from_raw(None)["text"], "unknown")
         self.assertFalse(page._sensor_led_state("left")["active"])
         self.assertEqual(page._sensor_led_state("left")["color"], "#777777")
 
-        page._sensor_interrupt_cache["left"] = True
+        runtime_window.node_status[8]["interrupt_state"]["left_cut"] = True
         self.assertTrue(page._sensor_led_state("left")["active"])
         self.assertEqual(page._sensor_led_state("left")["color"], "#F39C12")
 
-    def test_runtime_left_interrupt_event_lights_only_left_led_and_reset_clears_it(self) -> None:
+    def test_runtime_left_interrupt_state_lights_only_left_led(self) -> None:
         page, runtime_window = self._build_connected_page()
         left_led = page.findChild(QLabel, "MechanicalLeftFlagLed")
         right_led = page.findChild(QLabel, "MechanicalRightFlagLed")
         assert left_led is not None
         assert right_led is not None
 
-        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": 0x81, "params": [ord("L")]})
+        runtime_window.node_status[8]["interrupt_state"].update(
+            {"left_cut": True, "right_cut": False, "last_source": "tpos_cut"}
+        )
+        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": 0x81, "params": [0x5A, 0x4C]})
         self._app.processEvents()
         self.assertIn("#F39C12", left_led.styleSheet())
         self.assertIn("#777777", right_led.styleSheet())
 
-        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": 0x81, "params": [ord("Z"), ord("L")]})
-        self._app.processEvents()
-        self.assertIn("#777777", left_led.styleSheet())
-        self.assertIn("#777777", right_led.styleSheet())
-
-    def test_runtime_right_interrupt_event_lights_only_right_led_and_reset_clears_it(self) -> None:
+    def test_runtime_right_interrupt_state_lights_only_right_led(self) -> None:
         page, runtime_window = self._build_connected_page()
         left_led = page.findChild(QLabel, "MechanicalLeftFlagLed")
         right_led = page.findChild(QLabel, "MechanicalRightFlagLed")
         assert left_led is not None
         assert right_led is not None
 
-        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": 0x81, "params": [ord("R")]})
+        runtime_window.node_status[8]["interrupt_state"].update(
+            {"left_cut": False, "right_cut": True, "last_source": "tpos_cut"}
+        )
+        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": 0x81, "params": [0x5A, 0x52]})
         self._app.processEvents()
         self.assertIn("#777777", left_led.styleSheet())
         self.assertIn("#F39C12", right_led.styleSheet())
 
-        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": 0x81, "params": [ord("Z"), ord("R")]})
+    def test_runtime_right_interrupt_state_from_unknown_does_not_block_right_led_display(self) -> None:
+        page, runtime_window = self._build_connected_page()
+        left_led = page.findChild(QLabel, "MechanicalLeftFlagLed")
+        right_led = page.findChild(QLabel, "MechanicalRightFlagLed")
+        assert left_led is not None
+        assert right_led is not None
+
+        runtime_window.node_status[8]["interrupt_state"].update(
+            {"left_cut": False, "right_cut": True, "last_source": "tpos_cut"}
+        )
+        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": 0x81, "params": [0x52]})
         self._app.processEvents()
+
         self.assertIn("#777777", left_led.styleSheet())
+        self.assertIn("#F39C12", right_led.styleSheet())
+
+    def test_d8_runtime_state_preserves_other_side_and_updates_leds(self) -> None:
+        page, runtime_window = self._build_connected_page()
+        left_led = page.findChild(QLabel, "MechanicalLeftFlagLed")
+        right_led = page.findChild(QLabel, "MechanicalRightFlagLed")
+        assert left_led is not None
+        assert right_led is not None
+
+        runtime_window.node_status[8]["interrupt_state"].update(
+            {"left_cut": True, "right_cut": False, "int0": 0, "int1": 1, "last_source": "tpos_cut"}
+        )
+        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": 0x81, "params": [0x5A, 0x4C]})
+        self._app.processEvents()
+        self.assertIn("#F39C12", left_led.styleSheet())
+        self.assertIn("#777777", right_led.styleSheet())
+
+        runtime_window.node_status[8]["interrupt_state"].update(
+            {"left_cut": True, "right_cut": False, "int0": 0, "int1": 1, "last_source": "d8_query"}
+        )
+        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": 0xD8, "params": [0x3A, 0x00, 0x01]})
+        self._app.processEvents()
+        self.assertIn("#F39C12", left_led.styleSheet())
         self.assertIn("#777777", right_led.styleSheet())
 
     def test_pwm_write_performs_ack_then_readback_without_enabling_eeprom(self) -> None:
@@ -1561,6 +1793,263 @@ class MechanicalPageTests(unittest.TestCase):
         direction_combo.setCurrentText("Negative")
         self._app.processEvents()
         self.assertEqual(relative_value.text(), f"-{COUNTS_PER_REV}")
+
+    def test_popup_run_positive_starts_release_watch_for_l_cut_when_nodeconfig_maps_positive_away_from_l(self) -> None:
+        page, runtime_window, popup = self._open_connected_popup(node_id=6)
+        fake_helper = _FakeReleaseWatchHelper()
+        page._release_watch_helper = fake_helper
+        runtime_window.node_status[6]["interrupt_state"].update({"left_cut": True, "right_cut": False})
+
+        popup.run_positive_button.click()
+        self._app.processEvents()
+
+        self.assertEqual(runtime_window.backend_client.sent_commands[0], (6, build_run(100)))
+        self.assertEqual(runtime_window.backend_client.sent_commands[1], (6, [0xD8, 0x3F]))
+        self.assertEqual(fake_helper.start_calls, [(6, "L")])
+        self.assertIn("Release-watch started", page.log_output.toPlainText())
+
+    def test_popup_run_negative_starts_release_watch_for_l_cut_when_nodeconfig_maps_negative_away_from_l(self) -> None:
+        page, runtime_window, popup = self._open_connected_popup(node_id=8)
+        fake_helper = _FakeReleaseWatchHelper()
+        page._release_watch_helper = fake_helper
+        runtime_window.node_status[8]["interrupt_state"].update({"left_cut": True, "right_cut": False})
+
+        popup.run_negative_button.click()
+        self._app.processEvents()
+
+        self.assertEqual(runtime_window.backend_client.sent_commands[0], (8, build_run(-100)))
+        self.assertEqual(runtime_window.backend_client.sent_commands[1], (8, [0xD8, 0x3F]))
+        self.assertEqual(fake_helper.start_calls, [(8, "L")])
+
+    def test_popup_run_positive_does_not_start_release_watch_for_l_cut_when_nodeconfig_maps_positive_toward_l(self) -> None:
+        page, runtime_window, popup = self._open_connected_popup(node_id=8)
+        fake_helper = _FakeReleaseWatchHelper()
+        page._release_watch_helper = fake_helper
+        runtime_window.node_status[8]["interrupt_state"].update({"left_cut": True, "right_cut": False})
+
+        popup.run_positive_button.click()
+        self._app.processEvents()
+
+        self.assertEqual(runtime_window.backend_client.sent_commands, [(8, build_run(100))])
+        self.assertEqual(fake_helper.start_calls, [])
+
+    def test_popup_run_negative_does_not_start_release_watch_for_l_cut_when_nodeconfig_maps_negative_toward_l(self) -> None:
+        page, runtime_window, popup = self._open_connected_popup(node_id=6)
+        fake_helper = _FakeReleaseWatchHelper()
+        page._release_watch_helper = fake_helper
+        runtime_window.node_status[6]["interrupt_state"].update({"left_cut": True, "right_cut": False})
+
+        popup.run_negative_button.click()
+        self._app.processEvents()
+
+        self.assertEqual(runtime_window.backend_client.sent_commands, [(6, build_run(-100))])
+        self.assertEqual(fake_helper.start_calls, [])
+
+    def test_popup_run_does_not_start_release_watch_without_cut_sensor(self) -> None:
+        page, runtime_window, popup = self._open_connected_popup()
+        fake_helper = _FakeReleaseWatchHelper()
+        page._release_watch_helper = fake_helper
+        runtime_window.node_status[8]["interrupt_state"].update({"left_cut": False, "right_cut": False})
+
+        popup.run_positive_button.click()
+        self._app.processEvents()
+
+        self.assertEqual(runtime_window.backend_client.sent_commands, [(8, build_run(100))])
+        self.assertEqual(fake_helper.start_calls, [])
+
+    def test_popup_run_does_not_start_release_watch_when_interrupt_state_is_unknown(self) -> None:
+        page, runtime_window, popup = self._open_connected_popup()
+        fake_helper = _FakeReleaseWatchHelper()
+        page._release_watch_helper = fake_helper
+        runtime_window.node_status[8]["interrupt_state"].update({"left_cut": None, "right_cut": None})
+
+        popup.run_positive_button.click()
+        self._app.processEvents()
+
+        self.assertEqual(runtime_window.backend_client.sent_commands, [(8, build_run(100))])
+        self.assertEqual(fake_helper.start_calls, [])
+        self.assertIn("interrupt state is incomplete", page.log_output.toPlainText())
+
+    def test_popup_run_toward_cut_sensor_does_not_start_release_watch(self) -> None:
+        page, runtime_window, popup = self._open_connected_popup(node_id=8)
+        fake_helper = _FakeReleaseWatchHelper()
+        page._release_watch_helper = fake_helper
+        runtime_window.node_status[8]["interrupt_state"].update({"left_cut": True, "right_cut": False})
+
+        popup.run_positive_button.click()
+        self._app.processEvents()
+
+        self.assertEqual(runtime_window.backend_client.sent_commands, [(8, build_run(100))])
+        self.assertEqual(fake_helper.start_calls, [])
+
+    def test_popup_run_skips_release_watch_when_both_sensors_are_cut(self) -> None:
+        page, runtime_window, popup = self._open_connected_popup()
+        fake_helper = _FakeReleaseWatchHelper()
+        page._release_watch_helper = fake_helper
+        runtime_window.node_status[8]["interrupt_state"].update({"left_cut": True, "right_cut": True})
+
+        popup.run_negative_button.click()
+        self._app.processEvents()
+
+        self.assertEqual(runtime_window.backend_client.sent_commands, [(8, build_run(-100))])
+        self.assertEqual(fake_helper.start_calls, [])
+        self.assertIn("both sensors are cut", page.log_output.toPlainText())
+
+    def test_popup_run_skips_release_watch_when_nodeconfig_mapping_is_unknown(self) -> None:
+        page, runtime_window, popup = self._open_connected_popup(node_id=6)
+        fake_helper = _FakeReleaseWatchHelper()
+        page._release_watch_helper = fake_helper
+        page._bridge.get_runtime_node_motion_polarity = lambda node_id, create_if_missing=False: {  # type: ignore[method-assign]
+            "node_id": int(node_id),
+            "known": False,
+            "source": None,
+        }
+        runtime_window.node_status[6]["interrupt_state"].update({"left_cut": True, "right_cut": False})
+
+        popup.run_positive_button.click()
+        self._app.processEvents()
+
+        self.assertEqual(runtime_window.backend_client.sent_commands, [(6, build_run(100))])
+        self.assertEqual(fake_helper.start_calls, [])
+        self.assertIn("NODECONFIG mapping is unknown", page.log_output.toPlainText())
+
+    def test_popup_run_away_from_right_cut_starts_release_watch_when_polarity_confirms_it(self) -> None:
+        page, runtime_window, popup = self._open_connected_popup()
+        fake_helper = _FakeReleaseWatchHelper()
+        page._release_watch_helper = fake_helper
+        runtime_window.node_status[8]["interrupt_state"].update({"left_cut": False, "right_cut": True})
+        page._bridge.get_runtime_node_motion_polarity = lambda node_id, create_if_missing=False: {  # type: ignore[method-assign]
+            "node_id": int(node_id),
+            "known": True,
+            "source": "runtime",
+            "nodeconfig_raw": 0x01,
+            "home_sensor": "R",
+            "opposite_sensor": "L",
+            "hunting_sign": -1,
+            "outward_sign": 1,
+            "return_home_sign": -1,
+            "negative_run_sensor": "R",
+            "positive_run_sensor": "L",
+        }
+
+        popup.run_positive_button.click()
+        self._app.processEvents()
+
+        self.assertEqual(runtime_window.backend_client.sent_commands[0], (8, build_run(100)))
+        self.assertEqual(runtime_window.backend_client.sent_commands[1], (8, [0xD8, 0x3F]))
+        self.assertEqual(fake_helper.start_calls, [(8, "R")])
+
+    def test_node9_binary_nodeconfig_allows_tpos_left_cut_then_run_negative_to_start_release_watch(self) -> None:
+        page, runtime_window, popup = self._open_connected_popup(node_id=9)
+        fake_helper = _FakeReleaseWatchHelper()
+        page._release_watch_helper = fake_helper
+        runtime_window.node_status[9]["interrupt_state"].update({"left_cut": True, "right_cut": False})
+
+        popup.run_negative_button.click()
+        self._app.processEvents()
+
+        self.assertEqual(runtime_window.backend_client.sent_commands[0], (9, build_run(-100)))
+        self.assertEqual(runtime_window.backend_client.sent_commands[1], (9, [0xD8, 0x3F]))
+        self.assertEqual(fake_helper.start_calls, [(9, "L")])
+
+    def test_popup_run_does_not_start_release_watch_when_send_path_is_unavailable(self) -> None:
+        page, _runtime_window, popup = self._open_connected_popup()
+        fake_helper = _FakeReleaseWatchHelper()
+        page._release_watch_helper = fake_helper
+        page._ensure_transport_adapter = lambda node_id: None  # type: ignore[method-assign]
+
+        popup.run_positive_button.click()
+        self._app.processEvents()
+
+        self.assertEqual(fake_helper.start_calls, [])
+        self.assertIn("serial transport is unavailable", page.log_output.toPlainText())
+
+    def test_popup_run_does_not_start_release_watch_without_selected_node(self) -> None:
+        page, _runtime_window, popup = self._open_connected_popup()
+        fake_helper = _FakeReleaseWatchHelper()
+        page._release_watch_helper = fake_helper
+        page._popup_selected_node_id = lambda: None  # type: ignore[method-assign]
+
+        page._handle_popup_run_positive_clicked()
+        self._app.processEvents()
+
+        self.assertEqual(fake_helper.start_calls, [])
+        self.assertIn("no valid connected Mechanical node is selected", page.log_output.toPlainText())
+
+    def test_popup_duplicate_run_does_not_create_overlapping_release_watch(self) -> None:
+        page, runtime_window, popup = self._open_connected_popup(node_id=6)
+        fake_helper = _FakeReleaseWatchHelper()
+        page._release_watch_helper = fake_helper
+        runtime_window.node_status[6]["interrupt_state"].update({"left_cut": True, "right_cut": False})
+
+        popup.run_positive_button.click()
+        popup.run_positive_button.click()
+        self._app.processEvents()
+
+        self.assertEqual(fake_helper.start_calls, [(6, "L")])
+        self.assertEqual(runtime_window.backend_client.sent_commands[0], (6, build_run(100)))
+        self.assertEqual(runtime_window.backend_client.sent_commands[2], (6, build_run(100)))
+
+    def test_release_watch_release_callback_logs_completion(self) -> None:
+        page, runtime_window, popup = self._open_connected_popup(node_id=6)
+        fake_helper = _FakeReleaseWatchHelper()
+        page._release_watch_helper = fake_helper
+        runtime_window.node_status[6]["interrupt_state"].update({"left_cut": True, "right_cut": False})
+
+        popup.run_positive_button.click()
+        self._app.processEvents()
+        fake_helper.trigger_released()
+
+        self.assertIn("Release detected for Node 06 sensor L.", page.log_output.toPlainText())
+
+    def test_release_watch_timeout_callback_logs_timeout(self) -> None:
+        page, runtime_window, popup = self._open_connected_popup(node_id=6)
+        fake_helper = _FakeReleaseWatchHelper()
+        page._release_watch_helper = fake_helper
+        runtime_window.node_status[6]["interrupt_state"].update({"left_cut": True, "right_cut": False})
+
+        popup.run_positive_button.click()
+        self._app.processEvents()
+        fake_helper.trigger_timeout()
+
+        self.assertIn("Release-watch timeout for Node 06 sensor L.", page.log_output.toPlainText())
+
+    def test_popup_stop_cancels_release_watch_and_sends_stopmotor(self) -> None:
+        page, runtime_window, popup = self._open_connected_popup(node_id=6)
+        fake_helper = _FakeReleaseWatchHelper()
+        page._release_watch_helper = fake_helper
+        runtime_window.node_status[6]["interrupt_state"].update({"left_cut": True, "right_cut": False})
+
+        popup.run_positive_button.click()
+        self._app.processEvents()
+        popup.stop_button.click()
+        self._app.processEvents()
+
+        self.assertIn("stop", fake_helper.stop_calls)
+        self.assertEqual(runtime_window.backend_client.sent_commands[-1], (6, build_stopmotor()))
+
+    def test_selected_node_change_cancels_active_release_watch(self) -> None:
+        page, runtime_window, popup = self._open_connected_popup(node_id=6)
+        fake_helper = _FakeReleaseWatchHelper()
+        page._release_watch_helper = fake_helper
+        runtime_window.node_status[6]["interrupt_state"].update({"left_cut": True, "right_cut": False})
+
+        popup.run_positive_button.click()
+        self._app.processEvents()
+
+        node_combo = page.findChild(QComboBox, "MechanicalNodeCombo")
+        assert node_combo is not None
+        node_combo.setCurrentIndex(4)
+        self._app.processEvents()
+
+        self.assertIn("node_change", fake_helper.stop_calls)
+
+    def test_popup_run_buttons_enable_for_connected_selected_node(self) -> None:
+        page, _runtime_window, popup = self._open_connected_popup()
+
+        self.assertTrue(popup.run_positive_button.isEnabled())
+        self.assertTrue(popup.run_negative_button.isEnabled())
+        self.assertTrue(popup.stop_button.isEnabled())
 
 
 if __name__ == "__main__":

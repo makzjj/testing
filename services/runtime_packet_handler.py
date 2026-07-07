@@ -8,7 +8,7 @@ from typing import Any
 from data.binary_cmd_parser import decode_command, parse_comm_stats, parse_get_interrupt
 from myconfig.constants import BCMD_COMM_STATS, BCMD_COMM_TEST_FRAME, BCMD_GET_MCU_VERSION, BCMD_GET_NODE_ID
 
-from .node_status_store import ensure_node_status
+from .node_status_store import build_default_interrupt_state, ensure_node_status
 
 BCMD_COMM_TEST_FINISHED = 0xBD
 
@@ -100,6 +100,8 @@ class RuntimePacketHandler:
             decoded_value = packet.get("decoded_value")
             if decoded_key and decoded_value:
                 node_record[decoded_key] = decoded_value
+                if decoded_key == "tpos_status":
+                    self._handle_tpos_interrupt_state(node_record, decoded_value)
                 if decoded_key != "tpos":
                     events.append(RuntimePacketEvent("log", message=f"Decoded [{decoded_key}] = {decoded_value}"))
 
@@ -111,6 +113,8 @@ class RuntimePacketHandler:
 
             if key and key != decoded_key:
                 node_record[key] = value
+                if key == "tpos_status":
+                    self._handle_tpos_interrupt_state(node_record, value)
                 if key not in ("tpos", "sys_mode"):
                     events.append(RuntimePacketEvent("log", message=f"Decoded [{key}] = {value}"))
 
@@ -152,6 +156,7 @@ class RuntimePacketHandler:
         if isinstance(interrupt_data, dict) and "text" in interrupt_data:
             node_record["interrupt"] = interrupt_data["text"]
             node_record["interrupt_data"] = interrupt_data
+            self._update_interrupt_state_from_d8(node_record, params, interrupt_data)
             events.append(RuntimePacketEvent("log", message=f"✅ Interrupt status for Node {node_id}: {interrupt_data['text']}"))
             return
 
@@ -205,6 +210,52 @@ class RuntimePacketHandler:
                 events.append(RuntimePacketEvent("emergency_stop", node_id=0x01, value=emergency_state))
 
         return events
+
+    @staticmethod
+    def _interrupt_state_record(node_record: dict[str, Any]) -> dict[str, Any]:
+        interrupt_state = node_record.get("interrupt_state")
+        if not isinstance(interrupt_state, dict):
+            interrupt_state = build_default_interrupt_state()
+            node_record["interrupt_state"] = interrupt_state
+        return interrupt_state
+
+    def _update_interrupt_state_from_d8(
+        self,
+        node_record: dict[str, Any],
+        params: list[int],
+        interrupt_data: dict[str, Any],
+    ) -> None:
+        interrupt_state = self._interrupt_state_record(node_record)
+        interrupt_state["int0"] = int(params[1]) & 0xFF if len(params) >= 2 else None
+        interrupt_state["int1"] = int(params[2]) & 0xFF if len(params) >= 3 else None
+        if "left_ok" in interrupt_data:
+            interrupt_state["left_cut"] = not bool(interrupt_data["left_ok"])
+        if "right_ok" in interrupt_data:
+            interrupt_state["right_cut"] = not bool(interrupt_data["right_ok"])
+        interrupt_state["last_source"] = "d8_query"
+
+    def _handle_tpos_interrupt_state(self, node_record: dict[str, Any], decoded_value: Any) -> None:
+        if not isinstance(decoded_value, dict):
+            return
+        interrupt_state = self._interrupt_state_record(node_record)
+        event = decoded_value.get("event")
+        cut_sensor: str | None = None
+        if event == "Z":
+            by = decoded_value.get("by")
+            if by in {"L", "R"}:
+                cut_sensor = str(by)
+        elif event in {"L", "R"}:
+            cut_sensor = str(event)
+
+        if cut_sensor == "L":
+            interrupt_state["left_cut"] = True
+            interrupt_state["right_cut"] = False
+        elif cut_sensor == "R":
+            interrupt_state["right_cut"] = True
+            interrupt_state["left_cut"] = False
+        else:
+            return
+        interrupt_state["last_source"] = "tpos_cut"
 
     @staticmethod
     def _decode_emergency_stop_state(params: list[int]) -> bool | None:

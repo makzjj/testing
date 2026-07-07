@@ -301,6 +301,39 @@ class SamplingControllerTests(unittest.TestCase):
             controller.handle_runtime_packet([0x84, 0x53, 0x00, 0x50])
             self.assertIn("HOME_WAIT_TPOS", controller.states)
 
+    def test_sampling_start_clears_stale_raw_cells_before_new_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            adapter = self._build_adapter(tmpdir)
+            sampling_sheet = adapter._workbook["3X_D"]
+            sampling_sheet["B3"] = 111
+            sampling_sheet["C3"] = 222
+            sampling_sheet["D3"] = 333
+            sampling_sheet["B20"] = 11.1
+            sampling_sheet["C20"] = 22.2
+            sampling_sheet["D20"] = 33.3
+            sampling_sheet["B37"] = 0.111
+            sampling_sheet["C37"] = 0.222
+            sampling_sheet["D37"] = 0.333
+            sampling_sheet["AH3"] = "=SUM(B3:AG3)"
+            controller = _RecordingSamplingController(
+                adapter,
+                SamplingTestConfig(home_velocity=-190, pwm_values=(100,), samples_per_direction=2),
+                _SamplingManualClock([0.0]),
+            )
+
+            self.assertTrue(controller.start(8, "RZ"))
+
+            self.assertIsNone(sampling_sheet["B3"].value)
+            self.assertIsNone(sampling_sheet["C3"].value)
+            self.assertIsNone(sampling_sheet["D3"].value)
+            self.assertIsNone(sampling_sheet["B20"].value)
+            self.assertIsNone(sampling_sheet["C20"].value)
+            self.assertIsNone(sampling_sheet["D20"].value)
+            self.assertIsNone(sampling_sheet["B37"].value)
+            self.assertIsNone(sampling_sheet["C37"].value)
+            self.assertIsNone(sampling_sheet["D37"].value)
+            self.assertEqual(sampling_sheet["AH3"].value, "=SUM(B3:AG3)")
+
     def test_sampling_resume_from_abort_or_timeout_rehomes_to_first_pwm_sample(self) -> None:
         cases = [
             {
