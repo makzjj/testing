@@ -16,7 +16,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton
 
-from gui.workspace.pages.production_page import ProductionPage, _SamplingSession
+from gui.workspace.pages.production_page import ProductionPage, ProductionWorkbookWorkflowPhase, _SamplingSession
 from gui.workspace.dialogs.sampling_test_popup import SamplingTestPopup
 from gui.workspace.pages.single_axis_functional_popup import SingleAxisFunctionalPopup
 from gui.workspace.controllers.single_axis_functional_test_controller import (
@@ -898,7 +898,12 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             page._handle_write_uuid()
             self._app.processEvents()
             self.assertEqual(runtime_window.backend_client.sent_commands[0][1][0], 0xE0)
+            self.assertIs(page._workbook_workflow_phase, ProductionWorkbookWorkflowPhase.WRITING_PERSISTENT)
             self.assertTrue(page._workbook_parameter_write_pending)
+            sent_before_verify = len(runtime_window.backend_client.sent_commands)
+            page._handle_verify_uuid()
+            self._app.processEvents()
+            self.assertEqual(len(runtime_window.backend_client.sent_commands), sent_before_verify)
 
             uuid_write_payload = runtime_window.backend_client.sent_commands[0][1]
             runtime_window.packet_received.emit(
@@ -921,6 +926,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self._app.processEvents()
 
             self.assertEqual(runtime_window.backend_client.sent_commands[2], (6, [0x84, 0x00, 0x64]))
+            self.assertIs(page._workbook_workflow_phase, ProductionWorkbookWorkflowPhase.WRITING_RUNTIME)
             self.assertTrue(page._workbook_runtime_write_pending)
 
             runtime_window.packet_received.emit(
@@ -929,6 +935,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self._app.processEvents()
 
             self.assertFalse(page._workbook_runtime_write_pending)
+            self.assertIs(page._workbook_workflow_phase, ProductionWorkbookWorkflowPhase.EEPROM_SETTLING)
             self.assertIn("Runtime parameters written", page.uuid_section.last_workbook_action_text)
 
     def test_production_page_full_parameter_write_save_runtime_and_verify_sequence(self) -> None:
@@ -1000,6 +1007,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
 
             self.assertEqual(runtime_window.backend_client.sent_commands[0], expected_write_sequence[0])
             self.assertEqual(len(runtime_window.backend_client.sent_commands), 1)
+            self.assertIs(page._workbook_workflow_phase, ProductionWorkbookWorkflowPhase.WRITING_PERSISTENT)
             self.assertTrue(page._workbook_parameter_write_pending)
 
             write_response_payloads = {
@@ -1061,6 +1069,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self._app.processEvents()
 
             self.assertEqual(runtime_window.backend_client.sent_commands[len(expected_write_sequence) + 1], (6, [0x84, 0x00, 0x50]))
+            self.assertIs(page._workbook_workflow_phase, ProductionWorkbookWorkflowPhase.WRITING_RUNTIME)
             self.assertTrue(page._workbook_runtime_write_pending)
             self.assertTrue(page._workbook_eeprom_settle_active)
 
@@ -1071,17 +1080,26 @@ class ProductionPageWorkflowTests(unittest.TestCase):
 
             self.assertFalse(page._workbook_runtime_write_pending)
             self.assertFalse(page._workbook_eeprom_save_pending)
+            self.assertIs(page._workbook_workflow_phase, ProductionWorkbookWorkflowPhase.EEPROM_SETTLING)
             self.assertTrue(page._workbook_eeprom_settle_active)
 
             page._handle_eeprom_save_settle_finished()
             self._app.processEvents()
             self.assertFalse(page._workbook_eeprom_settle_active)
+            self.assertIs(page._workbook_workflow_phase, ProductionWorkbookWorkflowPhase.READY_FOR_REVERIFY)
             self.assertTrue(page.uuid_section.verify_button.isEnabled())
 
             page._handle_verify_uuid()
             self._app.processEvents()
 
+            self.assertIs(page._workbook_workflow_phase, ProductionWorkbookWorkflowPhase.VERIFYING)
+            self.assertFalse(page.uuid_section.write_button.isEnabled())
+            self.assertFalse(page.uuid_section.verify_button.isEnabled())
             self.assertEqual(runtime_window.backend_client.sent_commands[-1], (6, [0xE0, 0x3F]))
+            sent_before_write = len(runtime_window.backend_client.sent_commands)
+            page._handle_write_uuid()
+            self._app.processEvents()
+            self.assertEqual(len(runtime_window.backend_client.sent_commands), sent_before_write)
             self.assertEqual(runtime_window.backend_client.sent_commands.count((6, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX])), 1)
             save_command_index = runtime_window.backend_client.sent_commands.index((6, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]))
             pwm_write_index = runtime_window.backend_client.sent_commands.index((6, build_pwm_write_payload(80)))
@@ -1131,11 +1149,6 @@ class ProductionPageWorkflowTests(unittest.TestCase):
                 (6, [0xEC, 0x3F]),
             ]
 
-            self.assertTrue(page.uuid_section.verify_button.isEnabled())
-            page._handle_verify_uuid()
-            self._app.processEvents()
-            self.assertEqual(runtime_window.backend_client.sent_commands[-1], expected_verify_commands[0])
-
             for index, definition_name in enumerate(verify_order):
                 definition = definitions[definition_name]
                 expected_command = expected_verify_commands[index]
@@ -1175,6 +1188,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
                     self.assertEqual(output_sheet[f"D{row}"].value, check_text)
 
             self.assertEqual(page.uuid_section.workbook_validation_text, "Workbook Validation: PASSED")
+            self.assertIs(page._workbook_workflow_phase, ProductionWorkbookWorkflowPhase.WORKBOOK_READY)
             self.assertTrue(page.uuid_section.save_button.isEnabled())
             self.assertEqual(runtime_window.backend_client.sent_commands.count((6, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX])), 1)
             self.assertFalse(page._workbook_parameter_write_pending)
@@ -1373,6 +1387,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertEqual(page.uuid_section._expected_pwm_value, "100")
             self.assertEqual(page.uuid_section._expected_other_value, "-")
             self.assertEqual(page.uuid_section.workbook_validation_text, "Workbook Validation: READY")
+            self.assertIs(page._workbook_workflow_phase, ProductionWorkbookWorkflowPhase.WORKBOOK_READY)
             self.assertTrue(page.uuid_section.verify_button.isEnabled())
             self.assertTrue(page.uuid_section.write_button.isEnabled())
             self.assertFalse(page.uuid_section.save_button.isEnabled())
@@ -1410,6 +1425,13 @@ class ProductionPageWorkflowTests(unittest.TestCase):
 
             page._handle_write_uuid()
             self._app.processEvents()
+            self.assertIn(
+                page._workbook_workflow_phase,
+                {
+                    ProductionWorkbookWorkflowPhase.WRITING_PERSISTENT,
+                    ProductionWorkbookWorkflowPhase.WRITING_RUNTIME,
+                },
+            )
             self.assertTrue(page._workbook_parameter_write_pending or page._workbook_runtime_write_pending)
             self.assertEqual(page._parameter_controller._parameter_operation_mode, "write")
 
@@ -1425,6 +1447,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertFalse(page._workbook_eeprom_save_pending)
             self.assertFalse(page._workbook_eeprom_save_failed)
             self.assertFalse(page._workbook_eeprom_settle_active)
+            self.assertIs(page._workbook_workflow_phase, ProductionWorkbookWorkflowPhase.WORKBOOK_READY)
             self.assertIsNone(page._parameter_controller._pending_parameter_request)
             self.assertIsNone(page._parameter_controller._parameter_operation_mode)
             self.assertEqual(page._parameter_controller._parameter_requests, [])
@@ -1434,6 +1457,48 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertTrue(page.uuid_section.write_button.isEnabled())
             self.assertTrue(page.uuid_section.verify_button.isEnabled())
             self.assertFalse(page.uuid_section.save_button.isEnabled())
+
+    @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook verify wiring tests.")
+    def test_production_page_verify_failure_restores_ready_phase_and_disables_save(self) -> None:
+        runtime_window = _FakeRuntimeWindow(connected=True)
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            self._create_ipqc_workbook(workbook_path, with_optional_fields=False)
+
+            with patch(
+                "gui.workspace.pages.production_page.QFileDialog.getOpenFileName",
+                return_value=(str(workbook_path), "Excel Files (*.xlsx)"),
+            ):
+                page._handle_load_ipqc_workbook()
+                self._app.processEvents()
+
+            definition = {definition.name: definition for definition in default_workbook_parameter_definitions()}["UUID"]
+            page._workbook_verification_passed = True
+            page._refresh_workbook_action_states()
+            self.assertTrue(page.uuid_section.save_button.isEnabled())
+
+            page._set_workbook_workflow_phase(ProductionWorkbookWorkflowPhase.VERIFYING)
+            page._handle_parameter_verification_finished(
+                False,
+                "Workbook parameter read-back verification",
+                [
+                    ParameterVerificationResult(
+                        definition=definition,
+                        expected_text="1223303010",
+                        actual_text="999999999",
+                        passed=False,
+                        reason="S/N read-back verification - expected 1223303010, actual 999999999",
+                    )
+                ],
+            )
+            self._app.processEvents()
+
+            self.assertIs(page._workbook_workflow_phase, ProductionWorkbookWorkflowPhase.WORKBOOK_READY)
+            self.assertFalse(page.uuid_section.save_button.isEnabled())
+            self.assertIn("Workbook Validation: FAILED", page.uuid_section.workbook_validation_text)
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook write wiring tests.")
     def test_production_page_verify_all_matching_reads_without_writing_or_saving(self) -> None:
@@ -1829,6 +1894,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             self.assertNotIn((6, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]), runtime_window.backend_client.sent_commands)
             self.assertFalse(page._workbook_eeprom_save_pending)
             self.assertFalse(page._workbook_runtime_write_pending)
+            self.assertIs(page._workbook_workflow_phase, ProductionWorkbookWorkflowPhase.READY_FOR_REVERIFY)
 
     @unittest.skipUnless(_HAS_OPENPYXL, "openpyxl is required for IPQC workbook write wiring tests.")
     def test_production_page_write_with_all_previous_results_matching_sends_no_write_and_no_eeprom_save(self) -> None:
@@ -2095,6 +2161,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
                 page.uuid_section.workbook_validation_text,
                 "Workbook Validation: FAILED (EEPROM save ACK not received; check command payload and quiet mode.)",
             )
+            self.assertIs(page._workbook_workflow_phase, ProductionWorkbookWorkflowPhase.WRITE_FAILED)
             self.assertFalse(page.uuid_section.verify_button.isEnabled())
             self.assertIn("EEPROM save ACK not received; check command payload and quiet mode.", page.result_summary_section._reason_label.text())
             timeout_line = next(

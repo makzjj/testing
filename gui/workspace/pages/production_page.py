@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 from datetime import datetime
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal
@@ -75,6 +76,18 @@ class _ProductionContextKey:
     workbook_session_id: int
     base_group: str
     node_id: int
+
+
+class ProductionWorkbookWorkflowPhase(Enum):
+    NO_WORKBOOK = "no_workbook"
+    WORKBOOK_READY = "workbook_ready"
+    VERIFYING = "verifying"
+    WRITING_PERSISTENT = "writing_persistent"
+    EEPROM_SAVING = "eeprom_saving"
+    WRITING_RUNTIME = "writing_runtime"
+    EEPROM_SETTLING = "eeprom_settling"
+    READY_FOR_REVERIFY = "ready_for_reverify"
+    WRITE_FAILED = "write_failed"
 
 
 def get_ml20_node_name(node_id: int) -> str:
@@ -181,13 +194,8 @@ class ProductionPage(BaseWorkspacePage):
         self._parameter_verification_context_key: _ProductionContextKey | None = None
         self._production_context_key: _ProductionContextKey | None = None
         self._workbook_loaded = False
-        self._workbook_write_completed = False
         self._workbook_verification_passed = False
-        self._workbook_parameter_write_pending = False
-        self._workbook_runtime_write_pending = False
-        self._workbook_eeprom_save_pending = False
-        self._workbook_eeprom_save_failed = False
-        self._workbook_eeprom_settle_active = False
+        self._workbook_workflow_phase = ProductionWorkbookWorkflowPhase.NO_WORKBOOK
 
         self.add_weighted_row((self.communication_section, 1), (self.stage_section, 1))
         if self._owns_node_status_section:
@@ -1014,6 +1022,7 @@ class ProductionPage(BaseWorkspacePage):
             active_group = self._ipqc_excel_adapter.active_sheet_group or ""
             self._reset_workbook_workflow_state()
             self._workbook_loaded = True
+            self._set_workbook_workflow_phase(ProductionWorkbookWorkflowPhase.WORKBOOK_READY)
             self.uuid_section.set_workbook_path(path)
             self.uuid_section.set_sheet_groups(groups, active_group)
             self.uuid_section.set_workbook_output_path(WORKBOOK_OUTPUT_PENDING)
@@ -1021,13 +1030,8 @@ class ProductionPage(BaseWorkspacePage):
             self._refresh_ipqc_expected_preview()
         except Exception as exc:
             self._workbook_loaded = False
-            self._workbook_write_completed = False
             self._workbook_verification_passed = False
-            self._workbook_parameter_write_pending = False
-            self._workbook_runtime_write_pending = False
-            self._workbook_eeprom_save_pending = False
-            self._workbook_eeprom_save_failed = False
-            self._workbook_eeprom_settle_active = False
+            self._set_workbook_workflow_phase(ProductionWorkbookWorkflowPhase.NO_WORKBOOK)
             self._eeprom_save_settle_timer.stop()
             self.console_message.emit(f"[Production] Failed to load IPQC workbook: {exc}")
             self._set_status_result("FAIL", "IPQC workbook load failed.")
@@ -1094,6 +1098,8 @@ class ProductionPage(BaseWorkspacePage):
         self._refresh_workbook_action_states()
 
     def _handle_write_uuid(self) -> None:
+        if self._is_workbook_write_blocked():
+            return
         try:
             node_id, node_name = self.test_control_section.selected_node()
         except RuntimeError as exc:
@@ -1120,13 +1126,8 @@ class ProductionPage(BaseWorkspacePage):
             self.progress_section.append_step(f"SKIPPED: {len(skipped_labels)} parameter(s) already matched read-back values.")
         self._pending_persistent_parameter_requests = persistent_requests
         self._pending_runtime_parameter_requests = runtime_requests
-        self._workbook_write_completed = False
         self._workbook_verification_passed = False
-        self._workbook_parameter_write_pending = False
-        self._workbook_runtime_write_pending = False
-        self._workbook_eeprom_save_pending = False
-        self._workbook_eeprom_save_failed = False
-        self._workbook_eeprom_settle_active = False
+        self._set_workbook_workflow_phase(ProductionWorkbookWorkflowPhase.WORKBOOK_READY)
         self._eeprom_save_settle_timer.stop()
 
         if not persistent_requests and not runtime_requests:
@@ -1140,26 +1141,26 @@ class ProductionPage(BaseWorkspacePage):
             return
 
         if persistent_requests:
-            self._workbook_parameter_write_pending = True
+            self._set_workbook_workflow_phase(ProductionWorkbookWorkflowPhase.WRITING_PERSISTENT)
             self._set_status_result("WRITING PARAMETERS", f"Writing {labels} to Node {node_id} {node_name}.")
             success, message = self._parameter_controller.write_parameters(persistent_requests)
             if success:
                 self._set_status_result("WRITE SENT", message)
                 self.uuid_section.set_last_workbook_action(f"{labels} persistent write in progress")
             else:
-                self._workbook_parameter_write_pending = False
+                self._set_workbook_workflow_phase(ProductionWorkbookWorkflowPhase.WORKBOOK_READY)
                 self._set_status_result("FAIL", message)
                 self.console_message.emit(f"[Production] {message}")
                 return
         elif runtime_requests:
-            self._workbook_runtime_write_pending = True
+            self._set_workbook_workflow_phase(ProductionWorkbookWorkflowPhase.WRITING_RUNTIME)
             self._set_status_result("WRITING PARAMETERS", f"Writing {labels} to Node {node_id} {node_name}.")
             success, message = self._parameter_controller.write_parameters(runtime_requests)
             if success:
                 self._set_status_result("WRITE SENT", message)
                 self.uuid_section.set_last_workbook_action(f"{labels} runtime write in progress")
             else:
-                self._workbook_runtime_write_pending = False
+                self._set_workbook_workflow_phase(ProductionWorkbookWorkflowPhase.WORKBOOK_READY)
                 self._set_status_result("FAIL", message)
                 self.console_message.emit(f"[Production] {message}")
                 return
@@ -1167,12 +1168,7 @@ class ProductionPage(BaseWorkspacePage):
         self._refresh_connection_status()
 
     def _handle_verify_uuid(self) -> None:
-        if (
-            self._workbook_eeprom_save_pending
-            or self._workbook_eeprom_settle_active
-            or self._workbook_parameter_write_pending
-            or self._workbook_runtime_write_pending
-        ):
+        if self._is_workbook_verify_blocked():
             return
         try:
             node_id, node_name = self.test_control_section.selected_node()
@@ -1202,16 +1198,21 @@ class ProductionPage(BaseWorkspacePage):
                     self._set_status_result("PASS", "Workbook parameter read-back verification")
                     self.uuid_section.set_workbook_validation_result(True, "")
                     self.uuid_section.set_last_workbook_action("Workbook parameter read-back verification completed")
+                    self._set_workbook_workflow_phase(ProductionWorkbookWorkflowPhase.WORKBOOK_READY)
                 self._refresh_connection_status()
                 return
             self._set_status_result("FAIL", "Workbook parameter read-back verification could not be completed.")
+            self._set_workbook_workflow_phase(ProductionWorkbookWorkflowPhase.WORKBOOK_READY)
             self._refresh_connection_status()
             return
         self._pending_parameter_requests = requests_to_verify
+        self._set_workbook_workflow_phase(ProductionWorkbookWorkflowPhase.VERIFYING)
         self._set_status_result("READING PARAMETERS", f"Reading and verifying workbook parameters for Node {node_id} {node_name}.")
         started = self._parameter_controller.verify_parameters(requests_to_verify)
         if not started:
             self._pending_parameter_requests = []
+            self._set_workbook_workflow_phase(ProductionWorkbookWorkflowPhase.WORKBOOK_READY)
+        self._refresh_workbook_action_states()
         self._refresh_connection_status()
 
     def _reset_workbook_workflow_state(self) -> None:
@@ -1221,13 +1222,8 @@ class ProductionPage(BaseWorkspacePage):
         self._pending_runtime_parameter_requests = []
         self._clear_parameter_verification_cache()
         self._workbook_loaded = False
-        self._workbook_write_completed = False
         self._workbook_verification_passed = False
-        self._workbook_parameter_write_pending = False
-        self._workbook_runtime_write_pending = False
-        self._workbook_eeprom_save_pending = False
-        self._workbook_eeprom_save_failed = False
-        self._workbook_eeprom_settle_active = False
+        self._set_workbook_workflow_phase(ProductionWorkbookWorkflowPhase.NO_WORKBOOK)
         self._eeprom_save_settle_timer.stop()
 
     def _build_workbook_parameter_requests(self, node_id: int, node_name: str) -> list[ParameterRequest] | None:
@@ -1264,14 +1260,9 @@ class ProductionPage(BaseWorkspacePage):
         return self._ipqc_excel_adapter.read_programming_parameter_source(definition.name)
 
     def _handle_parameter_write_finished(self, passed: bool, reason: str) -> None:
-        self._workbook_parameter_write_pending = False
-        self._workbook_runtime_write_pending = False
         if not passed:
-            self._workbook_write_completed = False
             self._workbook_verification_passed = False
-            self._workbook_eeprom_save_pending = False
-            self._workbook_eeprom_save_failed = True
-            self._workbook_eeprom_settle_active = False
+            self._set_workbook_workflow_phase(ProductionWorkbookWorkflowPhase.WRITE_FAILED)
             self._pending_persistent_parameter_requests = []
             self._pending_runtime_parameter_requests = []
             self._eeprom_save_settle_timer.stop()
@@ -1281,26 +1272,29 @@ class ProductionPage(BaseWorkspacePage):
             self._refresh_workbook_action_states()
             return
 
-        if self._pending_persistent_parameter_requests and not self._workbook_eeprom_save_pending and not self._workbook_eeprom_save_failed:
+        if self._pending_persistent_parameter_requests and self._workbook_workflow_phase is not ProductionWorkbookWorkflowPhase.WRITE_FAILED:
             node_id, node_name = self.test_control_section.selected_node()
-            self._workbook_eeprom_save_pending = True
+            self._set_workbook_workflow_phase(ProductionWorkbookWorkflowPhase.EEPROM_SAVING)
             self.uuid_section.set_last_workbook_action("Persistent parameters written; requesting EEPROM save")
             save_started = self._parameter_controller.save_parameters_to_eeprom(node_id, node_name)
             if save_started:
                 self.progress_section.append_step(f"EEPROM save requested for Node {node_id} {node_name}")
                 self._pending_persistent_parameter_requests = []
             else:
-                self._workbook_eeprom_save_pending = False
+                self._set_workbook_workflow_phase(ProductionWorkbookWorkflowPhase.WORKBOOK_READY)
                 self._pending_persistent_parameter_requests = []
                 self._pending_runtime_parameter_requests = []
-                self._workbook_write_completed = False
                 self._set_status_result("FAIL", "Failed to request EEPROM save.", append_to_log=False)
                 self.console_message.emit("[Production] Failed to request EEPROM save.")
         elif self._pending_runtime_parameter_requests:
-            self._workbook_runtime_write_pending = False
-            self._workbook_write_completed = True
+            if self._eeprom_save_settle_timer.isActive():
+                self._set_workbook_workflow_phase(ProductionWorkbookWorkflowPhase.EEPROM_SETTLING)
+            else:
+                self._set_workbook_workflow_phase(ProductionWorkbookWorkflowPhase.READY_FOR_REVERIFY)
             self._pending_runtime_parameter_requests = []
             self.uuid_section.set_last_workbook_action("Runtime parameters written")
+        else:
+            self._set_workbook_workflow_phase(ProductionWorkbookWorkflowPhase.WORKBOOK_READY)
         self._refresh_workbook_action_states()
 
     def _handle_parameter_verification_finished(
@@ -1333,6 +1327,7 @@ class ProductionPage(BaseWorkspacePage):
 
         all_required_passed = self._all_supported_workbook_parameters_passed()
         self._workbook_verification_passed = passed and workbook_ok and all_required_passed
+        self._set_workbook_workflow_phase(ProductionWorkbookWorkflowPhase.WORKBOOK_READY)
         self.uuid_section.set_workbook_validation_result(self._workbook_verification_passed, "" if self._workbook_verification_passed else reason)
         self.uuid_section.set_last_workbook_action("Workbook parameter read-back verification completed")
         if self._workbook_verification_passed:
@@ -1448,18 +1443,13 @@ class ProductionPage(BaseWorkspacePage):
 
     def _handle_eeprom_save_finished(self, passed: bool, reason: str) -> None:
         if passed:
-            self._workbook_write_completed = True
             self._workbook_verification_passed = False
-            self._workbook_eeprom_save_pending = False
-            self._workbook_eeprom_save_failed = False
-            self._workbook_eeprom_settle_active = True
             self.uuid_section.set_workbook_validation_ready()
             self.uuid_section.set_last_workbook_action("EEPROM save completed; ready for read-back verification")
             self.progress_section.append_step("EEPROM save ACK received.", level="info")
             self._set_status_result("READY", "EEPROM save completed; ready for read-back verification.", append_to_log=False)
             if self._pending_runtime_parameter_requests:
-                self._workbook_write_completed = False
-                self._workbook_runtime_write_pending = True
+                self._set_workbook_workflow_phase(ProductionWorkbookWorkflowPhase.WRITING_RUNTIME)
                 runtime_requests = list(self._pending_runtime_parameter_requests)
                 node_id, node_name = self.test_control_section.selected_node()
                 success, message = self._parameter_controller.write_parameters(runtime_requests)
@@ -1467,18 +1457,16 @@ class ProductionPage(BaseWorkspacePage):
                     self.uuid_section.set_last_workbook_action("Runtime parameters write in progress")
                     self.progress_section.append_step(f"Runtime parameters write requested for Node {node_id} {node_name}")
                 else:
-                    self._workbook_runtime_write_pending = False
-                    self._workbook_write_completed = False
+                    self._set_workbook_workflow_phase(ProductionWorkbookWorkflowPhase.EEPROM_SETTLING)
                     self._pending_runtime_parameter_requests = []
                     self._set_status_result("FAIL", message, append_to_log=False)
                     self.console_message.emit(f"[Production] {message}")
+            else:
+                self._set_workbook_workflow_phase(ProductionWorkbookWorkflowPhase.EEPROM_SETTLING)
             self._eeprom_save_settle_timer.start(EEPROM_SAVE_SETTLE_MS)
         else:
-            self._workbook_write_completed = False
             self._workbook_verification_passed = False
-            self._workbook_eeprom_save_pending = False
-            self._workbook_eeprom_save_failed = True
-            self._workbook_eeprom_settle_active = False
+            self._set_workbook_workflow_phase(ProductionWorkbookWorkflowPhase.WRITE_FAILED)
             self._eeprom_save_settle_timer.stop()
             self.uuid_section.set_workbook_validation_result(False, reason)
             self.uuid_section.set_last_workbook_action(f"EEPROM save failed: {reason}")
@@ -1493,7 +1481,8 @@ class ProductionPage(BaseWorkspacePage):
     def _handle_eeprom_save_settle_finished(self) -> None:
         self._eeprom_save_settle_timer.stop()
         self._parameter_controller.finish_eeprom_settle()
-        self._workbook_eeprom_settle_active = False
+        if self._workbook_workflow_phase is not ProductionWorkbookWorkflowPhase.WRITING_RUNTIME:
+            self._set_workbook_workflow_phase(ProductionWorkbookWorkflowPhase.READY_FOR_REVERIFY)
         self._refresh_workbook_action_states()
 
     def _reset_result_only(self) -> None:
@@ -1546,6 +1535,11 @@ class ProductionPage(BaseWorkspacePage):
         self._pending_runtime_parameter_requests = []
         self._parameter_controller.reset_workbook_parameter_workflow()
         self._clear_parameter_verification_cache()
+        self._set_workbook_workflow_phase(
+            ProductionWorkbookWorkflowPhase.WORKBOOK_READY
+            if self._workbook_loaded and self._ipqc_excel_adapter.has_loaded_workbook()
+            else ProductionWorkbookWorkflowPhase.NO_WORKBOOK
+        )
         self.uuid_section.set_workbook_validation_ready()
         self.uuid_section.set_programmed_values("-", self._current_programmed_pwm_value, "-")
         if self._sampling_popup is not None and not self._sampling_controller.is_active():
@@ -1704,11 +1698,7 @@ class ProductionPage(BaseWorkspacePage):
             serial_connected=serial_connected,
             node_selected=node_selected,
             validation_error=validation_error,
-            operation_pending=
-                self._workbook_parameter_write_pending
-                or self._workbook_runtime_write_pending
-                or self._workbook_eeprom_save_pending
-                or self._workbook_eeprom_settle_active,
+            operation_pending=self._is_workbook_write_blocked(),
         )
         verify_reason = self._get_workbook_action_gate_reason(
             has_workbook=has_workbook,
@@ -1716,32 +1706,20 @@ class ProductionPage(BaseWorkspacePage):
             serial_connected=serial_connected,
             node_selected=node_selected,
             validation_error=validation_error,
-            operation_pending=
-                self._workbook_parameter_write_pending
-                or self._workbook_runtime_write_pending
-                or self._workbook_eeprom_save_pending
-                or self._workbook_eeprom_save_failed
-                or self._workbook_eeprom_settle_active,
+            operation_pending=self._is_workbook_verify_blocked(),
         )
         self.uuid_section.load_workbook_button.setEnabled(True)
         write_enabled = (
             has_supported_parameters
             and serial_connected
             and node_selected
-            and not self._workbook_parameter_write_pending
-            and not self._workbook_runtime_write_pending
-            and not self._workbook_eeprom_save_pending
-            and not self._workbook_eeprom_settle_active
+            and not self._is_workbook_write_blocked()
         )
         verify_enabled = (
             has_supported_parameters
             and serial_connected
             and node_selected
-            and not self._workbook_parameter_write_pending
-            and not self._workbook_runtime_write_pending
-            and not self._workbook_eeprom_save_pending
-            and not self._workbook_eeprom_save_failed
-            and not self._workbook_eeprom_settle_active
+            and not self._is_workbook_verify_blocked()
         )
         self.uuid_section.write_button.setEnabled(write_enabled)
         self.uuid_section.write_button.setToolTip(
@@ -1762,6 +1740,47 @@ class ProductionPage(BaseWorkspacePage):
             else "Save / Download Completed Workbook is enabled after verification passes."
         )
         self._refresh_sampling_action_states()
+
+    def _set_workbook_workflow_phase(self, phase: ProductionWorkbookWorkflowPhase) -> None:
+        self._workbook_workflow_phase = phase
+
+    def _is_workbook_operation_busy(self) -> bool:
+        return self._workbook_workflow_phase in {
+            ProductionWorkbookWorkflowPhase.VERIFYING,
+            ProductionWorkbookWorkflowPhase.WRITING_PERSISTENT,
+            ProductionWorkbookWorkflowPhase.EEPROM_SAVING,
+            ProductionWorkbookWorkflowPhase.WRITING_RUNTIME,
+            ProductionWorkbookWorkflowPhase.EEPROM_SETTLING,
+        }
+
+    def _is_workbook_write_blocked(self) -> bool:
+        return self._is_workbook_operation_busy()
+
+    def _is_workbook_verify_blocked(self) -> bool:
+        return self._is_workbook_operation_busy() or self._workbook_workflow_phase is ProductionWorkbookWorkflowPhase.WRITE_FAILED
+
+    @property
+    def _workbook_parameter_write_pending(self) -> bool:
+        return self._workbook_workflow_phase is ProductionWorkbookWorkflowPhase.WRITING_PERSISTENT
+
+    @property
+    def _workbook_runtime_write_pending(self) -> bool:
+        return self._workbook_workflow_phase is ProductionWorkbookWorkflowPhase.WRITING_RUNTIME
+
+    @property
+    def _workbook_eeprom_save_pending(self) -> bool:
+        return self._workbook_workflow_phase is ProductionWorkbookWorkflowPhase.EEPROM_SAVING
+
+    @property
+    def _workbook_eeprom_save_failed(self) -> bool:
+        return self._workbook_workflow_phase is ProductionWorkbookWorkflowPhase.WRITE_FAILED
+
+    @property
+    def _workbook_eeprom_settle_active(self) -> bool:
+        return (
+            self._workbook_workflow_phase is ProductionWorkbookWorkflowPhase.EEPROM_SETTLING
+            or self._eeprom_save_settle_timer.isActive()
+        )
 
     def _refresh_sampling_action_states(self) -> None:
         connection_model = self._bridge.get_runtime_communication_model(create_if_missing=False)
