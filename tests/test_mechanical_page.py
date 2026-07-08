@@ -167,11 +167,25 @@ class _FakeBridge:
 
     def get_runtime_node_motion_polarity(self, node_id: int, *, create_if_missing: bool = False) -> dict[str, object]:
         node_id = int(node_id)
-        if node_id == 6:
+        runtime_raw = None
+        if self.runtime_window is not None:
+            runtime_raw = self.runtime_window.node_status.get(node_id, {}).get("nodeconfig")
+        if runtime_raw is None:
+            for axis_data in self.raw_config.get("robot", {}).get("axes", {}).values():
+                if isinstance(axis_data, dict) and axis_data.get("node_id") == node_id:
+                    config_raw = axis_data.get("node_config")
+                    if isinstance(config_raw, str) and all(ch in "01" for ch in config_raw) and len(config_raw) in {4, 8}:
+                        runtime_raw = int(config_raw, 2)
+                    elif isinstance(config_raw, str):
+                        runtime_raw = int(config_raw, 16)
+                    elif isinstance(config_raw, int):
+                        runtime_raw = config_raw
+                    break
+        if runtime_raw == 0x00:
             return {
-                "node_id": 6,
+                "node_id": node_id,
                 "known": True,
-                "source": "config",
+                "source": "runtime" if self.runtime_window is not None and self.runtime_window.node_status.get(node_id, {}).get("nodeconfig") is not None else "config",
                 "nodeconfig_raw": 0x00,
                 "home_sensor": "L",
                 "opposite_sensor": "R",
@@ -181,25 +195,11 @@ class _FakeBridge:
                 "negative_run_sensor": "L",
                 "positive_run_sensor": "R",
             }
-        if node_id == 8:
+        if runtime_raw == 0x02:
             return {
-                "node_id": 8,
+                "node_id": node_id,
                 "known": True,
-                "source": "config",
-                "nodeconfig_raw": 0x02,
-                "home_sensor": "L",
-                "opposite_sensor": "R",
-                "hunting_sign": 1,
-                "outward_sign": -1,
-                "return_home_sign": 1,
-                "negative_run_sensor": "R",
-                "positive_run_sensor": "L",
-            }
-        if node_id == 9:
-            return {
-                "node_id": 9,
-                "known": True,
-                "source": "config",
+                "source": "runtime" if self.runtime_window is not None and self.runtime_window.node_status.get(node_id, {}).get("nodeconfig") is not None else "config",
                 "nodeconfig_raw": 0x02,
                 "home_sensor": "L",
                 "opposite_sensor": "R",
@@ -213,7 +213,7 @@ class _FakeBridge:
             "node_id": node_id,
             "known": False,
             "source": None,
-            "nodeconfig_raw": None,
+            "nodeconfig_raw": runtime_raw,
             "home_sensor": None,
             "opposite_sensor": None,
             "hunting_sign": None,
@@ -601,6 +601,50 @@ class MechanicalPageTests(unittest.TestCase):
         self._app.processEvents()
         self.assertEqual(axis_value.text(), "RZ")
         self.assertEqual(page.findChild(QLineEdit, "MechanicalCurrentNodeconfigValue").text(), "0010")
+
+    def test_axis_type_prefers_runtime_node_type_when_available(self) -> None:
+        page, runtime_window = self._build_connected_page(node_id=8)
+        axis_value = page.findChild(QLineEdit, "MechanicalAxisTypeValue")
+        assert axis_value is not None
+
+        runtime_window.node_status[8]["type"] = "ya"
+        page._refresh_from_selected_node()
+        self._app.processEvents()
+
+        self.assertEqual(axis_value.text(), "YA")
+
+    def test_selected_node_prefers_runtime_nodeconfig_over_config_fallback(self) -> None:
+        page, runtime_window = self._build_connected_page(node_id=8)
+        current_nodeconfig = page.findChild(QLineEdit, "MechanicalCurrentNodeconfigValue")
+        pending_nodeconfig = page.findChild(QLineEdit, "MechanicalPendingNodeconfigValue")
+        assert current_nodeconfig is not None
+        assert pending_nodeconfig is not None
+
+        runtime_window.node_status[8]["nodeconfig"] = 0x00
+        page._refresh_from_selected_node()
+        self._app.processEvents()
+
+        self.assertEqual(current_nodeconfig.text(), "0000")
+        self.assertEqual(pending_nodeconfig.text(), "0000")
+
+    def test_node9_binary_nodeconfig_string_renders_as_4bit_binary(self) -> None:
+        page = MechanicalPage(_FakeBridge())
+        page.resize(1440, 980)
+        page.show()
+        self._app.processEvents()
+
+        node_combo = page.findChild(QComboBox, "MechanicalNodeCombo")
+        current_nodeconfig = page.findChild(QLineEdit, "MechanicalCurrentNodeconfigValue")
+        pending_nodeconfig = page.findChild(QLineEdit, "MechanicalPendingNodeconfigValue")
+        assert node_combo is not None
+        assert current_nodeconfig is not None
+        assert pending_nodeconfig is not None
+
+        node_combo.setCurrentIndex(6)  # Node 9
+        self._app.processEvents()
+
+        self.assertEqual(current_nodeconfig.text(), "0010")
+        self.assertEqual(pending_nodeconfig.text(), "0010")
 
     def test_node_header_layout_uses_required_vertical_order(self) -> None:
         page = MechanicalPage(_FakeBridge())
@@ -1296,6 +1340,34 @@ class MechanicalPageTests(unittest.TestCase):
         runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": 0xC9, "params": [0x3A, 0x0B]})
         self._app.processEvents()
         self.assertEqual(left_value.text(), "unknown")
+        self.assertEqual(right_value.text(), "unknown")
+
+    def test_node_change_preserves_per_node_sensor_readback_cache(self) -> None:
+        page, runtime_window = self._build_connected_page()
+
+        read_lflag_button = page.findChild(QPushButton, "MechanicalReadLFlagButton")
+        node_combo = page.findChild(QComboBox, "MechanicalNodeCombo")
+        left_value = page.findChild(QLabel, "MechanicalLeftFlagStateValue")
+        right_value = page.findChild(QLabel, "MechanicalRightFlagStateValue")
+        assert read_lflag_button is not None
+        assert node_combo is not None
+        assert left_value is not None
+        assert right_value is not None
+
+        read_lflag_button.click()
+        runtime_window.packet_received.emit({"type": "can_over_uart", "sender": 8, "cmd": 0xC9, "params": [0x3A, 0x09]})
+        self._app.processEvents()
+        self.assertEqual(left_value.text(), "0x09")
+        self.assertEqual(right_value.text(), "unknown")
+
+        node_combo.setCurrentIndex(3)  # Node 6
+        self._app.processEvents()
+        self.assertEqual(left_value.text(), "unknown")
+        self.assertEqual(right_value.text(), "unknown")
+
+        node_combo.setCurrentIndex(5)  # Node 8
+        self._app.processEvents()
+        self.assertEqual(left_value.text(), "0x09")
         self.assertEqual(right_value.text(), "unknown")
 
     def test_sensor_readbacks_update_state_without_lighting_leds_orange(self) -> None:

@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
+from services.production_parameter_transport_adapter import ProductionParameterTransportAdapter
 from ..bridges import WorkspaceRuntimeBridge
 from myconfig.node_display import ML20_NODE_MAP
 
@@ -794,6 +795,7 @@ class ProductionParameterController(QObject):
         self._timeout_ms = int(timeout_ms)
 
         self._runtime_window = None
+        self._transport_adapter = ProductionParameterTransportAdapter(self)
         self._parameter_requests: list[ParameterRequest] = []
         self._parameter_results: list[ParameterVerificationResult] = []
         self._parameter_verify_index = 0
@@ -993,16 +995,33 @@ class ProductionParameterController(QObject):
         if runtime_window is self._runtime_window:
             return
 
-        if self._runtime_window is not None and hasattr(self._runtime_window, "packet_received"):
-            try:
-                self._runtime_window.packet_received.disconnect(self._handle_runtime_packet)
-            except (TypeError, RuntimeError):
-                pass
-
-        runtime_window.packet_received.connect(self._handle_runtime_packet)
+        self._transport_adapter.detach_runtime_window()
+        self._transport_adapter.attach_runtime_window(runtime_window)
         self._runtime_window = runtime_window
 
-    def _handle_runtime_packet(self, packet: object) -> None:
+    def accepts_workflow_packet(self, *, sender: int | None, cmd: int, params: list[int]) -> bool:
+        _ = params
+        if sender is None:
+            return False
+        if self._pending_parameter_request is None and self._pending_eeprom_save is None:
+            return False
+
+        if self._pending_parameter_request is not None:
+            if int(sender) != int(self._pending_parameter_request.node_id):
+                return False
+            if self._pending_parameter_packet_matches(cmd):
+                return True
+
+        if self._pending_eeprom_save is not None:
+            node_id, _node_name = self._pending_eeprom_save
+            if int(sender) != int(node_id):
+                return False
+            if int(cmd) == EEPROM_SAVE_COMMAND:
+                return True
+
+        return False
+
+    def handle_runtime_packet(self, packet: object) -> None:
         if self._pending_parameter_request is None and self._pending_eeprom_save is None:
             return
         if not isinstance(packet, dict):

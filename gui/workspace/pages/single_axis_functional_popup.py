@@ -197,17 +197,6 @@ class SingleAxisFunctionalPopup(QDialog):
     def update_range(self, value: object) -> None:
         self.range_field.setText(str(value))
 
-    def set_left_flag_active(self, active: bool) -> None:
-        self._set_led_display_state(self.left_flag_led, "cut" if active else "not_cut")
-
-    def set_right_flag_active(self, active: bool) -> None:
-        self._set_led_display_state(self.right_flag_led, "cut" if active else "not_cut")
-
-    def reset_flags(self) -> None:
-        self._set_led_display_state(self.left_flag_led, "unknown")
-        self._set_led_display_state(self.right_flag_led, "unknown")
-        self._clear_middle_travel_state()
-
     def mark_passed(self) -> None:
         node_text = self._selected_node_text()
         self.append_status(f"Node {node_text}: Functional test PASSED.")
@@ -435,11 +424,6 @@ class SingleAxisFunctionalPopup(QDialog):
         return led
 
     @classmethod
-    def _set_led_state(cls, led: QLabel, active: bool) -> None:
-        color = cls._ACTIVE_FLAG_COLOR if active else cls._INACTIVE_FLAG_COLOR
-        led.setStyleSheet(f"border-radius: 6px; background: {color};")
-
-    @classmethod
     def _set_led_display_state(cls, led: QLabel, state: str) -> None:
         if state == "cut":
             color = cls._ACTIVE_FLAG_COLOR
@@ -525,9 +509,6 @@ class SingleAxisFunctionalPopup(QDialog):
         else:
             self._middle_travel_display_value = abs(target - self._middle_travel_origin_position)
         self.append_status(f"Middle travel distance: {int(self._middle_travel_display_value)}")
-
-    def _refresh_middle_travel_display(self) -> None:
-        return
 
     def _ensure_controller(self) -> None:
         if self.controller is None:

@@ -6,19 +6,22 @@ This document is the lean migration contract for the current codebase. It is not
 
 - Raw packet fan-out:
   - `MainWindow.packet_received` is emitted before shared runtime handling runs.
-  - Multiple pages and controllers subscribe directly to raw packet traffic.
+  - Direct raw subscribers are now narrow rather than broad:
+    - `ProductionParameterTransportAdapter` now owns parameter-operation relevance filtering
+    - Mechanical page and Single Axis popup still use raw packet listeners only as runtime-backed UI invalidation timing workarounds
+    - canonical workflow ingress adapters exist for Sampling, Single Axis / Functional, Production Test, and Production Parameters
 - Duplicated packet decoding:
   - Semantic decoding exists in shared helpers, but several controllers/pages decode the same packet classes again locally.
 - Page-local protocol/runtime state:
   - Some pages keep local sensor, interrupt, parameter, or node-config caches instead of rendering one canonical shared state.
 - Controller exposure to unrelated traffic:
-  - Workflow controllers can still see unrelated packets from the shared runtime stream and may fail or ignore traffic based on local expectations.
+  - This is materially reduced for Sampling, Single Axis, and Production Test after narrow ingress-adapter migration.
 - Legacy `main_window.py` ownership:
-  - `main_window.py` still owns important runtime behavior, state updates, and packet distribution while newer services and workspace pages coexist beside it.
-- Duplicate node discovery/info behavior:
-  - Node connectivity and follow-up info requests are triggered from more than one legacy path.
+  - `main_window.py` still owns the central packet signal, runtime-handler bridge, and remaining legacy runtime-shell behavior while newer services and workspace pages coexist beside it.
+- Node discovery lifecycle still lives in the legacy shell:
+  - duplicate `info_requested` state is gone, but burst scan lifecycle/timer orchestration still remains in `main_window.py`.
 - Known parameter-path duplication:
-  - A shared parameter pipeline exists, but legacy UUID-only and PWM-only flows still coexist beside it.
+  - `ProductionParameterController` still owns parameter pending-operation state, but packet filtering now sits in a narrow ingress adapter instead of a direct raw subscription.
 
 ## B. Target ownership model
 
@@ -166,7 +169,7 @@ UI/pages
   - Production page no longer subscribes Sampling directly to raw global packet fan-out
 - Remaining limitation:
   - `MainWindow.packet_received` still emits before runtime handling updates shared runtime state
-  - this phase adds a narrow Sampling adapter only; it is not yet a general request router
+  - this phase adds a narrow Sampling adapter only; it is not a general request router
 - Tests and live validation required:
   - wrong-node, runtime-only, and stale same-node packets must not fail or advance Sampling
   - expected Sampling packets must still advance the workflow
@@ -273,6 +276,8 @@ UI/pages
   - Mechanical page no longer owns canonical interrupt LED state
   - Mechanical sensor LEDs render runtime-owned interrupt state only
   - Mechanical utility reads and writes remain page-owned
+- Single Axis outcome after later LED phases:
+  - Single Axis popup LEDs also render runtime-owned interrupt state only
 - Explicitly not added in this phase:
   - no global `0xD8` polling
   - no release-watch polling workflow
@@ -449,7 +454,65 @@ UI/pages
   - runtime ownership
   - packet routing and ingress structure
 
-## E. Governing rule
+## Cleanup update
+
+- Selected Phase L2B cleanup:
+  - narrow ProductionTestController ingress adapter
+- Canonical owners after this phase:
+  - `services/production_test_transport_adapter.py` owns Production test relevance filtering only
+  - `gui/workspace/pages/production_test_controller.py` still owns Production test workflow state, timeout, decode, and pass/fail logic
+  - `gui/workspace/pages/production_parameter_controller.py` remains unchanged and still owns parameter pending-operation correlation
+- What changed:
+  - ProductionTestController no longer subscribes directly to raw packet fan-out
+  - runtime packet ownership and ordering remain unchanged
+- Explicitly unchanged:
+  - Production parameter workflow behavior
+  - workbook behavior
+  - timeout values
+  - no general router introduced
+
+## Cleanup update
+
+- Selected Phase L3C cleanup:
+  - narrow ProductionParameterController ingress adapter
+- Canonical owners after this phase:
+  - `services/production_parameter_transport_adapter.py` owns Production parameter relevance filtering only
+  - `gui/workspace/pages/production_parameter_controller.py` still owns parameter definitions, verify/write sequencing, EEPROM save sequencing, pending request state, timeout behavior, quiet-mode diagnostics, decode, and emitted signals
+  - runtime packet ownership and ordering remain unchanged
+- What changed:
+  - `ProductionParameterController` no longer subscribes directly to raw `packet_received` fan-out
+  - parameter verify/write/EEPROM behavior remains controller-owned
+- Explicitly unchanged:
+  - workbook behavior and workbook formulas
+  - Production Test ingress adapter
+  - no general router introduced
+
+## Cleanup update
+
+- Selected Phase L3A cleanup:
+  - delete proven dead leftovers after ingress and runtime-LED migrations
+- What changed:
+  - removed dead `ProductionTestController._handle_runtime_packet(...)` wrapper after `ProductionTestTransportAdapter` became the Production Test ingress owner
+  - removed dead Single Axis popup LED compatibility methods and unused middle-travel refresh helper after popup LED rendering became runtime-backed
+  - removed stale `node_status["info_requested"]` field from default runtime node state
+- Explicitly unchanged:
+  - Sampling popup compatibility no-op methods
+  - `serial_conn/app_protocol_handler.py`
+  - workflow behavior, runtime ownership, and packet ordering
+
+## F. Current deferred items
+
+- Sampling popup runtime-backed L/R LED display remains deferred and optional
+- Sampling save/export gating remains a workflow decision, not an active migration requirement
+- Sampling duplicate workbook-label validation remains deferred hardening
+- Sampling real workbook template validation remains a live-validation item
+- `ProductionParameterController` ingress migration is complete; any future parameter-routing work would be optional narrowing only
+- Mechanical visual polish remains optional
+- Sampling popup compatibility no-op cleanup remains optional
+- `serial_conn/app_protocol_handler.py` removal remains deferred until external/manual usage is ruled out
+- a post-runtime packet-bus notification path is deferred unless replacing raw UI invalidators becomes worth the churn
+
+## G. Governing rule
 
 Every touched responsibility must end with fewer owners, fewer active paths, and a clear deletion plan.
 

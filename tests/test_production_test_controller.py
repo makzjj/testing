@@ -25,6 +25,7 @@ from gui.workspace.controllers.single_axis_functional_test_controller import (
 )
 from gui.workspace.controllers.sampling_test_controller import SamplingResumeContext, SamplingTestController
 from gui.workspace.widgets import ResponsiveRow
+from gui.workspace.pages.production_test_controller import ProductionTestController
 from gui.workspace.pages.production_parameter_controller import (
     EEPROM_SAVE_COMMAND,
     SET_COMMAND_SUFFIX,
@@ -265,6 +266,248 @@ class _FakeRobotPowerMessageBox:
 
     def clickedButton(self):
         return self._clicked_button
+
+
+class ProductionTestControllerIngressTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._app = QApplication.instance() or QApplication([])
+
+    def _make_controller(self, *, timeout_ms: int = 100) -> tuple[ProductionTestController, _FakeRuntimeWindow]:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        controller = ProductionTestController(bridge, timeout_ms=timeout_ms)
+        return controller, runtime_window
+
+    def _emit_packet(self, runtime_window: _FakeRuntimeWindow, *, sender: int, cmd: int, params: list[int]) -> None:
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": sender, "cmd": cmd, "params": list(params)}
+        )
+        self._app.processEvents()
+
+    def _start_basic_controller(self, *, expected_uuid: int | None = None, timeout_ms: int = 100) -> tuple[ProductionTestController, _FakeRuntimeWindow]:
+        controller, runtime_window = self._make_controller(timeout_ms=timeout_ms)
+        self.assertTrue(controller.run_test(3, "X", expected_uuid=expected_uuid))
+        return controller, runtime_window
+
+    def _start_movement_controller(self, *, timeout_ms: int = 100) -> tuple[ProductionTestController, _FakeRuntimeWindow]:
+        controller, runtime_window = self._make_controller(timeout_ms=timeout_ms)
+        self.assertTrue(controller.run_test(3, "X", profile_mode="movement"))
+        return controller, runtime_window
+
+    def _advance_basic_to(
+        self,
+        controller: ProductionTestController,
+        runtime_window: _FakeRuntimeWindow,
+        step_id: str,
+        *,
+        expected_uuid: int | None = None,
+    ) -> None:
+        while controller._active_step is not None and controller._active_step.step_id != step_id:
+            current_step = controller._active_step.step_id
+            if current_step == "echo":
+                self._emit_packet(runtime_window, sender=3, cmd=0xCB, params=[0xA5, 0x5A])
+            elif current_step == "getver":
+                self._emit_packet(runtime_window, sender=3, cmd=0xC8, params=[0x3A, 1, 2, 3])
+            elif current_step in {"getpos", "read_initial_position", "read_final_position"}:
+                self._emit_packet(runtime_window, sender=3, cmd=0x82, params=[0x00, 0x00, 0x00, 0x2A])
+            elif current_step in {"interrupt", "interrupt_initial"}:
+                self._emit_packet(runtime_window, sender=3, cmd=0xD8, params=[0, 1])
+            elif current_step == "uuid_verify":
+                assert expected_uuid is not None
+                self._emit_packet(
+                    runtime_window,
+                    sender=3,
+                    cmd=0xE0,
+                    params=[0x3A, *build_uuid_write_payload(expected_uuid)[2:]],
+                )
+            elif current_step == "wait_move_end":
+                self._emit_packet(runtime_window, sender=3, cmd=0x81, params=[0x45, 0x00, 0x00, 0x00, 0x10])
+            else:
+                self.fail(f"Unhandled Production test step {current_step}")
+
+        assert controller._active_step is not None
+        self.assertEqual(controller._active_step.step_id, step_id)
+
+    def test_wrong_node_getpos_does_not_advance_or_fail_production_test(self) -> None:
+        controller, runtime_window = self._start_basic_controller()
+        self._advance_basic_to(controller, runtime_window, "getpos")
+
+        self._emit_packet(runtime_window, sender=4, cmd=0x82, params=[0x00, 0x00, 0x00, 0x2A])
+
+        self.assertTrue(controller.is_active())
+        assert controller._active_step is not None
+        self.assertEqual(controller._active_step.step_id, "getpos")
+        self.assertIsNone(controller.last_final_result)
+
+    def test_wrong_node_d8_does_not_advance_or_fail_production_test(self) -> None:
+        controller, runtime_window = self._start_basic_controller()
+        self._advance_basic_to(controller, runtime_window, "interrupt")
+
+        self._emit_packet(runtime_window, sender=4, cmd=0xD8, params=[0, 1])
+
+        self.assertTrue(controller.is_active())
+        assert controller._active_step is not None
+        self.assertEqual(controller._active_step.step_id, "interrupt")
+        self.assertIsNone(controller.last_final_result)
+
+    def test_wrong_node_tpos_does_not_advance_or_fail_production_test(self) -> None:
+        controller, runtime_window = self._start_movement_controller()
+        self._advance_basic_to(controller, runtime_window, "wait_move_end")
+
+        self._emit_packet(runtime_window, sender=4, cmd=0x81, params=[0x45, 0x00, 0x00, 0x00, 0x10])
+
+        self.assertTrue(controller.is_active())
+        assert controller._active_step is not None
+        self.assertEqual(controller._active_step.step_id, "wait_move_end")
+        self.assertIsNone(controller.last_final_result)
+
+    def test_wrong_node_uuid_does_not_advance_or_fail_production_test(self) -> None:
+        controller, runtime_window = self._start_basic_controller(expected_uuid=1223303010)
+        self._advance_basic_to(controller, runtime_window, "uuid_verify", expected_uuid=1223303010)
+
+        self._emit_packet(
+            runtime_window,
+            sender=4,
+            cmd=0xE0,
+            params=[0x3A, *build_uuid_write_payload(1223303010)[2:]],
+        )
+
+        self.assertTrue(controller.is_active())
+        assert controller._active_step is not None
+        self.assertEqual(controller._active_step.step_id, "uuid_verify")
+        self.assertIsNone(controller.last_final_result)
+
+    def test_stale_and_unexpected_packets_are_ignored_for_current_step(self) -> None:
+        controller, runtime_window = self._start_basic_controller(expected_uuid=1223303010)
+        self._advance_basic_to(controller, runtime_window, "interrupt", expected_uuid=1223303010)
+
+        self._emit_packet(runtime_window, sender=3, cmd=0x82, params=[0x00, 0x00, 0x00, 0x2A])
+        self._emit_packet(
+            runtime_window,
+            sender=3,
+            cmd=0xE0,
+            params=[0x3A, *build_uuid_write_payload(1223303010)[2:]],
+        )
+        self._emit_packet(runtime_window, sender=3, cmd=0xC8, params=[0x3A, 1, 2, 3])
+
+        assert controller._active_step is not None
+        self.assertEqual(controller._active_step.step_id, "interrupt")
+        self.assertIsNone(controller.last_final_result)
+
+        self._emit_packet(runtime_window, sender=3, cmd=0xD8, params=[0, 1])
+        assert controller._active_step is not None
+        self.assertEqual(controller._active_step.step_id, "uuid_verify")
+
+        self._emit_packet(runtime_window, sender=3, cmd=0xD8, params=[0, 1])
+        self._emit_packet(runtime_window, sender=3, cmd=0xC8, params=[0x3A, 1, 2, 3])
+        assert controller._active_step is not None
+        self.assertEqual(controller._active_step.step_id, "uuid_verify")
+
+    def test_stale_tpos_after_wait_move_end_is_ignored_during_read_final_position(self) -> None:
+        controller, runtime_window = self._start_movement_controller()
+        self._advance_basic_to(controller, runtime_window, "wait_move_end")
+
+        self._emit_packet(runtime_window, sender=3, cmd=0x81, params=[0x45, 0x00, 0x00, 0x00, 0x10])
+        assert controller._active_step is not None
+        self.assertEqual(controller._active_step.step_id, "read_final_position")
+
+        self._emit_packet(runtime_window, sender=3, cmd=0x81, params=[0x45, 0x00, 0x00, 0x00, 0x11])
+
+        assert controller._active_step is not None
+        self.assertEqual(controller._active_step.step_id, "read_final_position")
+        self.assertIsNone(controller.last_final_result)
+
+    def test_parameter_and_eeprom_packets_are_not_forwarded_to_production_test_controller(self) -> None:
+        controller, runtime_window = self._start_basic_controller()
+        assert controller._active_step is not None
+        self.assertEqual(controller._active_step.step_id, "echo")
+
+        self._emit_packet(runtime_window, sender=3, cmd=0x85, params=[0x00, 0x50])
+        self._emit_packet(runtime_window, sender=3, cmd=EEPROM_SAVE_COMMAND, params=[0x0A, 0x00])
+
+        assert controller._active_step is not None
+        self.assertEqual(controller._active_step.step_id, "echo")
+        self.assertIsNone(controller.last_final_result)
+
+    def test_expected_basic_profile_packets_still_advance_with_adapter(self) -> None:
+        controller, runtime_window = self._start_basic_controller()
+
+        self._emit_packet(runtime_window, sender=3, cmd=0xCB, params=[0xA5, 0x5A])
+        assert controller._active_step is not None
+        self.assertEqual(controller._active_step.step_id, "getver")
+
+        self._emit_packet(runtime_window, sender=3, cmd=0xC8, params=[0x3A, 1, 2, 3])
+        assert controller._active_step is not None
+        self.assertEqual(controller._active_step.step_id, "getpos")
+
+        self._emit_packet(runtime_window, sender=3, cmd=0x82, params=[0x00, 0x00, 0x00, 0x2A])
+        assert controller._active_step is not None
+        self.assertEqual(controller._active_step.step_id, "interrupt")
+
+        self._emit_packet(runtime_window, sender=3, cmd=0xD8, params=[0, 1])
+        self.assertFalse(controller.is_active())
+        assert controller.last_final_result is not None
+        self.assertEqual(controller.last_final_result.final_result, "PASS")
+
+    def test_expected_uuid_and_tpos_packets_still_advance_with_adapter(self) -> None:
+        controller, runtime_window = self._start_basic_controller(expected_uuid=1223303010)
+        self._advance_basic_to(controller, runtime_window, "uuid_verify", expected_uuid=1223303010)
+
+        self._emit_packet(
+            runtime_window,
+            sender=3,
+            cmd=0xE0,
+            params=[0x3A, *build_uuid_write_payload(1223303010)[2:]],
+        )
+        self.assertFalse(controller.is_active())
+        assert controller.last_final_result is not None
+        self.assertEqual(controller.last_final_result.final_result, "PASS")
+
+        movement_controller, movement_runtime = self._start_movement_controller()
+        self._advance_basic_to(movement_controller, movement_runtime, "wait_move_end")
+        self._emit_packet(movement_runtime, sender=3, cmd=0x81, params=[0x45, 0x00, 0x00, 0x00, 0x10])
+        assert movement_controller._active_step is not None
+        self.assertEqual(movement_controller._active_step.step_id, "read_final_position")
+
+    def test_packets_after_complete_fail_and_abort_are_ignored(self) -> None:
+        controller, runtime_window = self._start_basic_controller()
+        self._advance_basic_to(controller, runtime_window, "interrupt")
+        self._emit_packet(runtime_window, sender=3, cmd=0xD8, params=[0, 1])
+        assert controller.last_final_result is not None
+        self.assertEqual(controller.last_final_result.final_result, "PASS")
+
+        self._emit_packet(runtime_window, sender=3, cmd=0x82, params=[0x00, 0x00, 0x00, 0x2A])
+        assert controller.last_final_result is not None
+        self.assertEqual(controller.last_final_result.final_result, "PASS")
+
+        fail_controller, fail_runtime = self._start_basic_controller()
+        self._advance_basic_to(fail_controller, fail_runtime, "getver")
+        self._emit_packet(fail_runtime, sender=3, cmd=0xC8, params=[0x00])
+        assert fail_controller.last_final_result is not None
+        self.assertEqual(fail_controller.last_final_result.final_result, "FAIL")
+        self._emit_packet(fail_runtime, sender=3, cmd=0x82, params=[0x00, 0x00, 0x00, 0x2A])
+        assert fail_controller.last_final_result is not None
+        self.assertEqual(fail_controller.last_final_result.final_result, "FAIL")
+
+        abort_controller, abort_runtime = self._start_basic_controller()
+        self.assertTrue(abort_controller.abort_test())
+        assert abort_controller.last_final_result is not None
+        self.assertEqual(abort_controller.last_final_result.final_result, "ABORTED")
+        self._emit_packet(abort_runtime, sender=3, cmd=0xCB, params=[0xA5, 0x5A])
+        assert abort_controller.last_final_result is not None
+        self.assertEqual(abort_controller.last_final_result.final_result, "ABORTED")
+
+    def test_timeout_and_abort_behavior_remain_unchanged_with_adapter(self) -> None:
+        controller, _runtime_window = self._make_controller(timeout_ms=20)
+        self.assertTrue(controller.run_test(3, "X"))
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline and controller.last_final_result is None:
+            self._app.processEvents()
+            time.sleep(0.01)
+
+        assert controller.last_final_result is not None
+        self.assertEqual(controller.last_final_result.final_result, "TIMEOUT")
 
 
 class ProductionPageWorkflowTests(unittest.TestCase):
@@ -3985,6 +4228,7 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             "_start_pwm_verify_for_row",
         ):
             self.assertFalse(hasattr(controller, attr_name), attr_name)
+        self.assertFalse(hasattr(controller, "_handle_runtime_packet"))
 
     def test_production_parameter_controller_no_longer_exposes_duplicate_motor_builders(self) -> None:
         import gui.workspace.pages.production_parameter_controller as production_parameter_controller
@@ -4018,6 +4262,41 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(runtime_window.backend_client.sent_commands[0], (6, [0x84, 0x00, 0x64]))
 
+    def test_parameter_write_ignores_wrong_node_and_unexpected_packets_with_adapter(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        controller = ProductionParameterController(bridge, timeout_ms=100)
+        definitions = {definition.name: definition for definition in default_workbook_parameter_definitions()}
+        request = controller.build_parameter_request(definitions["PWM"], 6, "H", "100")
+        events: list[tuple[bool, str]] = []
+        controller.parameter_write_finished.connect(lambda passed, reason: events.append((passed, reason)))
+
+        ok, _message = controller.write_parameters([request])
+        self.assertTrue(ok)
+        self.assertEqual(runtime_window.backend_client.sent_commands[0], (6, [0x84, 0x00, 0x64]))
+
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 5, "cmd": 0x84, "params": [0x53, 0x00, 0x64]}
+        )
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x85, "params": [0x00, 0x64]}
+        )
+        self._app.processEvents()
+
+        self.assertEqual(events, [])
+        self.assertIsNotNone(controller._pending_parameter_request)
+        self.assertEqual(controller._parameter_operation_mode, "write")
+
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x84, "params": [0x53, 0x00, 0x64]}
+        )
+        self._app.processEvents()
+
+        self.assertTrue(events)
+        self.assertTrue(events[-1][0], events[-1][1])
+        self.assertIsNone(controller._pending_parameter_request)
+        self.assertIsNone(controller._parameter_operation_mode)
+
     def test_generic_pwm_verify_uses_getvel_and_decodes_response(self) -> None:
         runtime_window = _FakeRuntimeWindow()
         bridge = _FakeBridge(runtime_window)
@@ -4036,6 +4315,40 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         self.assertTrue(events)
         self.assertTrue(events[-1][0], events[-1][1])
         self.assertEqual(events[-1][2][0].actual_text, "80")
+
+    def test_parameter_verify_ignores_wrong_node_and_unexpected_packets_with_adapter(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        controller = ProductionParameterController(bridge, timeout_ms=100)
+        definitions = {definition.name: definition for definition in default_workbook_parameter_definitions()}
+        request = controller.build_parameter_request(definitions["UUID"], 6, "H", "1223306010")
+        events: list[tuple[bool, str, object]] = []
+        controller.parameter_verification_finished.connect(lambda passed, reason, results: events.append((passed, reason, results)))
+
+        self.assertTrue(controller.verify_parameters([request]))
+        self.assertEqual(runtime_window.backend_client.sent_commands[0], (6, [0xE0, 0x3F]))
+
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 5, "cmd": 0xE0, "params": [0x3A, *build_uuid_write_payload(1223306010)[2:]]}
+        )
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x85, "params": [0x00, 0x50]}
+        )
+        self._app.processEvents()
+
+        self.assertEqual(events, [])
+        self.assertIsNotNone(controller._pending_parameter_request)
+        self.assertEqual(controller._parameter_operation_mode, "verify")
+
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0xE0, "params": [0x3A, *build_uuid_write_payload(1223306010)[2:]]}
+        )
+        self._app.processEvents()
+
+        self.assertTrue(events)
+        self.assertTrue(events[-1][0], events[-1][1])
+        self.assertIsNone(controller._pending_parameter_request)
+        self.assertIsNone(controller._parameter_operation_mode)
 
     def test_verify_pwm_accepts_expected_values_as_string_and_int(self) -> None:
         definitions = {definition.name: definition for definition in default_workbook_parameter_definitions()}
@@ -4279,6 +4592,38 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         controller._handle_eeprom_settle_timeout()
         self.assertTrue(controller.verify_parameters([request]))
         self.assertEqual(runtime_window.backend_client.sent_commands[-1], (6, [0xE0, 0x3F]))
+
+    def test_eeprom_save_ignores_wrong_node_and_unexpected_packets_with_adapter(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        controller = ProductionParameterController(bridge, timeout_ms=100)
+        events: list[tuple[bool, str]] = []
+        controller.eeprom_save_finished.connect(lambda passed, reason: events.append((passed, reason)))
+
+        self.assertTrue(controller.save_parameters_to_eeprom(6, "H"))
+        self.assertEqual(runtime_window.backend_client.sent_commands[-1], (6, [EEPROM_SAVE_COMMAND, SET_COMMAND_SUFFIX]))
+
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 5, "cmd": EEPROM_SAVE_COMMAND, "params": [0x0A, 0x00]}
+        )
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x85, "params": [0x00, 0x50]}
+        )
+        self._app.processEvents()
+
+        self.assertEqual(events, [])
+        self.assertIsNotNone(controller._pending_eeprom_save)
+        self.assertFalse(controller._eeprom_settle_active)
+
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": EEPROM_SAVE_COMMAND, "params": [0x0A, 0x00]}
+        )
+        self._app.processEvents()
+
+        self.assertTrue(events)
+        self.assertTrue(events[-1][0], events[-1][1])
+        self.assertIsNone(controller._pending_eeprom_save)
+        self.assertTrue(controller._eeprom_settle_active)
 
     def test_production_page_no_longer_exposes_uuid_pwm_workbook_wrapper_methods(self) -> None:
         runtime_window = _FakeRuntimeWindow()

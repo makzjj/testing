@@ -329,8 +329,7 @@ class MechanicalPage(BaseWorkspacePage):
         self._pending_request: _PendingMechanicalRequest | None = None
         self._persistent_write_pending = False
         self._parameter_actual_texts: dict[str, str] = {}
-        self._sensor_state_cache: dict[str, int | None] = {"left": None, "right": None}
-        self._sensor_state_node_id: int | None = None
+        self._sensor_state_cache: dict[int, dict[str, int | None]] = {}
         self._actual_nodeconfig_value: int | None = None
         self._pending_nodeconfig_value: int | None = None
         self._updating_nodeconfig_editor = False
@@ -817,7 +816,6 @@ class MechanicalPage(BaseWorkspacePage):
         self._cancel_release_watch("node_change")
         self._parameter_actual_texts = {}
         self._persistent_write_pending = False
-        self._reset_sensor_state()
         self._refresh_from_selected_node()
         self._sync_movement_popup_selection_from_page()
         self._sync_movement_popup_controls()
@@ -841,8 +839,7 @@ class MechanicalPage(BaseWorkspacePage):
             self._render_sensor_state()
             return
 
-        self.axis_type_value.setText(str(entry.get("axis", "n/a")))
-        self._apply_nodeconfig_display(entry.get("node_config", "n/a"))
+        self._refresh_runtime_backed_header(entry)
         self.pid_p_value.setText(str(entry.get("pos_kp", "n/a")))
         self.pid_i_value.setText(str(entry.get("pos_ki", "n/a")))
         self.pid_d_value.setText(str(entry.get("pos_kd", "n/a")))
@@ -854,6 +851,20 @@ class MechanicalPage(BaseWorkspacePage):
         self.current_position_value.setText("n/a")
         self.current_pwm_value.setText("0")
         self._render_sensor_state()
+
+    def _refresh_runtime_backed_header(self, entry: dict[str, Any], *, fallback_nodeconfig: Any = None) -> None:
+        node_id = entry.get("node_id")
+        node_id = int(node_id) if isinstance(node_id, int) else None
+        runtime_status = self._runtime_node_status_for_node(node_id)
+        runtime_type = str(runtime_status.get("type", "") or "").strip()
+        axis_fallback = str(entry.get("axis", "n/a") or "n/a").strip() or "n/a"
+        axis_text = runtime_type or axis_fallback
+        self.axis_type_value.setText(str(axis_text).upper() if axis_text.lower() != "n/a" else "n/a")
+
+        runtime_nodeconfig = self._runtime_nodeconfig_value_for_node(node_id)
+        if runtime_nodeconfig is None:
+            runtime_nodeconfig = fallback_nodeconfig if fallback_nodeconfig is not None else entry.get("node_config", "n/a")
+        self._apply_nodeconfig_display(runtime_nodeconfig)
 
     def _collect_node_entries(self, raw_config: dict) -> list[dict[str, Any]]:
         axes = self._schema_adapter.extract_axis_section(raw_config)
@@ -1456,7 +1467,11 @@ class MechanicalPage(BaseWorkspacePage):
             self._append_log(f"[Mechanical] Read NODECONFIG failed: unexpected response {self._hex_payload(payload)}.")
             return
         formatted = self._format_nodeconfig_bits(decoded_value)
-        self._apply_nodeconfig_display(decoded_value)
+        entry = self._selected_node_entry()
+        if entry is not None:
+            self._refresh_runtime_backed_header(entry, fallback_nodeconfig=decoded_value)
+        else:
+            self._apply_nodeconfig_display(decoded_value)
         self._append_log(f"[Mechanical] Parsed Read NODECONFIG RX: {self._hex_payload(payload)} -> {formatted}.")
 
     def _handle_flag_response(self, decoded_type: Any, decoded_value: Any, payload: list[int], *, side: str) -> None:
@@ -1468,8 +1483,8 @@ class MechanicalPage(BaseWorkspacePage):
         if pending_node_id is None or selected_node_id != pending_node_id:
             self._append_log(f"[Mechanical] Ignored Read {side.upper()}FLAG RX for stale node context {pending_node_id!r}.")
             return
-        self._sensor_state_node_id = pending_node_id
-        self._sensor_state_cache[side] = decoded_value & 0xFF
+        node_cache = self._sensor_state_cache.setdefault(int(pending_node_id), {"left": None, "right": None})
+        node_cache[side] = decoded_value & 0xFF
         self._render_sensor_state()
         self._append_log(
             f"[Mechanical] Parsed Read {side.upper()}FLAG RX: {self._hex_payload(payload)} -> 0x{decoded_value:02X}."
@@ -1707,15 +1722,7 @@ class MechanicalPage(BaseWorkspacePage):
             return self._parameter_actual_texts.get(name, "0")
         return widget.text().strip() or self._parameter_actual_texts.get(name, "0")
 
-    def _reset_sensor_state(self) -> None:
-        self._sensor_state_node_id = self._selected_node_id()
-        self._sensor_state_cache = {"left": None, "right": None}
-
     def _render_sensor_state(self) -> None:
-        selected_node_id = self._selected_node_id()
-        if self._sensor_state_node_id != selected_node_id:
-            self._sensor_state_cache = {"left": None, "right": None}
-            self._sensor_state_node_id = selected_node_id
         self._apply_sensor_value("left", self.left_flag_led, self.left_flag_state_value, self.left_flag_setting_selector)
         self._apply_sensor_value("right", self.right_flag_led, self.right_flag_state_value, self.right_flag_setting_selector)
 
@@ -1726,13 +1733,15 @@ class MechanicalPage(BaseWorkspacePage):
         state_value: QLineEdit,
         setting_selector: QComboBox,
     ) -> None:
-        raw_value = self._sensor_state_cache.get(side)
+        raw_value = self._selected_sensor_raw_value(side)
         sensor_state = self._sensor_display_from_raw(raw_value)
         led_state = self._sensor_led_state(side)
         state_value.setText(sensor_state["text"])
         led.setStyleSheet(f"border-radius: 6px; background: {led_state['color']};")
         if raw_value is not None and str(raw_value) in {"1", "9", "11"}:
             setting_selector.setCurrentText(str(raw_value))
+        else:
+            setting_selector.setCurrentIndex(-1)
 
     @staticmethod
     def _sensor_display_from_raw(raw_value: int | None) -> dict[str, Any]:
@@ -1763,6 +1772,33 @@ class MechanicalPage(BaseWorkspacePage):
 
     def _runtime_interrupt_state_for_node(self, node_id: int) -> dict[str, object]:
         return self._bridge.get_runtime_node_interrupt_state(int(node_id), create_if_missing=False)
+
+    def _runtime_node_status_for_node(self, node_id: int | None) -> dict[str, Any]:
+        if node_id is None:
+            return {}
+        runtime_window = self._bridge.get_runtime_window(create_if_missing=False)
+        if runtime_window is None:
+            return {}
+        node_status = getattr(runtime_window, "node_status", {}) or {}
+        status = node_status.get(int(node_id), {}) if isinstance(node_status, dict) else {}
+        return status if isinstance(status, dict) else {}
+
+    def _runtime_nodeconfig_value_for_node(self, node_id: int | None) -> int | None:
+        if node_id is None:
+            return None
+        polarity = self._bridge.get_runtime_node_motion_polarity(int(node_id), create_if_missing=False)
+        raw_value = polarity.get("nodeconfig_raw") if isinstance(polarity, dict) else None
+        return self._normalize_nodeconfig_value(raw_value)
+
+    def _selected_sensor_raw_value(self, side: str) -> int | None:
+        node_id = self._selected_node_id()
+        if node_id is None:
+            return None
+        node_cache = self._sensor_state_cache.get(int(node_id), {})
+        if not isinstance(node_cache, dict):
+            return None
+        raw_value = node_cache.get(side)
+        return int(raw_value) & 0xFF if isinstance(raw_value, int) else None
 
     def _attach_runtime_packet_listener(self) -> None:
         runtime_window = self._bridge.get_runtime_window(create_if_missing=False)
@@ -1938,6 +1974,11 @@ class MechanicalPage(BaseWorkspacePage):
         text = str(value).strip()
         if not text or text.lower() == "n/a":
             return None
+        if all(ch in "01" for ch in text) and len(text) in {4, 8}:
+            try:
+                return int(text, 2) & 0x0F
+            except ValueError:
+                return None
         try:
             return int(text, 16) & 0x0F
         except ValueError:

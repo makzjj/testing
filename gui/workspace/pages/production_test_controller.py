@@ -6,6 +6,7 @@ from typing import Any
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
+from services.production_test_transport_adapter import ProductionTestTransportAdapter
 from ..bridges import WorkspaceRuntimeBridge
 from .production_parameter_controller import decode_uuid_response
 from .production_test_models import FinalNodeResult, StepResult, TestProfile, TestStep, Tolerance, evaluate_tolerance
@@ -329,6 +330,7 @@ class ProductionTestController(QObject):
         self._timeout_timer.setSingleShot(True)
         self._timeout_timer.timeout.connect(self._handle_timeout)
         self._runtime_window = None
+        self._transport_adapter = ProductionTestTransportAdapter(self)
         self._active_profile: TestProfile | None = None
         self._active_step_index = 0
         self._active_step: TestStep | None = None
@@ -440,14 +442,36 @@ class ProductionTestController(QObject):
         if runtime_window is self._runtime_window:
             return
 
-        if self._runtime_window is not None and hasattr(self._runtime_window, "packet_received"):
-            try:
-                self._runtime_window.packet_received.disconnect(self._handle_runtime_packet)
-            except (TypeError, RuntimeError):
-                pass
-
-        runtime_window.packet_received.connect(self._handle_runtime_packet)
+        self._transport_adapter.detach_runtime_window()
+        self._transport_adapter.attach_runtime_window(runtime_window)
         self._runtime_window = runtime_window
+
+    def accepts_workflow_packet(
+        self,
+        decoded_kind: str | None,
+        decoded_value: object,
+        *,
+        sender: int | None,
+        cmd: int,
+        params: list[int],
+    ) -> bool:
+        profile = self._active_profile
+        step = self._active_step
+        if profile is None or step is None:
+            return False
+        if sender is None or int(sender) != profile.node_id:
+            return False
+        expected_command = step.expected_response_command_id
+        if expected_command is None:
+            return False
+        if int(cmd) != int(expected_command):
+            return False
+
+        # Relevance filtering stays deliberately narrow here. The adapter owns
+        # only step-family filtering; semantic validation and pass/fail remain
+        # controller-owned so invalid expected responses still fail locally.
+        _ = decoded_kind, decoded_value, params
+        return True
 
     def _run_next_step(self) -> None:
         profile = self._active_profile
@@ -492,7 +516,7 @@ class ProductionTestController(QObject):
             return
         self._timeout_timer.start(int(step.timeout_ms))
 
-    def _handle_runtime_packet(self, packet: object) -> None:
+    def handle_runtime_packet(self, packet: object) -> None:
         profile = self._active_profile
         step = self._active_step
         if profile is None or step is None:

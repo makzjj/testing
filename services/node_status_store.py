@@ -18,7 +18,6 @@ def build_default_node_state() -> dict[str, Any]:
         "type": "",
         "interrupt": "",
         "interrupt_state": build_default_interrupt_state(),
-        "info_requested": False,
     }
 
 
