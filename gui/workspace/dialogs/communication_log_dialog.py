@@ -58,7 +58,8 @@ class CommunicationLogDialog(QDialog):
         self.clear_button.clicked.connect(self._handle_clear_clicked)
         header_row.addWidget(self.clear_button)
 
-        self.hide_polling_checkbox = QCheckBox("Hide polling packets")
+        self.hide_polling_checkbox = QCheckBox("Hide polling/status packets")
+        self.hide_polling_checkbox.setChecked(False)
         self.hide_polling_checkbox.toggled.connect(lambda _checked: self._sync_from_store())
         header_row.addWidget(self.hide_polling_checkbox)
 

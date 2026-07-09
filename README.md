@@ -1,12 +1,10 @@
 # IPQC Software
 
-PC application for In-Process Quality Control (IPQC). This repository contains a PyQt6 desktop application used to configure, validate, and test ML2.0 robotic controller nodes over a proprietary CAN-over-UART communication path.
-
----
+IPQC is a Windows desktop application for In-Process Quality Control of ML2.0 robotic controller nodes. It is used to configure, validate, program, test, and diagnose robot nodes over a proprietary CAN-over-UART link.
 
 ## Project Overview
 
-The deployed system is:
+The system context is:
 
 ```text
 Robot
@@ -20,76 +18,55 @@ Robot Nodes
 IPQC Desktop Application
 ```
 
-The desktop application is the engineer and operator entry point on the PC side. It communicates with the robot through the master MCU, verifies node parameters against project configuration and workbook data, performs production programming, runs functional tests, executes sampling workflows, exposes mechanical and firmware diagnostics, and generates completed workbook outputs for traceability.
+The application is the PC-side operator and engineering surface for:
 
-Its current responsibilities include:
+- communication with the master MCU and robot nodes
+- workbook-driven parameter verification and programming
+- Single Axis functional testing
+- sampling and workbook result export
+- mechanical diagnostics and motion utilities
+- firmware/protocol utilities
+- runtime monitoring and communication logging
+- live Motor Current diagnostic plotting
 
-- communication
-- parameter verification
-- production programming
-- functional testing
-- sampling
-- diagnostics
-- workbook generation
-
----
-
-## Major Features
+## Major Capabilities
 
 ### Production
 
-- Load IPQC workbook templates
-- Verify node parameters against workbook/project expectations
-- Perform selective parameter writes
-- Save persistent values to EEPROM when required
-- Generate completed workbook output
+- load IPQC workbook templates
+- verify workbook parameters against live node values
+- perform selective parameter writes
+- save persistent values to EEPROM when required
+- generate completed workbook outputs
 
 ### Single Axis
 
-- Hunting workflow
-- Encoder range measurement
-- Sensor validation
-- Timeout and abort handling
+- hunting workflow
+- encoder range measurement
+- sensor validation
+- timeout and abort handling
 
 ### Sampling
 
-- Travel timing capture
-- Encoder-derived measurement statistics
-- Workbook export through the IPQC Excel adapter
+- travel timing capture
+- encoder-based measurement statistics
+- workbook export through the shared Excel adapter
 
-### Mechanical
+### Mechanical, Firmware, and Runtime
 
-- Manual diagnostics
-- Parameter utilities
-- Motion commands and position utilities
-
-### Plots
-
-- Live Motor Current plotting
-- Placeholder launchers for future diagnostic plots
-
-### Project Config
-
-- Project configuration editor for YAML-based workspace definitions
-
-### Firmware
-
-- Firmware and protocol utilities
-
-### Runtime
-
-- Runtime monitoring through the embedded legacy runtime surface
-
----
+- manual diagnostics and motion utilities
+- firmware/protocol tools
+- runtime monitoring and communication log viewing
+- live Motor Current plotting
 
 ## High-Level Architecture
 
-This codebase is in an incremental layered refactor. The current architecture is organized as:
+The codebase follows a layered ownership model:
 
 ```text
-Protocol Layer
+Protocol
   ->
-Runtime State
+Runtime
   ->
 Request / Operation Adapters
   ->
@@ -98,76 +75,49 @@ Workflow Controllers
 UI
 ```
 
-- **Protocol Layer**: owns packet parsing/building and semantic command decode only.
-- **Runtime State**: owns shared per-node and system state, unsolicited events, and runtime-backed diagnostic data. Runtime is the single source of truth.
-- **Request / Operation Adapters**: narrow transport adapters that filter shared packet traffic down to workflow-relevant packets.
-- **Workflow Controllers**: own workflow sequencing, timeouts, pass/fail decisions, and operation-local state.
-- **UI**: starts workflows and renders runtime-backed state. UI renders runtime and does not own protocol state.
+- **Protocol** owns packet builders, frame parsing, and semantic decoding.
+- **Runtime** owns shared per-node and system state.
+- **Adapters** filter shared packet traffic down to workflow-relevant packets.
+- **Controllers** own workflow sequencing, timeouts, and pass/fail logic.
+- **UI** starts workflows and renders runtime-backed state.
 
-In practice, controllers own workflows, adapters filter workflow packets, and the protocol layer owns packet parsing/building. The repository still contains active legacy shell code while this layered structure is completed, but the remaining work is additive rather than a ground-up architectural rewrite.
+The detailed architecture, ownership rules, and current status are documented in [ARCHITECTURE.md](ARCHITECTURE.md). Exact canonical owners are tracked in [CANONICAL_PIPELINE_REGISTRY.md](CANONICAL_PIPELINE_REGISTRY.md).
 
----
+## Repository Layout
 
-## Repository Structure
+- `gui/`: PyQt6 application UI, workspace shell, pages, dialogs, and legacy runtime window
+- `services/`: shared runtime handlers, workflow adapters, workbook services, and cross-workflow utilities
+- `serial_conn/`: low-level serial transport, framing, and packet parsing
+- `data/`: canonical binary command builders, semantic parsers, and packaged runtime data folders
+- `myconfig/`: YAML-backed project configuration models, validation, editor, and save flow
+- `project_configs/`: selectable project definitions loaded by the project selector
+- `resources/`: bundled application icons and images
+- `tests/`: pytest regression suite
+- `scripts/`: local helper scripts for running tests and building releases
 
-- `data/`: shared command builders/parsers plus runtime data folders for logs, exports, and writable config.
-- `gui/`: PyQt6 UI code, including the workspace shell, pages, dialogs, and the still-active legacy runtime window.
-- `services/`: runtime state handling, narrow workflow adapters, workbook services, backend helpers, and shared motion/runtime utilities.
-- `serial_conn/`: low-level serial transport, framing, command handling, and packet parsing for the CAN-over-UART link.
-- `myconfig/`: project configuration models, YAML loading, validation, editing, and save/version services.
-- `resources/`: bundled application images and icons.
-- `project_configs/`: selectable project YAML definitions loaded by the project selector window.
-- `tests/`: pytest-based regression coverage for protocol helpers, runtime services, controllers, pages, config flows, and workbook handling.
-- `docs/`: architecture migration notes and the canonical pipeline registry.
-- `scripts/`: local build and test entry points, including the Windows packaging script.
+The desktop entry point is `main.py`.
 
-The desktop entry point is `main.py`, which prepares runtime directories and launches the project selector window.
+## Feature Summary
 
----
+The current repository state includes:
 
-## Testing
+- runtime-owned node and system state
+- narrow workflow ingress adapters for Sampling, Single Axis, Production Test, and Production Parameters
+- a shared Production parameter pipeline
+- runtime-backed interrupt and motor-current data
+- workbook serialization for Production and Sampling flows
+- a PyQt6 workspace shell that coexists with the legacy runtime surface during the layered refactor
 
-The repository uses `pytest`.
+Remaining work is primarily additive:
 
-Run the full suite with `python -m pytest`.
+- additional diagnostic plots
+- UI polish
+- documentation hardening
+- future product features
 
-Important test groups include:
+## Documentation
 
-- protocol helpers and parsing: `tests/test_binary_command_helpers.py`, `tests/test_serial_packet_parser.py`, `tests/test_tpos_decoder.py`
-- runtime and bridge behavior: `tests/test_backend_runtime_services.py`, `tests/test_workspace_runtime_bridge.py`, `tests/test_workspace_session_panel.py`
-- workflow controllers and adapters: `tests/test_sampling_controller.py`, `tests/test_single_axis_functional_controller.py`, `tests/test_single_axis_transport_integration.py`, `tests/test_functional_transport_adapter_integration.py`, `tests/test_production_test_controller.py`
-- UI, workbook, and config flows: `tests/test_mechanical_page.py`, `tests/test_motor_current_plot_dialog.py`, `tests/test_ipqc_excel_adapter.py`, `tests/test_config_services.py`, `tests/test_config_end_to_end.py`, `tests/test_project_loader.py`
-
-All new features should include regression tests.
-
-One known intentional Production test exclusion appears in the architecture doc's broader regression commands:
-
-- `tests/test_production_test_controller.py::test_production_page_robot_power_button_order_and_connection_state`
-
----
-
-## Deployment
-
-Windows build and deployment details are documented in [DEPLOYMENT_WINDOWS.md](DEPLOYMENT_WINDOWS.md).
-
----
-
-## Current Architecture Status
-
-- Runtime ownership completed
-- Narrow workflow adapters completed
-- Production parameter adapter completed
-- Mechanical cleanup completed
-- Motor Current plotting implemented
-- Remaining work focuses on feature additions rather than architectural restructuring
-
----
-
-## Development Guidelines
-
-- One responsibility, one owner.
-- Runtime owns shared state.
-- UI never owns protocol state.
-- Avoid duplicate implementations.
-- New commands go through canonical builders/parsers.
-- Always update tests.
+- [ARCHITECTURE.md](ARCHITECTURE.md): system design, layer responsibilities, and ownership model
+- [CANONICAL_PIPELINE_REGISTRY.md](CANONICAL_PIPELINE_REGISTRY.md): detailed technical registry of canonical owners
+- [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md): setup, testing, workflow, and contribution guidance
+- [DEPLOYMENT_WINDOWS.md](DEPLOYMENT_WINDOWS.md): Windows build and robot-PC deployment instructions

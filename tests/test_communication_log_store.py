@@ -11,6 +11,7 @@ from services.communication_log_store import (
     format_node_display,
     format_outgoing_frame_decoded_text,
     should_record_communication_frame,
+    should_display_log_entry,
 )
 
 
@@ -186,7 +187,7 @@ def test_export_uses_company_style_header_and_entries() -> None:
     assert "2026-06-19 09:38:55:214 [OUT] 25 A5 01 06 31 04 88 53 FF 42 00 00 (12)" in export_text
 
 
-def test_filtered_plain_text_hides_polling_packets_but_keeps_entries_recorded() -> None:
+def test_filtered_plain_text_hides_confirmed_polling_packets_but_keeps_entries_recorded() -> None:
     store = CommunicationLogStore()
     polling_frame = CommandBuilder.build_can_over_uart_packet(0x01, 0x07, [0xCF, 0x3F])
     logpos_disable_frame = CommandBuilder.build_can_over_uart_packet(0x01, 0x07, [0xE4, 0x3D, 0x00, 0x00])
@@ -209,11 +210,39 @@ def test_filtered_plain_text_hides_polling_packets_but_keeps_entries_recorded() 
     assert "E4 3D 00 00" in unfiltered
     assert "82 3F" in unfiltered
     assert "MOTOR_I 1234 mA" not in filtered
-    assert "GETPOS 0 0 0 1 (1)" not in filtered
     assert "CF 3F" not in filtered
     assert "E4 3D 00 00" not in filtered
     assert "82 3F" not in filtered
+    assert "GETPOS 0 0 0 1 (1)" in filtered
     assert "RUN 'S' 0 50 (50)" in filtered
+
+
+def test_should_display_log_entry_hides_confirmed_polling_only_when_enabled() -> None:
+    store = CommunicationLogStore()
+    store.record_out(
+        CommandBuilder.build_can_over_uart_packet(0x01, 0x07, [0xCF, 0x3F]),
+        decoded_line="                              [N7:NZ] MOTOR_I 345 mA",
+        moment=_fixed_time(),
+    )
+    store.record_out(
+        CommandBuilder.build_can_over_uart_packet(0x01, 0x07, [0x82, 0x3F]),
+        decoded_line="                              [N7:NZ] GETPOS 0 0 0 1 (1)",
+        moment=_fixed_time(),
+    )
+    store.record_out(
+        CommandBuilder.build_can_over_uart_packet(0x01, 0x06, [0x88, 0x53, 0x00, 0x32]),
+        decoded_line="                              [N6:H] RUN 'S' 0 50 (50)",
+        moment=_fixed_time(),
+    )
+
+    entries = store.entries()
+    assert len(entries) == 3
+    assert should_display_log_entry(entries[0], hide_polling_packets=False)
+    assert should_display_log_entry(entries[1], hide_polling_packets=False)
+    assert should_display_log_entry(entries[2], hide_polling_packets=False)
+    assert not should_display_log_entry(entries[0], hide_polling_packets=True)
+    assert should_display_log_entry(entries[1], hide_polling_packets=True)
+    assert should_display_log_entry(entries[2], hide_polling_packets=True)
 
 
 def test_communication_log_dialog_hide_polling_packets_filters_visible_text_only() -> None:
@@ -230,6 +259,8 @@ def test_communication_log_dialog_hide_polling_packets_filters_visible_text_only
     )
 
     dialog = CommunicationLogDialog(store)
+    assert dialog.hide_polling_checkbox.text() == "Hide polling/status packets"
+    assert not dialog.hide_polling_checkbox.isChecked()
     dialog._sync_from_store()
     assert "MOTOR_I 345 mA" in dialog.log_output.toPlainText()
     assert "RUN 'S' 0 50 (50)" in dialog.log_output.toPlainText()
@@ -241,4 +272,7 @@ def test_communication_log_dialog_hide_polling_packets_filters_visible_text_only
     assert "CF 3F" not in dialog.log_output.toPlainText()
     assert "RUN 'S' 0 50 (50)" in dialog.log_output.toPlainText()
     assert len(store.entries()) == 2
+    dialog.hide_polling_checkbox.setChecked(False)
+    dialog._sync_from_store()
+    assert "MOTOR_I 345 mA" in dialog.log_output.toPlainText()
     dialog.close()

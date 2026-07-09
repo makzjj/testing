@@ -14,8 +14,8 @@ _DECODER_INDENT = " " * 30
 _DEFAULT_MAX_ENTRIES = 2000
 _SYS_MODE_QUERY_BYTES = (0xB5, 0x3F)
 _SYS_MODE_RESPONSE_BYTES = (0xB5, 0x3A)
-_POLLING_DECODE_MARKERS = (" MOTOR_I ", " GETPOS ")
-_POLLING_RAW_HEX_MARKERS = (" CF 3F ", " D3 3D ", " E4 3D ", " CF ", " 82 ")
+_POLLING_DECODE_MARKERS = (" MOTOR_I ",)
+_POLLING_CONTROL_RAW_HEX_MARKERS = (" CF 3F ", " D3 3D ", " E4 3D ", " 82 3F ")
 
 _COMMAND_LABELS: dict[int, str] = {
     0x84: "VEL",
@@ -379,9 +379,7 @@ def should_record_communication_frame(
     *,
     packets: Iterable[dict] | None = None,
 ) -> bool:
-    """Return False only for confirmed periodic polling/status noise."""
-    # TODO: Add an operator-facing filter for high-frequency polling packets
-    # such as MOTOR_I / GETPOS without hiding them by default.
+    """Return False only for confirmed store-level background sys-mode noise."""
     normalized_direction = direction.strip().upper()
     if normalized_direction == "OUT":
         return not _is_background_outgoing_frame(raw_bytes)
@@ -389,6 +387,25 @@ def should_record_communication_frame(
         packet_list = list(packets)
         if packet_list and all(_is_background_incoming_packet(packet) for packet in packet_list):
             return False
+    return True
+
+
+def _is_hidden_polling_decoded_line(decoded_line: str) -> bool:
+    return any(marker in decoded_line for marker in _POLLING_DECODE_MARKERS)
+
+
+def _is_hidden_polling_raw_line(raw_line: str) -> bool:
+    return any(marker in raw_line for marker in _POLLING_CONTROL_RAW_HEX_MARKERS)
+
+
+def should_display_log_entry(entry: "CommunicationLogEntry", *, hide_polling_packets: bool = False) -> bool:
+    """Return whether one stored log entry should be shown in the visible log view."""
+    if not hide_polling_packets:
+        return True
+    if _is_hidden_polling_raw_line(entry.raw_line):
+        return any(not _is_hidden_polling_decoded_line(line) for line in entry.decoded_lines)
+    if entry.decoded_lines:
+        return any(not _is_hidden_polling_decoded_line(line) for line in entry.decoded_lines)
     return True
 
 
@@ -402,19 +419,21 @@ class CommunicationLogEntry:
         return [self.raw_line, *self.decoded_lines]
 
     def render_filtered(self, *, hide_polling_packets: bool = False) -> list[str]:
+        if not should_display_log_entry(self, hide_polling_packets=hide_polling_packets):
+            return []
         if not hide_polling_packets:
             return self.render()
-        # Some nodes keep streaming CF and bundled 82 frames after firmware-side
-        # LOGMOTOR_I / LOGPOS was enabled earlier. Filtering here is display-only
-        # noise suppression; runtime decode/storage still sees the original packets.
-        raw_has_polling = any(marker in self.raw_line for marker in _POLLING_RAW_HEX_MARKERS)
+        # Filtering here is display-only noise suppression; runtime decode/storage
+        # still sees the original packets. MOTOR_I streaming and the confirmed
+        # control packets below are safe to hide in the visible view. GETPOS
+        # responses are intentionally left visible because incoming workflow and
+        # background GETPOS traffic are not reliably distinguishable at this layer.
+        raw_has_polling = _is_hidden_polling_raw_line(self.raw_line)
         if not self.decoded_lines:
             return [] if raw_has_polling else [self.raw_line]
         visible_decoded = tuple(
-            line for line in self.decoded_lines if not any(marker in line for marker in _POLLING_DECODE_MARKERS)
+            line for line in self.decoded_lines if not _is_hidden_polling_decoded_line(line)
         )
-        if not visible_decoded:
-            return []
         if raw_has_polling:
             return list(visible_decoded)
         return [self.raw_line, *visible_decoded]
