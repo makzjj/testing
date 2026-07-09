@@ -306,6 +306,141 @@ mcu:
             self.assertEqual(state["left_state"], "not_cut")
             self.assertEqual(state["right_state"], "cut")
 
+    def test_bridge_exposes_neutral_motor_current_values_when_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "demo.yaml"
+            config_path.write_text("project:\n  name: demo\n", encoding="utf-8")
+
+            project = ProjectDefinition(name="demo", display_name="Demo", config_path=config_path)
+            bridge = WorkspaceRuntimeBridge(project)
+            runtime_window = SimpleNamespace(node_status={})
+
+            with patch.object(bridge, "get_runtime_window", return_value=runtime_window):
+                latest = bridge.get_runtime_node_motor_current(9, create_if_missing=False)
+                series = bridge.get_runtime_node_motor_current_series(9, create_if_missing=False)
+
+            self.assertIsNone(latest["current_mA"])
+            self.assertIsNone(latest["current_A"])
+            self.assertEqual(latest["sample_count"], 0)
+            self.assertEqual(series, [])
+
+    def test_bridge_exposes_motor_current_latest_and_series_with_safe_copies(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "demo.yaml"
+            config_path.write_text("project:\n  name: demo\n", encoding="utf-8")
+
+            project = ProjectDefinition(name="demo", display_name="Demo", config_path=config_path)
+            bridge = WorkspaceRuntimeBridge(project)
+            runtime_window = SimpleNamespace(
+                node_status={
+                    9: {
+                        "motor_current": {
+                            "latest_mA": 1234,
+                            "samples": [
+                                {"index": 1, "current_mA": 1000},
+                                {"index": 2, "current_mA": 1234},
+                            ],
+                            "last_updated": 2,
+                            "next_index": 2,
+                        }
+                    },
+                    8: {
+                        "motor_current": {
+                            "latest_mA": 2500,
+                            "samples": [{"index": 1, "current_mA": 2500}],
+                            "last_updated": 1,
+                            "next_index": 1,
+                        }
+                    },
+                }
+            )
+
+            with patch.object(bridge, "get_runtime_window", return_value=runtime_window):
+                latest = bridge.get_runtime_node_motor_current(9, create_if_missing=False)
+                series = bridge.get_runtime_node_motor_current_series(9, create_if_missing=False)
+                other_latest = bridge.get_runtime_node_motor_current(8, create_if_missing=False)
+
+            self.assertEqual(latest["current_mA"], 1234)
+            self.assertEqual(latest["current_A"], 1.234)
+            self.assertEqual(latest["sample_count"], 2)
+            self.assertEqual(latest["last_updated"], 2)
+            self.assertEqual(series[-1]["current_mA"], 1234)
+            self.assertEqual(series[-1]["current_A"], 1.234)
+            self.assertEqual(other_latest["current_mA"], 2500)
+
+            series[0]["current_mA"] = 9999
+            self.assertEqual(runtime_window.node_status[9]["motor_current"]["samples"][0]["current_mA"], 1000)
+
+    def test_bridge_plot_node_options_prefer_axis_labels_and_avoid_duplicate_node_suffixes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "demo.yaml"
+            config_path.write_text(
+                """
+project:
+  name: demo
+  display_name: Demo
+robot:
+  axes:
+    x:
+      node_id: 3
+    pz:
+      node_id: 9
+""".strip(),
+                encoding="utf-8",
+            )
+
+            project = ProjectDefinition(name="demo", display_name="Demo", config_path=config_path)
+            bridge = WorkspaceRuntimeBridge(project)
+            runtime_window = SimpleNamespace(
+                node_status={
+                    3: {"connected": True, "firmware": "", "uuid": "", "type": "", "interrupt": ""},
+                    7: {"connected": True, "firmware": "", "uuid": "", "type": "", "interrupt": ""},
+                    9: {"connected": True, "firmware": "", "uuid": "", "type": "", "interrupt": ""},
+                },
+                detected_nodes={3, 7, 9},
+            )
+
+            with patch.object(bridge, "get_runtime_window", return_value=runtime_window):
+                options = bridge.get_plot_node_options(create_if_missing=False)
+
+            self.assertEqual(options, [(3, "X"), (7, ""), (9, "PZ")])
+
+    def test_bridge_plot_node_options_use_ml20_canonical_labels_for_ml20_project(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "ML2.0.yaml"
+            config_path.write_text(
+                """
+project:
+  name: ML2.0
+  display_name: ML2.0
+ui:
+  workspace: main_window
+""".strip(),
+                encoding="utf-8",
+            )
+
+            project = ProjectDefinition(name="ML2.0", display_name="ML2.0", config_path=config_path)
+            bridge = WorkspaceRuntimeBridge(project)
+
+            with patch.object(bridge, "get_runtime_window", return_value=SimpleNamespace(node_status={}, detected_nodes=set())):
+                options = bridge.get_plot_node_options(create_if_missing=False)
+
+            self.assertEqual(
+                options,
+                [
+                    (3, "X"),
+                    (4, "Y"),
+                    (5, "V"),
+                    (6, "H"),
+                    (7, "NZ"),
+                    (8, "RZ"),
+                    (9, "PZ"),
+                    (10, "HMI"),
+                    (11, "NGActuator"),
+                    (12, "Z"),
+                ],
+            )
+
     def test_bridge_exposes_runtime_node_motion_polarity_from_runtime_nodeconfig(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "demo.yaml"

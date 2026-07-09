@@ -10,6 +10,9 @@ from data.binary_cmd_builders import (
     build_nodeconfig_query_payload,
     build_lflag_query_payload,
     build_rflag_query_payload,
+    build_motor_current_log_rate_payload,
+    build_motor_current_query_payload,
+    build_position_log_rate_payload,
 )
 from data.binary_cmd_parser import (
     decode_command,
@@ -68,6 +71,17 @@ class BinaryCommandBuilderTests(unittest.TestCase):
     def test_flag_query_builders(self):
         self.assertEqual(build_lflag_query_payload(), [0xC9, 0x3F])
         self.assertEqual(build_rflag_query_payload(), [0xCA, 0x3F])
+
+    def test_motor_current_query_builder(self):
+        self.assertEqual(build_motor_current_query_payload(), [0xCF, 0x3F])
+
+    def test_motor_current_log_rate_builder(self):
+        self.assertEqual(build_motor_current_log_rate_payload(0), [0xD3, 0x3D, 0x00, 0x00])
+        self.assertEqual(build_motor_current_log_rate_payload(5), [0xD3, 0x3D, 0x00, 0x05])
+
+    def test_position_log_rate_builder(self):
+        self.assertEqual(build_position_log_rate_payload(0), [0xE4, 0x3D, 0x00, 0x00])
+        self.assertEqual(build_position_log_rate_payload(5), [0xE4, 0x3D, 0x00, 0x05])
 
 
 class BinaryCommandParserTests(unittest.TestCase):
@@ -175,6 +189,12 @@ class BinaryCommandParserTests(unittest.TestCase):
         # Range measurement gate
         self.assertTrue(sensor_flag_allows_range_measurement(0x09))
         self.assertFalse(sensor_flag_allows_range_measurement(0x0B))
+
+    def test_motor_current_decode(self):
+        self.assertEqual(decode_command(0xCF, [0x3A, 0x04, 0xD2]), ("motor_current_mA", 1234))
+        self.assertEqual(decode_command(0xCF, [0xCF, 0x04, 0xD2]), ("motor_current_mA", 1234))
+        self.assertEqual(decode_command(0xCF, [0x04, 0xD2]), ("motor_current_mA", 1234))
+        self.assertEqual(decode_command(0xCF, [0x3A, 0x04]), ("motor_current_mA", None))
 
 
 if __name__ == '__main__':

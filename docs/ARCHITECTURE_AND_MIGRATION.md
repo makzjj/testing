@@ -40,6 +40,14 @@ Controllers
 UI/pages
 -> start operations and render canonical state only
 
+Runtime-backed diagnostic plotting
+-> query payload builders belong in `data/binary_cmd_builders.py`
+-> `RuntimePacketHandler` plus `node_status_store` own decoded motor-current runtime state
+-> UI plot surfaces must consume latest current and bounded current series through `WorkspaceRuntimeBridge`
+-> `PlotsPage` owns plot launching only
+-> `MotorCurrentPlotDialog` owns bounded polling/timer lifecycle only, not current truth
+-> polling/timers must remain popup/workflow concerns, not runtime or page-global concerns
+
 ## C. MainWindow migration rule
 
 - `main_window.py` remains active during migration.

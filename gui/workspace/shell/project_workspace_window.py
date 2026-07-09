@@ -19,7 +19,7 @@ from ..constants import (
     ROUTE_RUNTIME,
     WORKSPACE_TITLE_PREFIX,
 )
-from ..pages import ApplicationProductionPage, FirmwarePage, MechanicalPage, ProductionPage, ProjectConfigPage, RuntimePage
+from ..pages import FirmwarePage, MechanicalPage, PlotsPage, ProductionPage, ProjectConfigPage, RuntimePage
 from ..pages.production_page import build_shared_node_status_section
 from ..widgets import ConsolePanel, LiveSessionPanel, WorkspaceBackdrop, WorkspaceTopBar
 from .workspace_page_registry import build_navigation_items, get_route_label
@@ -130,7 +130,7 @@ class ProjectWorkspaceWindow(QMainWindow):
             ROUTE_PRODUCTION: ProductionPage(self._bridge, node_status_section=self.node_status_section),
             ROUTE_FIRMWARE: FirmwarePage(self._bridge),
             ROUTE_MECHANICAL: MechanicalPage(self._bridge),
-            ROUTE_APPLICATION: ApplicationProductionPage(self._bridge),
+            ROUTE_APPLICATION: PlotsPage(self._bridge),
             ROUTE_RUNTIME: RuntimePage(self._bridge),
         }
 

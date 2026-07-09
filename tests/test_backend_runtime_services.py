@@ -18,7 +18,7 @@ from services import (
     ensure_node_status,
     reset_node_status,
 )
-from services.communication_log_store import CommunicationLogStore
+from services.communication_log_store import CommunicationLogStore, format_packet_decoded_text
 from services.robot_backend_client import RobotBackendClient
 from serial_conn.commands import CommandBuilder
 from serial_conn.connection import SerialConnection
@@ -39,12 +39,15 @@ class NodeStatusStoreTests(unittest.TestCase):
         node_record["firmware"] = "v1.2.3.4"
 
         self.assertEqual(connected_node_ids(node_status), [5])
+        self.assertIn("motor_current", node_record)
+        self.assertEqual(node_record["motor_current"]["latest_mA"], None)
 
         reset_node_status(node_status, [2, 3])
 
         self.assertEqual(sorted(node_status.keys()), [2, 3])
         self.assertEqual(connected_node_ids(node_status), [])
         self.assertEqual(node_status[2]["firmware"], "")
+        self.assertEqual(node_status[2]["motor_current"]["samples"], [])
 
 
 class NodeDiscoveryCoordinatorTests(unittest.TestCase):
@@ -259,6 +262,146 @@ class RuntimePacketHandlerTests(unittest.TestCase):
         self.handler.handle_packet(packet, self.node_status)
 
         self.assertEqual(self.node_status[6]["nodeconfig"], 0x02)
+
+    def test_motor_current_response_updates_only_sender_node_and_emits_bounded_series(self) -> None:
+        first_packet = {
+            "status": "ok",
+            "type": "can_over_uart",
+            "sender": 6,
+            "cmd": 0xCF,
+            "params": [0x3A, 0x04, 0xD2],
+        }
+        second_packet = {
+            "status": "ok",
+            "type": "can_over_uart",
+            "sender": 6,
+            "cmd": 0xCF,
+            "params": [0x3A, 0x07, 0xD0],
+        }
+
+        events = self.handler.handle_packet(first_packet, self.node_status)
+        self.handler.handle_packet(second_packet, self.node_status)
+
+        motor_current = self.node_status[6]["motor_current"]
+        self.assertEqual(motor_current["latest_mA"], 2000)
+        self.assertEqual(motor_current["last_updated"], 2)
+        self.assertEqual(motor_current["samples"][0]["current_mA"], 1234)
+        self.assertEqual(motor_current["samples"][1]["current_mA"], 2000)
+        self.assertEqual(self.node_status[7]["motor_current"]["latest_mA"], None)
+        self.assertTrue(any(event.kind == "motor_current_sample" for event in events))
+
+    def test_motor_current_response_accepts_minimal_hi_lo_form(self) -> None:
+        packet = {
+            "status": "ok",
+            "type": "can_over_uart",
+            "sender": 6,
+            "cmd": 0xCF,
+            "params": [0x00, 0x64],
+        }
+
+        self.handler.handle_packet(packet, self.node_status)
+
+        self.assertEqual(self.node_status[6]["motor_current"]["latest_mA"], 100)
+        self.assertEqual(self.node_status[6]["motor_current"]["samples"][-1]["index"], 1)
+
+    def test_motor_current_response_accepts_explicit_cf_hi_lo_form(self) -> None:
+        packet = {
+            "status": "ok",
+            "type": "can_over_uart",
+            "sender": 6,
+            "cmd": 0xCF,
+            "params": [0xCF, 0x00, 0x64],
+        }
+
+        self.handler.handle_packet(packet, self.node_status)
+
+        self.assertEqual(self.node_status[6]["motor_current"]["latest_mA"], 100)
+        self.assertEqual(self.node_status[6]["motor_current"]["samples"][-1]["index"], 1)
+
+    def test_motor_current_response_from_parser_decoded_key_path_updates_runtime(self) -> None:
+        packet = {
+            "status": "ok",
+            "type": "can_over_uart",
+            "sender": 6,
+            "cmd": 0xCF,
+            "params": [0x04, 0xD2],
+            "decoded_key": "motor_current_mA",
+            "decoded_value": 1234,
+        }
+
+        events = self.handler.handle_packet(packet, self.node_status)
+
+        self.assertEqual(self.node_status[6]["motor_current"]["latest_mA"], 1234)
+        self.assertEqual(self.node_status[6]["motor_current"]["samples"][-1]["current_mA"], 1234)
+        self.assertTrue(any(event.kind == "motor_current_sample" for event in events))
+
+    def test_bundled_getpos_and_motor_current_packets_both_update_runtime(self) -> None:
+        packets = [
+            {
+                "status": "ok",
+                "type": "can_over_uart",
+                "sender": 6,
+                "cmd": 0x82,
+                "params": [0x00, 0x00, 0x00, 0x2A],
+                "decoded_key": "getpos",
+                "decoded_value": ("G", 42),
+            },
+            {
+                "status": "ok",
+                "type": "can_over_uart",
+                "sender": 6,
+                "cmd": 0xCF,
+                "params": [0xCF, 0x04, 0xD2],
+                "decoded_key": "motor_current_mA",
+                "decoded_value": 1234,
+            },
+        ]
+
+        self.handler.handle_packets(packets, self.node_status)
+
+        self.assertEqual(self.node_status[6]["getpos"], ("G", 42))
+        self.assertEqual(self.node_status[6]["motor_current"]["latest_mA"], 1234)
+        self.assertEqual(self.node_status[6]["motor_current"]["samples"][-1]["current_mA"], 1234)
+
+    def test_motor_current_short_or_invalid_response_is_ignored_safely(self) -> None:
+        short_packet = {
+            "status": "ok",
+            "type": "can_over_uart",
+            "sender": 6,
+            "cmd": 0xCF,
+            "params": [0x3A, 0x04],
+        }
+        invalid_prefix_packet = {
+            "status": "ok",
+            "type": "can_over_uart",
+            "sender": 6,
+            "cmd": 0xCF,
+            "params": [0x41, 0x04, 0xD2],
+        }
+
+        self.handler.handle_packet(short_packet, self.node_status)
+        self.handler.handle_packet(invalid_prefix_packet, self.node_status)
+
+        self.assertEqual(self.node_status[6]["motor_current"]["latest_mA"], None)
+        self.assertEqual(self.node_status[6]["motor_current"]["samples"], [])
+
+    def test_motor_current_series_is_bounded(self) -> None:
+        for value in range(1, 305):
+            packet = {
+                "status": "ok",
+                "type": "can_over_uart",
+                "sender": 6,
+                "cmd": 0xCF,
+                "params": [0x3A, (value >> 8) & 0xFF, value & 0xFF],
+            }
+            self.handler.handle_packet(packet, self.node_status)
+
+        motor_current = self.node_status[6]["motor_current"]
+        self.assertEqual(len(motor_current["samples"]), 300)
+        self.assertEqual(motor_current["samples"][0]["index"], 5)
+        self.assertEqual(motor_current["samples"][0]["current_mA"], 5)
+        self.assertEqual(motor_current["samples"][-1]["index"], 304)
+        self.assertEqual(motor_current["samples"][-1]["current_mA"], 304)
 
 
 class _ManualTime:
@@ -559,6 +702,21 @@ class SerialConnectionCommunicationLogTests(unittest.TestCase):
         self.assertEqual(written, len(payload))
         self.assertEqual(fake_serial.writes[-1], bytes(payload))
         self.assertEqual(store.entries(), [])
+
+    def test_motor_current_packet_formats_with_clear_comm_label(self) -> None:
+        packet = {
+            "status": "ok",
+            "type": "can_over_uart",
+            "sender": 6,
+            "cmd": 0xCF,
+            "params": [0xCF, 0x04, 0xD2],
+        }
+
+        decoded = format_packet_decoded_text(packet)
+
+        self.assertIsNotNone(decoded)
+        assert decoded is not None
+        self.assertIn("MOTOR_I 1234 mA", decoded)
 
 
 if __name__ == "__main__":

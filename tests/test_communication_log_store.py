@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from PyQt6.QtWidgets import QApplication
+
 from serial_conn.commands import CommandBuilder
+from gui.workspace.dialogs.communication_log_dialog import CommunicationLogDialog
 from services.communication_log_store import (
     CommunicationLogStore,
     format_node_display,
@@ -13,6 +16,9 @@ from services.communication_log_store import (
 
 def _fixed_time() -> datetime:
     return datetime(2026, 6, 19, 9, 38, 55, 214000)
+
+
+_APP = QApplication.instance() or QApplication([])
 
 
 def test_outgoing_and_incoming_raw_format_and_byte_count() -> None:
@@ -178,3 +184,61 @@ def test_export_uses_company_style_header_and_entries() -> None:
         "Selected Node: Node 6 - H\n\n"
     )
     assert "2026-06-19 09:38:55:214 [OUT] 25 A5 01 06 31 04 88 53 FF 42 00 00 (12)" in export_text
+
+
+def test_filtered_plain_text_hides_polling_packets_but_keeps_entries_recorded() -> None:
+    store = CommunicationLogStore()
+    polling_frame = CommandBuilder.build_can_over_uart_packet(0x01, 0x07, [0xCF, 0x3F])
+    logpos_disable_frame = CommandBuilder.build_can_over_uart_packet(0x01, 0x07, [0xE4, 0x3D, 0x00, 0x00])
+    getpos_frame = CommandBuilder.build_can_over_uart_packet(0x01, 0x07, [0x82, 0x3F])
+    run_frame = CommandBuilder.build_can_over_uart_packet(0x01, 0x06, [0x88, 0x53, 0x00, 0x32])
+
+    store.record_out(polling_frame, decoded_line="                              [N7:NZ] MOTOR_I 1234 mA", moment=_fixed_time())
+    store.record_out(logpos_disable_frame, moment=_fixed_time())
+    store.record_out(getpos_frame, decoded_line="                              [N7:NZ] GETPOS 0 0 0 1 (1)", moment=_fixed_time())
+    store.record_out(run_frame, decoded_line="                              [N6:H] RUN 'S' 0 50 (50)", moment=_fixed_time())
+
+    assert len(store.entries()) == 4
+    unfiltered = store.to_plain_text()
+    filtered = store.to_plain_text(hide_polling_packets=True)
+
+    assert "MOTOR_I 1234 mA" in unfiltered
+    assert "GETPOS 0 0 0 1 (1)" in unfiltered
+    assert "RUN 'S' 0 50 (50)" in unfiltered
+    assert "CF 3F" in unfiltered
+    assert "E4 3D 00 00" in unfiltered
+    assert "82 3F" in unfiltered
+    assert "MOTOR_I 1234 mA" not in filtered
+    assert "GETPOS 0 0 0 1 (1)" not in filtered
+    assert "CF 3F" not in filtered
+    assert "E4 3D 00 00" not in filtered
+    assert "82 3F" not in filtered
+    assert "RUN 'S' 0 50 (50)" in filtered
+
+
+def test_communication_log_dialog_hide_polling_packets_filters_visible_text_only() -> None:
+    store = CommunicationLogStore()
+    store.record_out(
+        CommandBuilder.build_can_over_uart_packet(0x01, 0x07, [0xCF, 0x3F]),
+        decoded_line="                              [N7:NZ] MOTOR_I 345 mA",
+        moment=_fixed_time(),
+    )
+    store.record_out(
+        CommandBuilder.build_can_over_uart_packet(0x01, 0x06, [0x88, 0x53, 0x00, 0x32]),
+        decoded_line="                              [N6:H] RUN 'S' 0 50 (50)",
+        moment=_fixed_time(),
+    )
+
+    dialog = CommunicationLogDialog(store)
+    dialog._sync_from_store()
+    assert "MOTOR_I 345 mA" in dialog.log_output.toPlainText()
+    assert "RUN 'S' 0 50 (50)" in dialog.log_output.toPlainText()
+
+    dialog.hide_polling_checkbox.setChecked(True)
+    dialog._sync_from_store()
+
+    assert "MOTOR_I 345 mA" not in dialog.log_output.toPlainText()
+    assert "CF 3F" not in dialog.log_output.toPlainText()
+    assert "RUN 'S' 0 50 (50)" in dialog.log_output.toPlainText()
+    assert len(store.entries()) == 2
+    dialog.close()

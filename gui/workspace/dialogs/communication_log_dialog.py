@@ -8,7 +8,7 @@ from typing import Callable
 
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QFontDatabase
-from PyQt6.QtWidgets import QApplication, QFileDialog, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QDialog, QWidget
+from PyQt6.QtWidgets import QApplication, QFileDialog, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QDialog, QWidget, QCheckBox
 
 from services.communication_log_store import CommunicationLogStore
 from utils.deployment_paths import get_runtime_exports_dir
@@ -58,6 +58,10 @@ class CommunicationLogDialog(QDialog):
         self.clear_button.clicked.connect(self._handle_clear_clicked)
         header_row.addWidget(self.clear_button)
 
+        self.hide_polling_checkbox = QCheckBox("Hide polling packets")
+        self.hide_polling_checkbox.toggled.connect(lambda _checked: self._sync_from_store())
+        header_row.addWidget(self.hide_polling_checkbox)
+
         root_layout.addLayout(header_row)
 
         self.log_output = QPlainTextEdit()
@@ -94,7 +98,7 @@ class CommunicationLogDialog(QDialog):
         self.hide()
 
     def _sync_from_store(self) -> None:
-        text = self._store.to_plain_text()
+        text = self._store.to_plain_text(hide_polling_packets=self.hide_polling_checkbox.isChecked())
         if text == self._last_rendered_text and self.log_output.toPlainText() == text:
             return
 

@@ -1337,6 +1337,7 @@ class SamplingControllerTests(unittest.TestCase):
                 self._can_packet(8, 0xE0, [0x3A, 0x00, 0x00, 0x00, 0x00, 0x01]),
                 self._can_packet(8, 0xCD, [0x3A, 0x07]),
                 self._can_packet(8, 0xC4, [0x3A, 0x00]),
+                self._can_packet(8, 0xCF, [0x3A, 0x04, 0xD2]),
             ]
 
             for packet in ignored_packets:

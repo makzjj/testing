@@ -24,7 +24,7 @@ NAVIGATION_ITEMS = (
     (ROUTE_PRODUCTION, "Production", "Simple node-based quality control testing"),
     (ROUTE_FIRMWARE, "Firmware", "Protocol and debug"),
     (ROUTE_MECHANICAL, "Mechanical", "Motion and observation"),
-    (ROUTE_APPLICATION, "Application", "Integration and setup"),
+    (ROUTE_APPLICATION, "Plots", "Diagnostic plot launchers"),
     (ROUTE_RUNTIME, "Runtime", "Live runtime controls and monitoring"),
     (ROUTE_PROJECT_CONFIG, "Project Config", "YAML editor and feature flags"),
 )

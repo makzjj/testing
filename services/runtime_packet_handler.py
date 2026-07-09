@@ -6,9 +6,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from data.binary_cmd_parser import decode_command, parse_comm_stats, parse_get_interrupt
-from myconfig.constants import BCMD_COMM_STATS, BCMD_COMM_TEST_FRAME, BCMD_GET_MCU_VERSION, BCMD_GET_NODE_ID
+from myconfig.constants import BCMD_COMM_STATS, BCMD_COMM_TEST_FRAME, BCMD_GET_MCU_VERSION, BCMD_GET_NODE_ID, BCMD_MOTOR_I
 
-from .node_status_store import build_default_interrupt_state, ensure_node_status
+from .node_status_store import append_motor_current_sample, build_default_interrupt_state, ensure_node_status
 
 BCMD_COMM_TEST_FINISHED = 0xBD
 
@@ -98,12 +98,15 @@ class RuntimePacketHandler:
 
             decoded_key = packet.get("decoded_key")
             decoded_value = packet.get("decoded_value")
-            if decoded_key and decoded_value:
-                node_record[decoded_key] = decoded_value
-                if decoded_key == "tpos_status":
-                    self._handle_tpos_interrupt_state(node_record, decoded_value)
-                if decoded_key != "tpos":
-                    events.append(RuntimePacketEvent("log", message=f"Decoded [{decoded_key}] = {decoded_value}"))
+            if decoded_key and decoded_value is not None:
+                if decoded_key == "motor_current_mA":
+                    self._handle_motor_current_response(events, node_id, command, params, node_record, decoded_value)
+                else:
+                    node_record[decoded_key] = decoded_value
+                    if decoded_key == "tpos_status":
+                        self._handle_tpos_interrupt_state(node_record, decoded_value)
+                    if decoded_key != "tpos":
+                        events.append(RuntimePacketEvent("log", message=f"Decoded [{decoded_key}] = {decoded_value}"))
 
             key, value = decode_command(command, params)
             if key == "sys_mode" and value is not None:
@@ -112,10 +115,13 @@ class RuntimePacketHandler:
                     events.append(RuntimePacketEvent("log", message=f"System Mode Response (CAN): {value['text']}"))
 
             if key and key != decoded_key:
-                node_record[key] = value
+                if key == "motor_current_mA":
+                    self._handle_motor_current_response(events, node_id, command, params, node_record, value)
+                else:
+                    node_record[key] = value
                 if key == "tpos_status":
                     self._handle_tpos_interrupt_state(node_record, value)
-                if key not in ("tpos", "sys_mode"):
+                if key not in ("tpos", "sys_mode", "motor_current_mA"):
                     events.append(RuntimePacketEvent("log", message=f"Decoded [{key}] = {value}"))
 
             if "adc_raw" in packet and "physical_value" in packet:
@@ -181,6 +187,37 @@ class RuntimePacketHandler:
 
         node_record["uuid_valid"] = False
         events.append(RuntimePacketEvent("log", message=f"❌ Node {node_id:02X} UUID: Invalid"))
+
+    def _handle_motor_current_response(
+        self,
+        events: list[RuntimePacketEvent],
+        node_id: int,
+        command: int,
+        params: list[int],
+        node_record: dict[str, Any],
+        value: Any,
+    ) -> None:
+        if command != BCMD_MOTOR_I or not isinstance(value, int):
+            return
+        if len(params) >= 3:
+            if params[0] not in {0x3A, BCMD_MOTOR_I}:
+                return
+        elif len(params) < 2:
+            return
+
+        motor_current = append_motor_current_sample(node_record, int(value))
+        events.append(
+            RuntimePacketEvent(
+                "motor_current_sample",
+                node_id=node_id,
+                value={
+                    "current_mA": motor_current["latest_mA"],
+                    "sample_count": len(motor_current.get("samples", [])),
+                    "last_updated": motor_current.get("last_updated"),
+                },
+            )
+        )
+        events.append(RuntimePacketEvent("log", message=f"Decoded [motor_current_mA] = {value}"))
 
     def _handle_direct_uart_packet(self, packet: dict, *, log_sys_mode: bool) -> list[RuntimePacketEvent]:
         events: list[RuntimePacketEvent] = []

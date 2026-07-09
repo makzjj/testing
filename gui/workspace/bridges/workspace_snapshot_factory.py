@@ -122,7 +122,7 @@ class WorkspaceSnapshotFactory:
         return [
             DetailItem("Firmware", self._format_bool(project_definition.features.firmware_tools)),
             DetailItem("Mechanical", self._format_bool(project_definition.features.mechanical_tools)),
-            DetailItem("Application", self._format_bool(project_definition.features.application_tools)),
+            DetailItem("Plots", self._format_bool(project_definition.features.application_tools)),
             DetailItem("Integration test", self._format_bool(project_definition.features.integration_test)),
             DetailItem("Stress module", self._format_bool(project_definition.features.stress_test)),
         ]

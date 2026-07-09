@@ -14,6 +14,7 @@ from myconfig.constants import NODE_ID_MAPPING
 from myconfig.config_editor_service import ConfigEditorService
 from myconfig.config_models import ConfigEditorModel, LiveHardwareFieldValue, SavePlan, SaveResult
 from myconfig.config_save_service import ConfigSaveService
+from myconfig.node_display import ML20_NODE_MAP, get_ml20_node_name
 from myconfig.project_loader import build_project_definition
 from myconfig.project_models import ProjectDefinition
 
@@ -465,6 +466,64 @@ class WorkspaceRuntimeBridge:
             )
         return {"connected_nodes": connected_nodes, "detected_nodes": detected_nodes, "rows": rows}
 
+    def get_plot_node_options(self, *, create_if_missing: bool = False) -> list[tuple[int, str]]:
+        """Return plot-eligible node options from current config/runtime context."""
+        if self._uses_ml20_plot_node_map():
+            return [
+                (3, "X"),
+                (4, "Y"),
+                (5, "V"),
+                (6, "H"),
+                (7, "NZ"),
+                (8, "RZ"),
+                (9, "PZ"),
+                (10, "HMI"),
+                (11, "NGActuator"),
+                (12, "Z"),
+            ]
+
+        options_by_node: dict[int, str] = {}
+
+        axes = self._schema_adapter.extract_axis_section(self._raw_config)
+        for axis_key, axis_data in axes.items():
+            if not isinstance(axis_data, dict):
+                continue
+            node_id = axis_data.get("node_id")
+            if not isinstance(node_id, int):
+                continue
+            axis_name = str(axis_key).strip().upper()
+            options_by_node[int(node_id)] = axis_name or self._fallback_plot_node_label(int(node_id))
+
+        runtime_nodes = self.get_runtime_robot_nodes(create_if_missing=create_if_missing)
+        for row in runtime_nodes.get("rows", []):
+            if not isinstance(row, dict):
+                continue
+            node_id = row.get("node_id")
+            if not isinstance(node_id, int):
+                continue
+            options_by_node.setdefault(int(node_id), self._fallback_plot_node_label(int(node_id)))
+
+        return [(node_id, options_by_node[node_id]) for node_id in sorted(options_by_node)]
+
+    def _uses_ml20_plot_node_map(self) -> bool:
+        project_names = {
+            str(self._project_definition.name or "").strip().lower(),
+            str(self._project_definition.display_name or "").strip().lower(),
+            str(((self._raw_config.get("project") or {}).get("name") or "")).strip().lower(),
+            str(((self._raw_config.get("project") or {}).get("display_name") or "")).strip().lower(),
+        }
+        return any(name in {"ml2.0", "ml20"} for name in project_names if name)
+
+    def _fallback_plot_node_label(self, node_id: int) -> str:
+        if self._uses_ml20_plot_node_map():
+            ml20_label = get_ml20_node_name(int(node_id))
+            if ml20_label:
+                return str(ml20_label)
+        label = str(NODE_ID_MAPPING.get(int(node_id), "") or "").strip()
+        if label and label.lower() != f"node {int(node_id)}".lower():
+            return label
+        return ""
+
     def get_runtime_node_interrupt_state(self, node_id: int, *, create_if_missing: bool = False) -> dict[str, object]:
         """Return one node's canonical runtime interrupt state."""
         runtime_window = self.get_runtime_window(create_if_missing=create_if_missing)
@@ -498,6 +557,55 @@ class WorkspaceRuntimeBridge:
             "left_state": self._format_interrupt_display_state(left_cut),
             "right_state": self._format_interrupt_display_state(right_cut),
         }
+
+    def get_runtime_node_motor_current(self, node_id: int, *, create_if_missing: bool = False) -> dict[str, object]:
+        """Return one node's latest canonical runtime motor-current reading."""
+        runtime_window = self.get_runtime_window(create_if_missing=create_if_missing)
+        if runtime_window is None:
+            return {
+                "node_id": int(node_id),
+                "current_mA": None,
+                "current_A": None,
+                "sample_count": 0,
+                "last_updated": None,
+            }
+
+        node_status = getattr(runtime_window, "node_status", {}) or {}
+        status = node_status.get(int(node_id), {}) if isinstance(node_status, dict) else {}
+        motor_current = status.get("motor_current", {}) if isinstance(status, dict) else {}
+        latest_mA = motor_current.get("latest_mA") if isinstance(motor_current, dict) else None
+        samples = motor_current.get("samples", []) if isinstance(motor_current, dict) else []
+        last_updated = motor_current.get("last_updated") if isinstance(motor_current, dict) else None
+        current_mA = int(latest_mA) if isinstance(latest_mA, int) else None
+        return {
+            "node_id": int(node_id),
+            "current_mA": current_mA,
+            "current_A": None if current_mA is None else current_mA / 1000.0,
+            "sample_count": len(samples) if isinstance(samples, list) else 0,
+            "last_updated": last_updated,
+        }
+
+    def get_runtime_node_motor_current_series(self, node_id: int, *, create_if_missing: bool = False) -> list[dict[str, object]]:
+        """Return a safe copy of one node's bounded runtime motor-current series."""
+        runtime_window = self.get_runtime_window(create_if_missing=create_if_missing)
+        if runtime_window is None:
+            return []
+
+        node_status = getattr(runtime_window, "node_status", {}) or {}
+        status = node_status.get(int(node_id), {}) if isinstance(node_status, dict) else {}
+        motor_current = status.get("motor_current", {}) if isinstance(status, dict) else {}
+        samples = motor_current.get("samples", []) if isinstance(motor_current, dict) else []
+        if not isinstance(samples, list):
+            return []
+        return [
+            {
+                "index": int(sample.get("index", 0)),
+                "current_mA": int(sample.get("current_mA", 0)),
+                "current_A": int(sample.get("current_mA", 0)) / 1000.0,
+            }
+            for sample in copy.deepcopy(samples)
+            if isinstance(sample, dict) and isinstance(sample.get("current_mA"), int)
+        ]
 
     @staticmethod
     def _format_interrupt_display_state(is_cut: object) -> str:

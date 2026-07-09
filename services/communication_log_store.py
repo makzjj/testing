@@ -14,6 +14,8 @@ _DECODER_INDENT = " " * 30
 _DEFAULT_MAX_ENTRIES = 2000
 _SYS_MODE_QUERY_BYTES = (0xB5, 0x3F)
 _SYS_MODE_RESPONSE_BYTES = (0xB5, 0x3A)
+_POLLING_DECODE_MARKERS = (" MOTOR_I ", " GETPOS ")
+_POLLING_RAW_HEX_MARKERS = (" CF 3F ", " D3 3D ", " E4 3D ", " CF ", " 82 ")
 
 _COMMAND_LABELS: dict[int, str] = {
     0x84: "VEL",
@@ -29,6 +31,7 @@ _COMMAND_LABELS: dict[int, str] = {
     0xBC: "COMM_STATS",
     0xBF: "COMM_TEST",
     0xCD: "TYPE",
+    0xCF: "MOTOR_I",
     0xD8: "INTERRUPT",
     0xE0: "UUID",
     0xB5: "SYS_MODE",
@@ -170,6 +173,14 @@ def _format_interrupt(params: Sequence[int]) -> str | None:
     return " ".join(parts)
 
 
+def _format_motor_current(params: Sequence[int]) -> str | None:
+    values = [int(value) & 0xFF for value in params]
+    _key, decoded = decode_command(0xCF, values)
+    if not isinstance(decoded, int):
+        return None
+    return f"MOTOR_I {decoded} mA"
+
+
 def _format_uuid(params: Sequence[int]) -> str | None:
     values = [int(value) & 0xFF for value in params]
     if len(values) >= 6 and values[0] == 0x3A:
@@ -231,6 +242,8 @@ def format_packet_decoded_text(packet: dict) -> str | None:
             text = _format_flag("RFLAG", params)
         elif command == 0xD8:
             text = _format_interrupt(params)
+        elif command == 0xCF:
+            text = _format_motor_current(params)
         elif command == 0xE0:
             text = _format_uuid(params)
         elif command == 0xC4:
@@ -367,6 +380,8 @@ def should_record_communication_frame(
     packets: Iterable[dict] | None = None,
 ) -> bool:
     """Return False only for confirmed periodic polling/status noise."""
+    # TODO: Add an operator-facing filter for high-frequency polling packets
+    # such as MOTOR_I / GETPOS without hiding them by default.
     normalized_direction = direction.strip().upper()
     if normalized_direction == "OUT":
         return not _is_background_outgoing_frame(raw_bytes)
@@ -385,6 +400,24 @@ class CommunicationLogEntry:
 
     def render(self) -> list[str]:
         return [self.raw_line, *self.decoded_lines]
+
+    def render_filtered(self, *, hide_polling_packets: bool = False) -> list[str]:
+        if not hide_polling_packets:
+            return self.render()
+        # Some nodes keep streaming CF and bundled 82 frames after firmware-side
+        # LOGMOTOR_I / LOGPOS was enabled earlier. Filtering here is display-only
+        # noise suppression; runtime decode/storage still sees the original packets.
+        raw_has_polling = any(marker in self.raw_line for marker in _POLLING_RAW_HEX_MARKERS)
+        if not self.decoded_lines:
+            return [] if raw_has_polling else [self.raw_line]
+        visible_decoded = tuple(
+            line for line in self.decoded_lines if not any(marker in line for marker in _POLLING_DECODE_MARKERS)
+        )
+        if not visible_decoded:
+            return []
+        if raw_has_polling:
+            return list(visible_decoded)
+        return [self.raw_line, *visible_decoded]
 
 
 class CommunicationLogStore:
@@ -468,10 +501,12 @@ class CommunicationLogStore:
     def entries(self) -> list[CommunicationLogEntry]:
         return list(self._entries)
 
-    def to_plain_text(self) -> str:
+    def to_plain_text(self, *, hide_polling_packets: bool = False) -> str:
         parts: list[str] = []
         for entry in self._entries:
-            parts.append("\n".join(entry.render()))
+            rendered_lines = entry.render_filtered(hide_polling_packets=hide_polling_packets)
+            if rendered_lines:
+                parts.append("\n".join(rendered_lines))
         return "\n\n".join(parts)
 
     def export_text(

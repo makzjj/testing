@@ -390,6 +390,7 @@ class ProductionTestControllerIngressTests(unittest.TestCase):
             params=[0x3A, *build_uuid_write_payload(1223303010)[2:]],
         )
         self._emit_packet(runtime_window, sender=3, cmd=0xC8, params=[0x3A, 1, 2, 3])
+        self._emit_packet(runtime_window, sender=3, cmd=0xCF, params=[0x3A, 0x04, 0xD2])
 
         assert controller._active_step is not None
         self.assertEqual(controller._active_step.step_id, "interrupt")
@@ -425,6 +426,7 @@ class ProductionTestControllerIngressTests(unittest.TestCase):
 
         self._emit_packet(runtime_window, sender=3, cmd=0x85, params=[0x00, 0x50])
         self._emit_packet(runtime_window, sender=3, cmd=EEPROM_SAVE_COMMAND, params=[0x0A, 0x00])
+        self._emit_packet(runtime_window, sender=3, cmd=0xCF, params=[0x3A, 0x04, 0xD2])
 
         assert controller._active_step is not None
         self.assertEqual(controller._active_step.step_id, "echo")
@@ -4348,6 +4350,9 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         runtime_window.packet_received.emit(
             {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x85, "params": [0x00, 0x64]}
         )
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0xCF, "params": [0x3A, 0x04, 0xD2]}
+        )
         self._app.processEvents()
 
         self.assertEqual(events, [])
@@ -4400,6 +4405,9 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         )
         runtime_window.packet_received.emit(
             {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x85, "params": [0x00, 0x50]}
+        )
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0xCF, "params": [0x3A, 0x04, 0xD2]}
         )
         self._app.processEvents()
 
@@ -4675,6 +4683,9 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         )
         runtime_window.packet_received.emit(
             {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0x85, "params": [0x00, 0x50]}
+        )
+        runtime_window.packet_received.emit(
+            {"status": "ok", "type": "can_over_uart", "sender": 6, "cmd": 0xCF, "params": [0x3A, 0x04, 0xD2]}
         )
         self._app.processEvents()
 

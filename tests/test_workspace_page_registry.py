@@ -33,6 +33,7 @@ class WorkspacePageRegistryTests(unittest.TestCase):
         self.assertFalse(item_map[ROUTE_MECHANICAL].enabled)
         self.assertTrue(item_map[ROUTE_APPLICATION].enabled)
         self.assertTrue(item_map[ROUTE_PRODUCTION].enabled)
+        self.assertEqual(item_map[ROUTE_APPLICATION].label, "Plots")
         self.assertEqual(get_route_label(items, ROUTE_PROJECT_CONFIG), "Project Config")
 
 

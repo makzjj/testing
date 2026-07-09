@@ -7,6 +7,8 @@ this stable module path.
 
 from __future__ import annotations
 
+from myconfig.constants import BCMD_LOGMOTOR_I, BCMD_LOGPOS, BCMD_MOTOR_I
+
 def build_hunting_timeout(timeout_ms: int) -> list[int]:
     timeout_ms = max(0, min(0xFFFF, int(timeout_ms)))
     hi = (timeout_ms >> 8) & 0xFF
@@ -89,3 +91,39 @@ def build_rflag_query_payload() -> list[int]:
 def build_interrupt_query_payload() -> list[int]:
     """Build interrupt-state (D8) query payload."""
     return [0xD8, 0x3F]
+
+
+def build_motor_current_query_payload() -> list[int]:
+    """Build motor-current (MOTOR_I) query payload.
+
+    Query-style runtime reads in this firmware family use `<cmd> 3F`, such as
+    NODECONFIG, LFLAG, RFLAG, D8, and MCU version. MOTOR_I follows that same
+    canonical query-builder convention here.
+    """
+    return [BCMD_MOTOR_I, 0x3F]
+
+
+def build_motor_current_log_rate_payload(rate_hz: int) -> list[int]:
+    """Build firmware-side MOTOR_I streaming control payload.
+
+    Format:
+    - D3 3D [rate_hi] [rate_lo]
+    - rate 0 disables node-side streaming
+    """
+    normalized_rate = max(0, min(0xFFFF, int(rate_hz)))
+    hi = (normalized_rate >> 8) & 0xFF
+    lo = normalized_rate & 0xFF
+    return [BCMD_LOGMOTOR_I, 0x3D, hi, lo]
+
+
+def build_position_log_rate_payload(rate_hz: int) -> list[int]:
+    """Build firmware-side position streaming control payload.
+
+    Format:
+    - E4 3D [rate_hi] [rate_lo]
+    - rate 0 disables node-side position logging
+    """
+    normalized_rate = max(0, min(0xFFFF, int(rate_hz)))
+    hi = (normalized_rate >> 8) & 0xFF
+    lo = normalized_rate & 0xFF
+    return [BCMD_LOGPOS, 0x3D, hi, lo]

@@ -397,6 +397,7 @@ class FunctionalControllerTests(unittest.TestCase):
         self.assertTrue(self.ctrl.accepts_workflow_packet("run_started", 190, [0x88, 0x53, 0x00, 0xBE]))
         self.assertFalse(self.ctrl.accepts_workflow_packet("run_started", -190, [0x88, 0x53, 0xFF, 0x42]))
         self.assertFalse(self.ctrl.accepts_workflow_packet("getpos", ('G', 0), [0x82, 0x00, 0x00, 0x00, 0x00]))
+        self.assertFalse(self.ctrl.accepts_workflow_packet("motor_current_mA", 1234, [0xCF, 0x3A, 0x04, 0xD2]))
 
     def test_accepts_workflow_packet_keeps_wrong_sensor_relevant_during_active_sensor_wait(self):
         self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))

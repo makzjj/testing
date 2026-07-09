@@ -9,6 +9,7 @@ Handles parsing of:
 - 0xD8 GET_INTERRUPT
 """
 
+from myconfig.constants import BCMD_MOTOR_I
 from services.node_motion_polarity import NodeMotionPolarity
 
 def parse_get_tof(params):
@@ -118,6 +119,27 @@ def parse_get_interrupt(params):
         'left_status': 'Invalid',
         'right_status': 'Invalid'
     }
+
+
+def parse_motor_current(params):
+    """Decode motor-current response (0xCF) into an unsigned mA reading.
+
+    Supported runtime forms:
+    - 3A [hi] [lo]
+    - CF [hi] [lo]
+    - [hi] [lo]
+    """
+    if len(params) >= 3 and params[0] == 0x3A:
+        return (int(params[1]) << 8) | int(params[2])
+    if len(params) >= 3 and params[0] == BCMD_MOTOR_I:
+        return (int(params[1]) << 8) | int(params[2])
+    if len(params) >= 1 and params[0] == 0x3A:
+        return None
+    if len(params) >= 1 and params[0] == BCMD_MOTOR_I:
+        return None
+    if len(params) >= 2:
+        return (int(params[0]) << 8) | int(params[1])
+    return None
 
 
 def parse_comm_test_frame(params):
@@ -367,6 +389,8 @@ def decode_command(cmd, params):
         if len(params) >= 2 and params[0] == 0x3A:
             return ("rflag", int(params[1] & 0xFF))
         return ("rflag", None)
+    elif cmd == BCMD_MOTOR_I:
+        return ("motor_current_mA", parse_motor_current(params))
     else:
         return (None, None)
 

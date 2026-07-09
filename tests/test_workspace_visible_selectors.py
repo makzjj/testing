@@ -9,12 +9,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QSizePolicy
 
 from gui.program_selector_window import ProgramSelectorWindow
-from gui.workspace.constants import ROUTE_FIRMWARE, ROUTE_PRODUCTION, ROUTE_PROJECT_CONFIG, ROUTE_RUNTIME
+from gui.workspace.constants import ROUTE_APPLICATION, ROUTE_FIRMWARE, ROUTE_PRODUCTION, ROUTE_PROJECT_CONFIG, ROUTE_RUNTIME
 from gui.workspace.models import SelectionField, SelectionOption
+from gui.workspace.pages.application_production_page import PlotsPage
 from gui.workspace.shell.project_workspace_window import ProjectWorkspaceWindow
 from gui.workspace.widgets import NavigationButton, NavigationPanel, SelectorFieldGrid, VisibleSelector, WorkspaceTopBar
 from myconfig import project_loader
@@ -23,6 +24,71 @@ from myconfig.project_models import ProjectDefinition, ProjectFeatures, ProjectU
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 LEGACY_ACCUESS_NODE_NAMES = ["Ya", "Yb", "Nd", "Rs", "Rp", "Rn"]
+
+
+class _FakePlotsBackendClient:
+    def __init__(self) -> None:
+        self.sent_commands: list[tuple[int, list[int]]] = []
+        self.connected = True
+
+    def is_connected(self) -> bool:
+        return self.connected
+
+    def send_command_bytes(self, node_id: int, payload: list[int]) -> bytearray:
+        self.sent_commands.append((int(node_id), list(payload)))
+        return bytearray(payload)
+
+
+class _FakePlotsRuntimeWindow(QObject):
+    packet_received = pyqtSignal(object)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.backend_client = _FakePlotsBackendClient()
+
+
+class _FakePlotsBridge:
+    def __init__(self) -> None:
+        self._runtime_window = _FakePlotsRuntimeWindow()
+        self._series_by_node: dict[int, list[dict[str, object]]] = {}
+
+    def get_runtime_window(self, *, create_if_missing: bool = False):
+        return self._runtime_window
+
+    def get_plot_node_options(self, *, create_if_missing: bool = False):
+        return [
+            (3, "X"),
+            (4, "Y"),
+            (5, "V"),
+            (6, "H"),
+            (7, "NZ"),
+            (8, "RZ"),
+            (9, "PZ"),
+            (10, "HMI"),
+            (11, "NGActuator"),
+            (12, "Z"),
+        ]
+
+    def get_runtime_connection_state(self, *, create_if_missing: bool = False) -> tuple[bool, bool]:
+        connected = self._runtime_window.backend_client.is_connected()
+        return connected, connected
+
+    def get_runtime_node_motor_current(self, node_id: int, *, create_if_missing: bool = False) -> dict[str, object]:
+        series = self._series_by_node.get(int(node_id), [])
+        if not series:
+            return {"node_id": int(node_id), "current_mA": None, "current_A": None, "sample_count": 0, "last_updated": None}
+        latest = series[-1]
+        current_mA = int(latest["current_mA"])
+        return {
+            "node_id": int(node_id),
+            "current_mA": current_mA,
+            "current_A": current_mA / 1000.0,
+            "sample_count": len(series),
+            "last_updated": latest["index"],
+        }
+
+    def get_runtime_node_motor_current_series(self, node_id: int, *, create_if_missing: bool = False) -> list[dict[str, object]]:
+        return [dict(sample) for sample in self._series_by_node.get(int(node_id), [])]
 
 
 class WorkspaceVisibleSelectorTests(unittest.TestCase):
@@ -136,7 +202,8 @@ mcu:
             self.assertIsNotNone(toolbar)
 
             nav_labels = [button.text() for button in toolbar.findChildren(NavigationButton)]
-            self.assertEqual(nav_labels, ["Production", "Firmware", "Mechanical", "Application", "Runtime", "Project Config"])
+            self.assertEqual(nav_labels, ["Production", "Firmware", "Mechanical", "Plots", "Runtime", "Project Config"])
+            self.assertNotIn("Application", nav_labels)
 
             menu_labels = [action.text() for action in toolbar.settings_menu.actions() if action.isEnabled()]
             self.assertEqual(toolbar.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Maximum)
@@ -153,6 +220,89 @@ mcu:
             self.assertEqual(window._current_route_id, ROUTE_PRODUCTION)
             self.assertEqual(window.live_session_panel.page_value.text(), "Production")
             self.assertFalse(window._bridge.has_live_runtime)
+
+    def test_plots_page_opens_motor_current_dialog_without_sending_commands(self) -> None:
+        bridge = _FakePlotsBridge()
+        runtime_window = bridge.get_runtime_window()
+        receiver_count_before = runtime_window.receivers(runtime_window.packet_received)
+        page = PlotsPage(bridge)
+        page.show()
+        self._app.processEvents()
+
+        self.assertEqual(page.motor_current_button.text(), "Open Motor Current Plot")
+        self.assertEqual(page.motor_torque_button.text(), "Motor Torque")
+        self.assertEqual(page.motor_speed_button.text(), "Motor Speed")
+        self.assertEqual(page.encoder_position_button.text(), "Encoder Position")
+        self.assertFalse(page.motor_torque_button.isEnabled())
+        self.assertFalse(page.motor_speed_button.isEnabled())
+        self.assertFalse(page.encoder_position_button.isEnabled())
+        self.assertFalse(hasattr(page, "node_combo"))
+        self.assertFalse(hasattr(page, "placeholder_section"))
+        self.assertIsNone(page.findChild(QComboBox, "PlotsNodeCombo"))
+        self.assertEqual(runtime_window.receivers(runtime_window.packet_received), receiver_count_before)
+
+        page.motor_current_button.click()
+        self._app.processEvents()
+
+        self.assertIsNotNone(page._motor_current_dialog)
+        assert page._motor_current_dialog is not None
+        self.assertTrue(page._motor_current_dialog.isVisible())
+        self.assertFalse(page._motor_current_dialog._render_timer.isActive())
+        self.assertEqual(page._motor_current_dialog.node_combo.count(), 10)
+        dropdown_text = [page._motor_current_dialog.node_combo.itemText(index) for index in range(page._motor_current_dialog.node_combo.count())]
+        self.assertEqual(dropdown_text[0], "Node 3 - X")
+        self.assertIn("Node 4 - Y", dropdown_text)
+        self.assertIn("Node 5 - V", dropdown_text)
+        self.assertIn("Node 6 - H", dropdown_text)
+        self.assertIn("Node 7 - NZ", dropdown_text)
+        self.assertIn("Node 8 - RZ", dropdown_text)
+        self.assertIn("Node 9 - PZ", dropdown_text)
+        self.assertIn("Node 10 - HMI", dropdown_text)
+        self.assertIn("Node 11 - NGActuator", dropdown_text)
+        self.assertIn("Node 12 - Z", dropdown_text)
+        self.assertNotIn("Node 7 - Node 7", dropdown_text)
+        self.assertEqual(runtime_window.backend_client.sent_commands, [])
+        self.assertEqual(runtime_window.receivers(runtime_window.packet_received), receiver_count_before)
+        page._motor_current_dialog.close()
+
+    def test_workspace_uses_plots_label_and_registers_plots_page(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "demo.yaml"
+            config_path.write_text(
+                """
+project:
+  name: demo
+  display_name: Demo
+features:
+  firmware_tools: true
+  mechanical_tools: true
+  application_tools: true
+ui:
+  workspace: phase2_shell
+""".strip(),
+                encoding="utf-8",
+            )
+
+            project = ProjectDefinition(
+                name="demo",
+                display_name="Demo",
+                config_path=config_path,
+                features=ProjectFeatures(firmware_tools=True, mechanical_tools=True, application_tools=True),
+                ui=ProjectUiConfig(workspace="phase2_shell"),
+            )
+
+            window = ProjectWorkspaceWindow(project)
+            window.show()
+            self._app.processEvents()
+            window.set_active_page(ROUTE_APPLICATION)
+            self._app.processEvents()
+
+            toolbar = window.findChild(WorkspaceTopBar)
+            assert toolbar is not None
+            nav_labels = [button.text() for button in toolbar.findChildren(NavigationButton)]
+            self.assertIn("Plots", nav_labels)
+            self.assertNotIn("Application", nav_labels)
+            self.assertIsInstance(window._pages[ROUTE_APPLICATION], PlotsPage)
 
     def test_workspace_open_does_not_create_runtime_until_runtime_page_is_requested(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
