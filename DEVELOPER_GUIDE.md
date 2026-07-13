@@ -185,6 +185,19 @@ Start by identifying what kind of feature it is.
 - packet filtering belongs in the workflow adapter
 - workflow state belongs in the controller
 - shared node/system state belongs in runtime
+- Firmware Integration Test uses one public controller owner: `FirmwareIntegrationController`
+- mode-specific Firmware Integration workflow helpers may exist only as private implementation details under `FirmwareIntegrationController`
+- Firmware Integration packet ingress belongs in `services/firmware_transport_adapter.py`
+- Manual Binary dialog is UI-only and should not build packets, parse packets, or access the backend directly
+- Manual Text dialog is UI-only and should not build packets, parse packets, or access the backend directly
+- Automated Binary FIT core sequencing lives in a private `_BinaryFitWorkflow`; Config UI, Report UI, Export, Save Location, and Automated Text FIT are still future work
+- Binary FIT Configuration and Report dialogs are UI-only and should render `FirmwareIntegrationController.binary_fit_status_snapshot()` plus controller signals rather than reaching into workflow internals
+- Automated Text FIT core sequencing lives in a private `_TextFitWorkflow`; Export and Save Location are still future work
+- Text FIT Config and Report dialogs are UI-only and should render `FirmwareIntegrationController.text_fit_status_snapshot()` plus controller signals rather than reaching into workflow internals
+- `WorkspaceRuntimeBridge` owns the Firmware Integration send boundaries for Manual Binary and Manual Text
+- command builders and parsers for Manual Binary remain canonical in `data/binary_cmd_builders.py` and `data/binary_cmd_parser.py`
+- Manual Text framing and direct-UART ASCII decode remain canonical in `data/text_cmd_builders.py`
+- `FirmwareCommandDefinition` describes reusable commands, while `FirmwareTestCase` / `FirmwareTestResult` describe future automated FIT instances and outcomes
 
 ### Protocol Command
 

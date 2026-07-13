@@ -141,6 +141,80 @@ mcu:
             self.assertEqual(list(off_payload), COMMANDS["ROBOT Off"])
             self.assertIsNone(runtime_window.sys_mode)
 
+    def test_bridge_sends_firmware_binary_commands_through_existing_runtime_path(self) -> None:
+        class _FakeBackendClient:
+            def __init__(self) -> None:
+                self.sent_commands: list[tuple[int, list[int]]] = []
+                self.last_payload_object: list[int] | None = None
+
+            def is_connected(self) -> bool:
+                return True
+
+            def send_command_bytes(self, node_id: int, command_bytes: list[int]) -> bytearray:
+                self.last_payload_object = command_bytes
+                self.sent_commands.append((node_id, list(command_bytes)))
+                return bytearray([0x25, 0xA5, 0x01, node_id, 0x31, len(command_bytes), *command_bytes])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "demo.yaml"
+            config_path.write_text("project:\n  name: demo\n", encoding="utf-8")
+
+            project = ProjectDefinition(name="demo", display_name="Demo", config_path=config_path)
+            bridge = WorkspaceRuntimeBridge(project)
+            runtime_window = SimpleNamespace(backend_client=_FakeBackendClient())
+            command_bytes = [0xC8, 0x3F]
+
+            with patch.object(bridge, "get_runtime_window", return_value=runtime_window):
+                payload = bridge.send_firmware_binary_command(8, command_bytes)
+
+            self.assertEqual(runtime_window.backend_client.sent_commands, [(8, [0xC8, 0x3F])])
+            self.assertIs(runtime_window.backend_client.last_payload_object, command_bytes)
+            self.assertEqual(list(payload), [0x25, 0xA5, 0x01, 8, 0x31, 2, 0xC8, 0x3F])
+
+    def test_bridge_sends_firmware_text_commands_through_existing_runtime_write_path(self) -> None:
+        class _FakeBackendClient:
+            def __init__(self) -> None:
+                self.writes: list[bytearray] = []
+                self.last_payload_object: bytearray | None = None
+
+            def is_connected(self) -> bool:
+                return True
+
+            def write(self, payload: bytearray) -> None:
+                self.last_payload_object = payload
+                self.writes.append(payload)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "demo.yaml"
+            config_path.write_text("project:\n  name: demo\n", encoding="utf-8")
+
+            project = ProjectDefinition(name="demo", display_name="Demo", config_path=config_path)
+            bridge = WorkspaceRuntimeBridge(project)
+            runtime_window = SimpleNamespace(backend_client=_FakeBackendClient())
+            payload = bytearray([0x25, 0xA5, 0x01, 0x01, 0x31, 0x08, 0x76, 0x65, 0x72, 0x3F, 0x0D, 0x0A, 0x0D, 0x0A, 0xF5, 0x19])
+
+            with patch.object(bridge, "get_runtime_window", return_value=runtime_window):
+                result = bridge.send_firmware_text_command(payload)
+
+            self.assertEqual(runtime_window.backend_client.writes, [payload])
+            self.assertIs(runtime_window.backend_client.last_payload_object, payload)
+            self.assertIs(result, payload)
+
+    def test_bridge_firmware_node_options_delegate_to_plot_node_options(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "demo.yaml"
+            config_path.write_text("project:\n  name: demo\n", encoding="utf-8")
+
+            project = ProjectDefinition(name="demo", display_name="Demo", config_path=config_path)
+            bridge = WorkspaceRuntimeBridge(project)
+            expected = [(3, "X"), (12, "Z")]
+
+            with patch.object(bridge, "get_plot_node_options", return_value=expected) as get_plot_node_options:
+                options = bridge.get_firmware_node_options(create_if_missing=False)
+
+            get_plot_node_options.assert_called_once_with(create_if_missing=False)
+            self.assertEqual(options, expected)
+
     def test_bridge_runtime_robot_nodes_exposes_detected_nodes_for_active_scan_ui(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "demo.yaml"

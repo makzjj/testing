@@ -121,6 +121,15 @@ def parse_get_interrupt(params):
     }
 
 
+def parse_getvel(params):
+    """Decode GETVEL response (0x85) into a signed 16-bit velocity."""
+    if len(params) >= 3 and params[0] == 0x3A:
+        return int.from_bytes(bytes(params[1:3]), byteorder="big", signed=True)
+    if len(params) >= 2:
+        return int.from_bytes(bytes(params[0:2]), byteorder="big", signed=True)
+    return None
+
+
 def parse_motor_current(params):
     """Decode motor-current response (0xCF) into an unsigned mA reading.
 
@@ -351,6 +360,8 @@ def decode_command(cmd, params):
                 vel = int.from_bytes(bytes(params[1:3]), byteorder="big", signed=True)
                 return ("velocity_ack", vel)
         return ("velocity_ack", None)
+    elif cmd == 0x85:
+        return ("getvel", parse_getvel(params))
     elif cmd == 0xC3:
         # HUNTING results: 41=Accepted, 4E=Rejected/NACK, 54=Timeout
         if not params:

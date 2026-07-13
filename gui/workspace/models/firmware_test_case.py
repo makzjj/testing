@@ -36,3 +36,38 @@ class FirmwareTestResult:
     latency_ms: float | None = None
     message: str | None = None
     manual_verification_outcome: str | None = None
+
+
+@dataclass(frozen=True)
+class FirmwareBinaryFitSnapshot:
+    """Read-only Binary FIT render contract for UI consumers."""
+
+    running: bool
+    state: str
+    current_case: FirmwareTestCase | None
+    current_index: int
+    total_cases: int
+    completed_cases: int
+    awaiting_manual_verification: bool
+    results: tuple[FirmwareTestResult, ...]
+    overall_status: str | None = None
+    target_node_id: int | None = None
+    manual_verification_case_id: str | None = None
+    manual_verification_prompt: str | None = None
+
+
+@dataclass(frozen=True)
+class FirmwareTextFitSnapshot:
+    """Read-only Text FIT render contract for future UI consumers."""
+
+    running: bool
+    state: str
+    current_case: FirmwareTestCase | None
+    current_index: int
+    total_cases: int
+    completed_cases: int
+    awaiting_manual_verification: bool
+    results: tuple[FirmwareTestResult, ...]
+    overall_status: str | None = None
+    manual_verification_case_id: str | None = None
+    manual_verification_prompt: str | None = None

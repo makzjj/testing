@@ -3,6 +3,7 @@
 __all__ = [
     "RobotBackendClient",
     "CommunicationLogStore",
+    "FirmwareTransportAdapter",
     "RuntimePacketEvent",
     "RuntimePacketHandler",
     "ReleaseWatchHelper",
@@ -26,6 +27,10 @@ def __getattr__(name: str):
         from .communication_log_store import CommunicationLogStore
 
         return CommunicationLogStore
+    if name == "FirmwareTransportAdapter":
+        from .firmware_transport_adapter import FirmwareTransportAdapter
+
+        return FirmwareTransportAdapter
     if name == "RuntimePacketEvent":
         from .runtime_packet_handler import RuntimePacketEvent
 

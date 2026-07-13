@@ -63,6 +63,7 @@ Examples in the current codebase include:
 - Functional / Single Axis transport adapter
 - Production test transport adapter
 - Production parameter transport adapter
+- Firmware transport adapter for Firmware Integration Test ingress
 
 Adapters do not own workflow policy. They own relevance filtering only.
 
@@ -158,16 +159,31 @@ Completed work:
 - Mechanical cleanup
 - Workbook cleanup
 - Motor Current plotting
+- Firmware Integration Manual Binary mode
+- Firmware Integration Manual Text core transport/controller path
+- Firmware Integration Manual Text dialog
+- Firmware Integration Automated Binary FIT core logic
+- Firmware Integration Automated Binary FIT configuration and report dialogs
 
 Current state:
 
 - the layered ownership model is active and usable
 - the legacy `main_window.py` shell still exists beside the newer workspace shell
 - runtime-backed UI rendering is established for shared state such as interrupts and motor current
+- Manual Text protocol construction is canonical in the protocol layer, but Manual Text UI is still deferred
+- Manual Text protocol construction remains canonical in the protocol layer, and Manual Text UI now renders controller-owned state through a dialog
+- `FirmwareIntegrationController` remains the single public Firmware Integration owner; any mode-specific workflow helpers are private implementation details under that controller boundary
+- `FirmwareCommandDefinition` remains reusable command metadata, while `FirmwareTestCase` / `FirmwareTestResult` are separate data-only models for future automated FIT workflows
+- Automated Binary FIT core sequencing now lives in a private `_BinaryFitWorkflow` under `FirmwareIntegrationController`; config/report UI, export, save location, and Automated Text FIT remain future work
+- Binary FIT configuration and report dialogs are UI-only and render controller-owned state through one read-only snapshot contract rather than owning sequencing, timeout, or result truth
+- Automated Text FIT core sequencing now lives in a private `_TextFitWorkflow` under `FirmwareIntegrationController`; export and save location remain future work
+- Text FIT configuration and report dialogs are UI-only and render controller-owned state through one read-only snapshot contract rather than owning sequencing, timeout, or result truth
 
 Remaining work is primarily additive rather than structural:
 
 - additional diagnostic plots
+- remaining automated Firmware Integration behavior beyond Manual Binary and Manual Text dialogs
+- remaining Firmware Integration Test behavior beyond Manual Binary and Manual Text core transport
 - UI polish
 - documentation refinement
 - future workflow and product features

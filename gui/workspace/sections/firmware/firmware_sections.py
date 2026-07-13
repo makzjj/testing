@@ -3,13 +3,82 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QHBoxLayout, QLineEdit, QListWidget, QPushButton
+from PyQt6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton
 
 from ...bridges import WorkspaceRuntimeBridge
+from ...controllers.firmware_integration_controller import FirmwareIntegrationController
 from ...models import SelectionField, SelectionOption
 from ...widgets import ChipGroupWidget, DetailListWidget, LabeledControl, PanelFrame, SelectorFieldGrid, SimpleTableWidget
 from ...widgets.layout_utils import clear_layout
 from ..section_utils import build_grid_layout
+
+
+class FirmwareIntegrationSection(PanelFrame):
+    """Launcher section for Firmware Integration workflows."""
+
+    def __init__(
+        self,
+        controller: FirmwareIntegrationController,
+        *,
+        open_manual_binary_dialog,
+        open_manual_text_dialog,
+        open_binary_fit_dialog,
+        open_text_fit_dialog,
+    ) -> None:
+        super().__init__("Firmware Integration", "Manual Binary, Manual Text, and Binary FIT are available. Remaining FIT flows stay behind the controller scaffold.")
+        self._controller = controller
+        self._open_manual_binary_dialog = open_manual_binary_dialog
+        self._open_manual_text_dialog = open_manual_text_dialog
+        self._open_binary_fit_dialog = open_binary_fit_dialog
+        self._open_text_fit_dialog = open_text_fit_dialog
+        self._status_label: QLabel | None = None
+        self.refresh()
+
+    def refresh(self) -> None:
+        clear_layout(self.body_layout)
+
+        helper = QLabel(
+            "Manual Binary Command and Manual Text Command run through the Firmware Integration controller "
+            "and transport adapter. Binary FIT and Text FIT now launch through configuration and report dialogs. Export behavior remains deferred."
+        )
+        helper.setWordWrap(True)
+        helper.setObjectName("FirmwareIntegrationHelperText")
+        self.body_layout.addWidget(helper)
+
+        button_grid = QGridLayout()
+        button_grid.setContentsMargins(0, 0, 0, 0)
+        button_grid.setHorizontalSpacing(8)
+        button_grid.setVerticalSpacing(8)
+
+        buttons = [
+            ("Manual Binary Command", "FirmwareFitManualBinaryButton", self._open_manual_binary_dialog, "primary"),
+            ("Manual Text Command", "FirmwareFitManualTextButton", self._open_manual_text_dialog, "secondary"),
+            ("Run Binary FIT", "FirmwareFitRunBinaryButton", self._open_binary_fit_dialog, "secondary"),
+            ("Run Text FIT", "FirmwareFitRunTextButton", self._open_text_fit_dialog, "secondary"),
+            ("Reports / Export", "FirmwareFitReportsButton", self._controller.open_reports, "secondary"),
+        ]
+
+        for index, (label, object_name, handler, tone) in enumerate(buttons):
+            button = QPushButton(label)
+            button.setObjectName(object_name)
+            button.setProperty("tone", tone)
+            button.clicked.connect(lambda _checked=False, callback=handler: self._update_status(callback()))
+            row = index // 3
+            column = index % 3
+            button_grid.addWidget(button, row, column)
+
+        self.body_layout.addLayout(button_grid)
+
+        self._status_label = QLabel(
+            "Manual Binary Command, Manual Text Command, Binary FIT, and Text FIT are available. Export remains scaffold-only."
+        )
+        self._status_label.setWordWrap(True)
+        self._status_label.setObjectName("FirmwareIntegrationStatusLabel")
+        self.body_layout.addWidget(self._status_label)
+
+    def _update_status(self, message: str) -> None:
+        if self._status_label is not None:
+            self._status_label.setText(message)
 
 
 class CommandDebugSection(PanelFrame):

@@ -20,6 +20,14 @@ def build_getpos() -> list[int]:
     return [0x82]
 
 
+def build_getvel_query_payload() -> list[int]:
+    return [0x85]
+
+
+def build_getver_query_payload() -> list[int]:
+    return [0xC8, 0x3F]
+
+
 def _twos_complement_16(value: int) -> tuple[int, int]:
     value &= 0xFFFF
     return (value >> 8) & 0xFF, value & 0xFF

@@ -3,6 +3,8 @@ import unittest
 from data.binary_cmd_builders import (
     build_hunting_timeout,
     build_getpos,
+    build_getvel_query_payload,
+    build_getver_query_payload,
     build_run,
     build_vel,
     build_tpos,
@@ -35,6 +37,12 @@ class BinaryCommandBuilderTests(unittest.TestCase):
 
     def test_getpos_builder(self):
         self.assertEqual(build_getpos(), [0x82])
+
+    def test_getvel_builder(self):
+        self.assertEqual(build_getvel_query_payload(), [0x85])
+
+    def test_getver_builder(self):
+        self.assertEqual(build_getver_query_payload(), [0xC8, 0x3F])
 
     def test_run_builder_positive_190(self):
         self.assertEqual(build_run(190), [0x88, 0x00, 0xBE])
@@ -110,6 +118,11 @@ class BinaryCommandParserTests(unittest.TestCase):
         cmd, val = decode_command(0x84, [0x53, 0x00, 0x50])
         self.assertEqual(cmd, 'velocity_ack')
         self.assertEqual(val, 80)
+
+    def test_getvel_decode(self):
+        self.assertEqual(decode_command(0x85, [0x00, 0x50]), ("getvel", 80))
+        self.assertEqual(decode_command(0x85, [0xFF, 0x9C]), ("getvel", -100))
+        self.assertEqual(decode_command(0x85, [0x3A, 0x00, 0x50]), ("getvel", 80))
 
     def test_hunting_status_decode(self):
         self.assertEqual(decode_command(0xC3, [0x41]), ('hunting', 'accepted'))

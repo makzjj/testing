@@ -353,6 +353,35 @@ class WorkspaceRuntimeBridge:
         payload = backend_client.get_command_bytes(command_name, fallback)
         return backend_client.send_command_bytes(0x01, payload)
 
+    def send_firmware_binary_command(self, node_id: int, payload: list[int]) -> bytearray:
+        """Send one firmware binary command payload through the shared runtime backend."""
+        runtime_window = self.get_runtime_window(create_if_missing=True)
+        if runtime_window is None:
+            raise RuntimeError("Runtime backend is unavailable for Firmware Integration operations.")
+
+        backend_client = getattr(runtime_window, "backend_client", None)
+        if backend_client is None or not backend_client.is_connected():
+            raise RuntimeError("Serial port not connected.")
+
+        if not payload:
+            raise RuntimeError("Firmware command payload is empty.")
+        return backend_client.send_command_bytes(int(node_id), payload)
+
+    def send_firmware_text_command(self, payload: bytearray) -> bytearray:
+        """Send one pre-built firmware text frame through the shared runtime backend."""
+        runtime_window = self.get_runtime_window(create_if_missing=True)
+        if runtime_window is None:
+            raise RuntimeError("Runtime backend is unavailable for Firmware Integration operations.")
+
+        backend_client = getattr(runtime_window, "backend_client", None)
+        if backend_client is None or not backend_client.is_connected():
+            raise RuntimeError("Serial port not connected.")
+
+        if not payload:
+            raise RuntimeError("Firmware text payload is empty.")
+        backend_client.write(payload)
+        return payload
+
     def _discover_available_ports(self, runtime_window: object | None = None) -> list[str]:
         backend_client = getattr(runtime_window, "backend_client", None) if runtime_window is not None else None
         if backend_client is not None and hasattr(backend_client, "get_available_ports"):
@@ -504,6 +533,10 @@ class WorkspaceRuntimeBridge:
             options_by_node.setdefault(int(node_id), self._fallback_plot_node_label(int(node_id)))
 
         return [(node_id, options_by_node[node_id]) for node_id in sorted(options_by_node)]
+
+    def get_firmware_node_options(self, *, create_if_missing: bool = False) -> list[tuple[int, str]]:
+        """Return firmware-tool node options using the shared ML 2.0 labeling path."""
+        return self.get_plot_node_options(create_if_missing=create_if_missing)
 
     def _uses_ml20_plot_node_map(self) -> bool:
         project_names = {

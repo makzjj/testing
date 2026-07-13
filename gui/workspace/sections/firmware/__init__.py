@@ -3,6 +3,7 @@
 from .firmware_sections import (
     CommandDebugSection,
     FrameLossSection,
+    FirmwareIntegrationSection,
     MotionCommandSection,
     SensorSnapshotSection,
     UartProtocolSection,
@@ -11,6 +12,7 @@ from .firmware_sections import (
 __all__ = [
     "CommandDebugSection",
     "FrameLossSection",
+    "FirmwareIntegrationSection",
     "MotionCommandSection",
     "SensorSnapshotSection",
     "UartProtocolSection",
