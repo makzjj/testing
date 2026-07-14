@@ -59,6 +59,7 @@ class BinaryFitReportDialog(QDialog):
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setObjectName("BinaryFitReportProgressBar")
+        self.progress_bar.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(0)
         root.addWidget(self.progress_bar)

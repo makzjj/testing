@@ -193,7 +193,7 @@ _BINARY_COMMAND_ROWS: tuple[dict[str, object], ...] = (
     {"cmd": 0xCB, "name": "bcmd_ECHOTEST (Test comm link)", "params_type": "hex", "default": "AA 55", "expected_format": "Echo: [0xCB][test_data]"},
     {"cmd": 0xCC, "name": "bcmd_BTNP (Push button input)", "params_type": "hex", "default": "01", "expected_format": "[0xCC]['0'/'1']"},
     {"cmd": 0xCD, "name": "bcmd_NODETYPE (Get node type)", "params_type": "query_3f", "default": "", "expected_format": "[0xCD][0x3A][node_type]"},
-    {"cmd": 0xCD, "name": "bcmd_NODETYPE (Set node type)", "params_type": "set_3d", "default": "9", "expected_format": "[0xCD][0x3A][node_type]"},
+    {"cmd": 0xCD, "name": "bcmd_NODETYPE (Set node type)", "params_type": "set_3d", "default": "09", "expected_format": "[0xCD][0x3A][node_type]"},
     {"cmd": 0xCE, "name": "bcmd_STT_FAULT (Motor driver fault status)", "params_type": "none", "default": "", "expected_format": "[0xCE][status][fault_flags]"},
     {"cmd": 0xCF, "name": "bcmd_MOTOR_I (Motor current reading)", "params_type": "hex", "default": "00 00", "expected_format": "[0xCF][adc_hi][adc_lo]"},
     {"cmd": 0xD0, "name": "bcmd_FSR1 (FSR1 force sensor reading)", "params_type": "hex", "default": "00 00 01", "expected_format": "[0xD0][adc_hi][adc_lo][state]"},
