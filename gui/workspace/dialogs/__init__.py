@@ -2,6 +2,7 @@
 
 from .binary_fit_config_dialog import BinaryFitConfigDialog
 from .binary_fit_report_dialog import BinaryFitReportDialog
+from .firmware_report_export_dialog import FirmwareReportExportDialog
 from .manual_binary_command_dialog import ManualBinaryCommandDialog
 from .manual_text_command_dialog import ManualTextCommandDialog
 from .motor_current_plot_dialog import MotorCurrentPlotDialog
@@ -12,6 +13,7 @@ from .text_fit_report_dialog import TextFitReportDialog
 __all__ = [
     "BinaryFitConfigDialog",
     "BinaryFitReportDialog",
+    "FirmwareReportExportDialog",
     "ManualBinaryCommandDialog",
     "ManualTextCommandDialog",
     "MotorCurrentPlotDialog",

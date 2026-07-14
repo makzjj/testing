@@ -212,7 +212,7 @@ class FirmwareResultContractTests(unittest.TestCase):
         )
         self._app.processEvents()
         self.assertEqual(text_dialog.results_table.rowCount(), 1)
-        self.assertEqual(text_dialog.results_table.item(0, 7).text(), "PASS")
+        self.assertEqual(text_dialog.results_table.item(0, 6).text(), "PASS")
 
     def _binary_pass_result(self) -> FirmwareTestResult:
         bridge = _FakeBridge()
@@ -253,7 +253,7 @@ class FirmwareResultContractTests(unittest.TestCase):
         bridge = _FakeBridge()
         controller = FirmwareIntegrationController(bridge)
         manual_case = dataclasses.replace(
-            controller.binary_fit_case_definitions()[0],
+            next(case for case in controller.binary_fit_case_definitions() if case.case_id == "binary-fit-getver"),
             manual_verification=True,
             manual_prompt="Verify firmware manually.",
         )

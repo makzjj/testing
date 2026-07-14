@@ -21,14 +21,26 @@ class FirmwareTestCase:
     selected_by_default: bool = False
     category: str | None = None
     display_group: str | None = None
+    execution_policy: str | None = None
+    expected_response_description: str | None = None
+    cleanup_value: object | None = None
+    unsupported_reason: str | None = None
+    support_status: str | None = None
+    execution_capability: str | None = None
+    node_applicability: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
 class FirmwareTestResult:
-    """Outcome data for one future automated Firmware Integration test instance."""
+    """Self-contained outcome data for one automated Firmware Integration case."""
 
     case_id: str
     status: str
+    mode: str | None = None
+    case_name: str | None = None
+    command_key: str | None = None
+    command_display: str | None = None
+    target_node_id: int | None = None
     expected: str | None = None
     actual: str | None = None
     tx_bytes: bytes | None = None
@@ -36,6 +48,9 @@ class FirmwareTestResult:
     latency_ms: float | None = None
     message: str | None = None
     manual_verification_outcome: str | None = None
+    cleanup: str | None = None
+    semantic_decode_available: bool | None = None
+    execution_capability: str | None = None
 
 
 @dataclass(frozen=True)
@@ -58,7 +73,7 @@ class FirmwareBinaryFitSnapshot:
 
 @dataclass(frozen=True)
 class FirmwareTextFitSnapshot:
-    """Read-only Text FIT render contract for future UI consumers."""
+    """Read-only Text FIT render contract for UI consumers."""
 
     running: bool
     state: str

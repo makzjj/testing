@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
     QDialog,
-    QGridLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
+    QLineEdit,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -33,27 +36,15 @@ class TextFitConfigDialog(QDialog):
             definition.name: definition for definition in controller.manual_text_command_definitions()
         }
 
-        self.setWindowTitle("Text Firmware Integration Test")
+        self.setWindowTitle("Text Command Suite Configuration")
         self.setModal(False)
-        self.resize(920, 620)
-        self.setMinimumSize(840, 560)
+        self.resize(700, 500)
+        self.setMinimumSize(700, 500)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(8)
-
-        helper = QLabel(
-            "Select the Text FIT cases to run. This dialog only collects operator choices; "
-            "the controller owns sequencing, timeout, and prefix matching."
-        )
-        helper.setWordWrap(True)
-        helper.setObjectName("TextFitConfigHelperText")
-        root.addWidget(helper)
-
-        controls = QGridLayout()
-        controls.setContentsMargins(0, 0, 0, 0)
-        controls.setHorizontalSpacing(8)
-        controls.setVerticalSpacing(8)
+        root.setSpacing(10)
+        root.addWidget(QLabel("Configure and select Text-based commands to verify:"))
 
         self.select_all_button = QPushButton("Select All")
         self.select_all_button.setObjectName("TextFitConfigSelectAllButton")
@@ -67,7 +58,7 @@ class TextFitConfigDialog(QDialog):
         self.reset_defaults_button.setObjectName("TextFitConfigResetDefaultsButton")
         self.reset_defaults_button.clicked.connect(self._reset_defaults)
 
-        self.run_button = QPushButton("Run")
+        self.run_button = QPushButton("Start Test Run")
         self.run_button.setObjectName("TextFitConfigRunButton")
         self.run_button.setProperty("tone", "primary")
         self.run_button.clicked.connect(self._handle_run_clicked)
@@ -77,28 +68,38 @@ class TextFitConfigDialog(QDialog):
         self.cancel_button.setProperty("tone", "secondary")
         self.cancel_button.clicked.connect(self.reject)
 
-        controls.addWidget(self.select_all_button, 0, 0)
-        controls.addWidget(self.deselect_all_button, 0, 1)
-        controls.addWidget(self.reset_defaults_button, 0, 2)
-        controls.addWidget(self.run_button, 0, 3)
-        controls.addWidget(self.cancel_button, 0, 4)
-        controls.setColumnStretch(5, 1)
-        root.addLayout(controls)
-
-        self.case_table = QTableWidget(0, 6)
+        self.case_table = QTableWidget(0, 4)
         self.case_table.setObjectName("TextFitConfigCaseTable")
         self.case_table.setHorizontalHeaderLabels(
-            ["Run", "Command / Test Name", "Command Format", "Value / Parameter", "Type", "Expected Response"]
+            ["Test?", "Command Format", "Value/Param", "Type"]
         )
         self.case_table.verticalHeader().setVisible(False)
         self.case_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.case_table.horizontalHeader().setStretchLastSection(True)
+        self.case_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.case_table.setColumnWidth(0, 55)
+        self.case_table.setColumnWidth(1, 160)
+        self.case_table.setColumnWidth(2, 180)
         self.case_table.itemChanged.connect(self._handle_table_item_changed)
         root.addWidget(self.case_table, 1)
+
+        controls = QHBoxLayout()
+        controls.addWidget(self.select_all_button)
+        controls.addWidget(self.deselect_all_button)
+        controls.addWidget(self.reset_defaults_button)
+        controls.addStretch()
+        root.addLayout(controls)
 
         self.status_label = QLabel("Select at least one case to run.")
         self.status_label.setWordWrap(True)
         self.status_label.setObjectName("TextFitConfigStatusLabel")
         root.addWidget(self.status_label)
+
+        dialog_buttons = QHBoxLayout()
+        dialog_buttons.addStretch()
+        dialog_buttons.addWidget(self.run_button)
+        dialog_buttons.addWidget(self.cancel_button)
+        root.addLayout(dialog_buttons)
 
         self._populate_case_table()
         self._refresh_run_button_state()
@@ -113,8 +114,33 @@ class TextFitConfigDialog(QDialog):
                     selected.append(case_id)
         return selected
 
+    def selected_cases(self) -> list[FirmwareTestCase]:
+        selected: list[FirmwareTestCase] = []
+        cases_by_id = {case.case_id: case for case in self._case_definitions}
+        for row in range(self.case_table.rowCount()):
+            checkbox = self._row_checkbox(row)
+            if checkbox is None or not checkbox.isChecked():
+                continue
+            case_item = self.case_table.item(row, 1)
+            if case_item is None:
+                continue
+            case_id = case_item.data(Qt.ItemDataRole.UserRole)
+            if not isinstance(case_id, str) or case_id not in cases_by_id:
+                continue
+            case = cases_by_id[case_id]
+            value_input = self._row_value_input(row)
+            if value_input is None or not value_input.isEnabled():
+                selected.append(case)
+            else:
+                selected.append(replace(case, parameter_value=value_input.text().strip()))
+        return selected
+
     def _populate_case_table(self) -> None:
         self.case_table.blockSignals(True)
+        self.case_table.setColumnCount(4)
+        self.case_table.setHorizontalHeaderLabels(
+            ["Test?", "Command Format", "Value/Param", "Type"]
+        )
         self.case_table.setRowCount(len(self._case_definitions))
         for row, case in enumerate(self._case_definitions):
             command_definition = self._command_definitions_by_name[case.command_key]
@@ -132,15 +158,24 @@ class TextFitConfigDialog(QDialog):
             checkbox_layout.addWidget(checkbox)
             self.case_table.setCellWidget(row, 0, checkbox_host)
 
-            name_item = QTableWidgetItem(case.name)
+            command_text = str(command_definition.text_command or case.name)
+            name_item = QTableWidgetItem(command_text)
             name_item.setData(Qt.ItemDataRole.UserRole, case.case_id)
             self.case_table.setItem(row, 1, name_item)
-            self.case_table.setItem(row, 2, QTableWidgetItem(str(command_definition.text_command or "--")))
-            parameter_text = "--" if case.parameter_value is None else str(case.parameter_value)
-            self.case_table.setItem(row, 3, QTableWidgetItem(parameter_text))
-            type_text = "Query" if kind == "none" else "Setter"
-            self.case_table.setItem(row, 4, QTableWidgetItem(type_text))
-            self.case_table.setItem(row, 5, QTableWidgetItem(str(case.expected_response or "--")))
+            value_input = QLineEdit()
+            value_input.setObjectName(f"TextFitConfigValueInput_{case.case_id}")
+            value_input.setText("" if case.parameter_value is None else str(case.parameter_value))
+            value_input.setEnabled(kind != "none")
+            value_input.setPlaceholderText("No value required" if kind == "none" else str(schema.get("label", "Value")))
+            if kind == "none":
+                value_input.setStyleSheet("background-color: #eee;")
+            self.case_table.setCellWidget(row, 2, value_input)
+            type_text = str((command_definition.text_command or "").rstrip("=")[-1:] and "Action")
+            if str(command_definition.text_command or "").endswith("?"):
+                type_text = "QUERY"
+            elif str(command_definition.text_command or "").endswith("="):
+                type_text = "SET"
+            self.case_table.setItem(row, 3, QTableWidgetItem(type_text.upper()))
 
         self.case_table.resizeColumnsToContents()
         self.case_table.blockSignals(False)
@@ -164,14 +199,17 @@ class TextFitConfigDialog(QDialog):
             checkbox = self._row_checkbox(row)
             if checkbox is not None:
                 checkbox.setChecked(bool(case.selected_by_default))
+            value_input = self._row_value_input(row)
+            if value_input is not None:
+                value_input.setText("" if case.parameter_value is None else str(case.parameter_value))
         self._refresh_run_button_state()
 
     def _handle_run_clicked(self) -> None:
-        case_ids = self.selected_case_ids()
-        if not case_ids:
+        selected_cases = self.selected_cases()
+        if not selected_cases:
             self.status_label.setText("Select at least one Text FIT case before running.")
             return
-        self.run_requested.emit(list(case_ids))
+        self.run_requested.emit(list(selected_cases))
         self.accept()
 
     def _handle_table_item_changed(self, _item: QTableWidgetItem) -> None:
@@ -190,3 +228,9 @@ class TextFitConfigDialog(QDialog):
         if host is None:
             return None
         return host.findChild(QCheckBox)
+
+    def _row_value_input(self, row: int) -> QLineEdit | None:
+        widget = self.case_table.cellWidget(row, 2)
+        if isinstance(widget, QLineEdit):
+            return widget
+        return widget.findChild(QLineEdit) if widget is not None else None

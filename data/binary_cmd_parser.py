@@ -12,6 +12,12 @@ Handles parsing of:
 from myconfig.constants import BCMD_MOTOR_I
 from services.node_motion_polarity import NodeMotionPolarity
 
+
+def _parse_log_rate_ack(params):
+    if len(params) >= 3 and params[0] == 0x3A:
+        return (int(params[1]) << 8) | int(params[2])
+    return None
+
 def parse_get_tof(params):
     """Decode ToF sensor response (0xAB).
     Format: 3A [raw_hi] [raw_lo] [filtered_int] [decimal_places]
@@ -402,6 +408,10 @@ def decode_command(cmd, params):
         return ("rflag", None)
     elif cmd == BCMD_MOTOR_I:
         return ("motor_current_mA", parse_motor_current(params))
+    elif cmd == 0xD3:
+        return ("log_motor_current_rate", _parse_log_rate_ack(params))
+    elif cmd == 0xE4:
+        return ("position_log_rate", _parse_log_rate_ack(params))
     else:
         return (None, None)
 

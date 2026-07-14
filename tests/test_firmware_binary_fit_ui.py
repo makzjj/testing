@@ -91,6 +91,10 @@ class FirmwareBinaryFitUiTests(unittest.TestCase):
             widget.close()
         self._app.processEvents()
 
+    @staticmethod
+    def _find_case_row(dialog: BinaryFitConfigDialog, case_id: str) -> int:
+        return next(row for row in range(dialog.case_table.rowCount()) if dialog.case_table.item(row, 1).data(0x0100) == case_id)
+
     def test_run_binary_fit_button_opens_config_dialog_and_sends_nothing(self) -> None:
         bridge = _FakeBridge()
         page = FirmwarePage(bridge)
@@ -120,9 +124,42 @@ class FirmwareBinaryFitUiTests(unittest.TestCase):
         self.assertIsNotNone(node_combo)
         self.assertIsNotNone(case_table)
         assert node_combo is not None and case_table is not None
-        self.assertEqual([node_combo.itemData(i) for i in range(node_combo.count())], [3, 12])
+        self.assertEqual([node_combo.itemData(i) for i in range(node_combo.count())], list(range(2, 18)))
+        self.assertEqual(node_combo.currentData(), 3)
         self.assertEqual(case_table.rowCount(), len(controller.binary_fit_case_definitions()))
-        self.assertEqual(case_table.item(0, 1).text(), controller.binary_fit_case_definitions()[0].name)
+        self.assertEqual(case_table.columnCount(), 5)
+        self.assertEqual(
+            [case_table.horizontalHeaderItem(i).text() for i in range(case_table.columnCount())],
+            ["Test?", "Hex Code", "Command Name", "Parameters (Hex bytes)", "Param Type"],
+        )
+        first_opcodes = [case_table.item(index, 1).text() for index in range(3)]
+        self.assertEqual(first_opcodes, ["0x81", "0x82", "0x83"])
+        self.assertEqual(case_table.item(0, 2).text(), "bcmd_TPOS (Move Motor Position)")
+        self.assertEqual(case_table.item(1, 2).text(), "bcmd_GETPOS (Get Position)")
+        self.assertEqual(case_table.item(2, 2).text(), "bcmd_GETRPS (Get Speed)")
+
+        opcode_rows = [int(case_table.item(row, 1).text(), 16) for row in range(case_table.rowCount())]
+        self.assertEqual(opcode_rows, sorted(opcode_rows))
+
+        duplicate_opcodes = {}
+        for row in range(case_table.rowCount()):
+            duplicate_opcodes.setdefault(case_table.item(row, 1).text(), []).append(case_table.item(row, 2).text())
+        self.assertEqual(
+            duplicate_opcodes["0x86"][:2],
+            ["bcmd_NODEIDref (Get ID Reference)", "bcmd_NODEIDref (Set ID Reference)"],
+        )
+        self.assertEqual(
+            duplicate_opcodes["0x96"][:2],
+            ["bcmd_EXTINT (Get EXT Interrupt)", "bcmd_EXTINT (Set EXT Interrupt)"],
+        )
+        self.assertEqual(
+            duplicate_opcodes["0xCD"][:2],
+            ["bcmd_NODETYPE (Get node type)", "bcmd_NODETYPE (Set node type)"],
+        )
+        self.assertEqual(
+            duplicate_opcodes["0xEA"][:2],
+            ["bcmd_POSITION (Get current position)", "bcmd_POSITION (Set current position)"],
+        )
 
     def test_config_dialog_select_all_deselect_all_and_reset_defaults_work(self) -> None:
         controller = FirmwareIntegrationController(_FakeBridge())
@@ -162,14 +199,17 @@ class FirmwareBinaryFitUiTests(unittest.TestCase):
         checkbox = checkbox_host.findChild(QCheckBox)
         assert checkbox is not None
         checkbox.setChecked(True)
-        dialog.node_combo.setCurrentIndex(1)
+        dialog.node_combo.setCurrentIndex(dialog.node_combo.findData(12))
         self._app.processEvents()
         self.assertTrue(dialog.run_button.isEnabled())
 
         dialog.run_button.click()
         self._app.processEvents()
         self.assertEqual(dialog.result(), dialog.DialogCode.Accepted)
-        self.assertEqual(emitted, [(12, [controller.binary_fit_case_definitions()[0].case_id])])
+        self.assertEqual(len(emitted), 1)
+        self.assertEqual(emitted[0][0], 12)
+        emitted_cases = list(emitted[0][1])
+        self.assertEqual([case.case_id for case in emitted_cases], [controller.binary_fit_case_definitions()[0].case_id])
         self.assertEqual(bridge._runtime_window.backend_client.sent_commands, [])
 
     def test_page_launch_flow_opens_report_dialog_and_starts_controller_after_run_confirmation(self) -> None:
@@ -181,12 +221,12 @@ class FirmwareBinaryFitUiTests(unittest.TestCase):
         self.assertIsNotNone(config)
         assert config is not None
         config._deselect_all()
-        checkbox_host = config.case_table.cellWidget(0, 0)
+        checkbox_host = config.case_table.cellWidget(self._find_case_row(config, "binary-fit-getver"), 0)
         assert checkbox_host is not None
         checkbox = checkbox_host.findChild(QCheckBox)
         assert checkbox is not None
         checkbox.setChecked(True)
-        config.node_combo.setCurrentIndex(0)
+        config.node_combo.setCurrentIndex(config.node_combo.findData(3))
 
         config.run_button.click()
         self._app.processEvents()
@@ -206,18 +246,18 @@ class FirmwareBinaryFitUiTests(unittest.TestCase):
         self._app.processEvents()
 
         self.assertEqual(dialog.target_node_label.text(), "Node 03")
-        self.assertEqual(dialog.current_case_label.text(), "GETVER")
+        self.assertEqual(dialog.current_case_label.text(), "GETPOS")
         self.assertEqual(dialog.progress_label.text(), "0 / 2")
 
         bridge._runtime_window.packet_received.emit(
-            {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0xC8, "params": [0x3A, 0x12, 0x30, 0x01]}
+            {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x10]}
         )
         self._app.processEvents()
 
         self.assertEqual(dialog.results_table.rowCount(), 1)
-        self.assertEqual(dialog.results_table.item(0, 0).text(), "binary-fit-getver")
+        self.assertEqual(dialog.results_table.item(0, 0).text(), "GETPOS")
         self.assertEqual(dialog.results_table.item(0, 6).text(), "PASS")
-        self.assertEqual(dialog.current_case_label.text(), "GETPOS")
+        self.assertEqual(dialog.current_case_label.text(), "GETVER")
         self.assertEqual(dialog.progress_label.text(), "1 / 2")
 
     def test_report_dialog_completion_and_cancelled_state_preserve_results(self) -> None:
@@ -227,7 +267,7 @@ class FirmwareBinaryFitUiTests(unittest.TestCase):
         dialog = BinaryFitReportDialog(controller)
 
         bridge._runtime_window.packet_received.emit(
-            {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0xC8, "params": [0x3A, 0x12, 0x30, 0x01]}
+            {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x10]}
         )
         self._app.processEvents()
         dialog.cancel_button.click()
@@ -255,7 +295,7 @@ class FirmwareBinaryFitUiTests(unittest.TestCase):
         bridge = _FakeBridge()
         controller = FirmwareIntegrationController(bridge)
         manual_case = dataclasses.replace(
-            controller.binary_fit_case_definitions()[0],
+            next(case for case in controller.binary_fit_case_definitions() if case.case_id == "binary-fit-getver"),
             case_id="binary-fit-getver-manual-ui",
             manual_verification=True,
             manual_prompt="Confirm version is visible.",
@@ -291,7 +331,7 @@ class FirmwareBinaryFitUiTests(unittest.TestCase):
         bridge = _FakeBridge()
         controller = FirmwareIntegrationController(bridge)
         manual_case = dataclasses.replace(
-            controller.binary_fit_case_definitions()[0],
+            next(case for case in controller.binary_fit_case_definitions() if case.case_id == "binary-fit-getver"),
             case_id="binary-fit-getver-awaiting-ui",
             manual_verification=True,
             manual_prompt="Confirm version is visible.",

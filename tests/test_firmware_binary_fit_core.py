@@ -79,17 +79,33 @@ class FirmwareBinaryFitCoreTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls._app = QApplication.instance() or QApplication([])
 
-    def test_binary_fit_catalog_exists_and_uses_small_proven_subset(self) -> None:
+    def test_binary_fit_catalog_exists_and_uses_complete_binary_catalog(self) -> None:
         controller = FirmwareIntegrationController()
         cases = controller.binary_fit_case_definitions()
 
+        self.assertEqual(len(cases), 83)
         self.assertEqual(
-            [case.name for case in cases],
-            ["GETVER", "GETPOS", "GETVEL", "NODECONFIG Query", "INTERRUPT Query", "MOTOR_I Query"],
+            [case.name for case in cases[:6]],
+            [
+                "TPOS - Move Motor Position",
+                "GETPOS",
+                "GETRPS - Get Speed",
+                "VEL Write",
+                "GETVEL",
+                "NODEIDref - Get ID Reference",
+            ],
         )
         for case in cases:
             self.assertEqual(case.mode, "binary")
-            self.assertTrue(case.selected_by_default)
+            self.assertIsNotNone(case.execution_policy)
+            self.assertIsNotNone(case.support_status)
+        selected_default_names = {case.name for case in cases if case.selected_by_default}
+        self.assertIn("GETPOS", selected_default_names)
+        self.assertIn("GETRPS - Get Speed", selected_default_names)
+        self.assertIn("GETVEL", selected_default_names)
+        self.assertNotIn("TPOS - Move Motor Position", selected_default_names)
+        self.assertTrue(all(case.execution_capability for case in cases))
+        self.assertFalse(any(case.unsupported_reason for case in cases))
 
     def test_binary_fit_sequences_cases_one_at_a_time_and_produces_results(self) -> None:
         bridge = _FakeBridge()
@@ -111,8 +127,8 @@ class FirmwareBinaryFitCoreTests(unittest.TestCase):
             )
         )
         self.assertEqual(len(started), 1)
-        self.assertEqual(started[0]["case_id"], "binary-fit-getver")
-        self.assertEqual(bridge._runtime_window.backend_client.sent_commands, [(3, [0xC8, 0x3F])])
+        self.assertEqual(started[0]["case_id"], "binary-fit-getpos")
+        self.assertEqual(bridge._runtime_window.backend_client.sent_commands, [(3, [0x82])])
 
         bridge._runtime_window.packet_received.emit(
             {"status": "ok", "type": "direct_uart", "raw_payload": list(b"ver:1.2.3\r\n")}
@@ -125,17 +141,17 @@ class FirmwareBinaryFitCoreTests(unittest.TestCase):
         self.assertEqual(results, [])
 
         bridge._runtime_window.packet_received.emit(
-            {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0xC8, "params": [0x3A, 0x12, 0x30, 0x01]}
+            {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x10]}
         )
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].status, "PASS")
-        self.assertEqual(results[0].case_id, "binary-fit-getver")
+        self.assertEqual(results[0].case_id, "binary-fit-getpos")
         self.assertEqual(len(started), 2)
-        self.assertEqual(started[1]["case_id"], "binary-fit-getpos")
-        self.assertEqual(bridge._runtime_window.backend_client.sent_commands[-1], (3, [0x82]))
+        self.assertEqual(started[1]["case_id"], "binary-fit-getver")
+        self.assertEqual(bridge._runtime_window.backend_client.sent_commands[-1], (3, [0xC8, 0x3F]))
 
         bridge._runtime_window.packet_received.emit(
-            {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x10]}
+            {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0xC8, "params": [0x3A, 0x12, 0x30, 0x01]}
         )
         self.assertEqual(len(results), 2)
         self.assertTrue(all(isinstance(result, FirmwareTestResult) for result in results))
@@ -159,10 +175,10 @@ class FirmwareBinaryFitCoreTests(unittest.TestCase):
         )
         controller.handle_timeout()
         self.assertEqual(results[0].status, "TIMEOUT")
-        self.assertEqual(bridge._runtime_window.backend_client.sent_commands[-1], (3, [0x82]))
+        self.assertEqual(bridge._runtime_window.backend_client.sent_commands[-1], (3, [0xC8, 0x3F]))
 
         bridge._runtime_window.packet_received.emit(
-            {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x10]}
+            {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0xC8, "params": [0x3A, 0x12, 0x30, 0x01]}
         )
         self.assertEqual([result.status for result in results], ["TIMEOUT", "PASS"])
         self.assertEqual(completed[-1]["status"], "COMPLETED")
@@ -186,10 +202,10 @@ class FirmwareBinaryFitCoreTests(unittest.TestCase):
         )
         self.assertEqual(results[0].status, "ERROR")
         self.assertIn("Injected send failure", results[0].message or "")
-        self.assertEqual(bridge._runtime_window.backend_client.sent_commands, [(3, [0x82])])
+        self.assertEqual(bridge._runtime_window.backend_client.sent_commands, [(3, [0xC8, 0x3F])])
 
         bridge._runtime_window.packet_received.emit(
-            {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0x82, "params": [0x00, 0x00, 0x00, 0x10]}
+            {"status": "ok", "type": "can_over_uart", "sender": 3, "cmd": 0xC8, "params": [0x3A, 0x12, 0x30, 0x01]}
         )
         self.assertEqual([result.status for result in results], ["ERROR", "PASS"])
         self.assertEqual(completed[-1]["status"], "COMPLETED")
@@ -200,7 +216,7 @@ class FirmwareBinaryFitCoreTests(unittest.TestCase):
     def test_manual_verification_pauses_until_submission(self) -> None:
         bridge = _FakeBridge()
         controller = FirmwareIntegrationController(bridge)
-        catalog_case = controller.binary_fit_case_definitions()[0]
+        catalog_case = next(case for case in controller.binary_fit_case_definitions() if case.case_id == "binary-fit-getver")
         manual_case = dataclasses.replace(
             catalog_case,
             case_id="binary-fit-getver-manual",
@@ -247,7 +263,7 @@ class FirmwareBinaryFitCoreTests(unittest.TestCase):
         self.assertFalse(controller.has_pending_firmware_request())
 
         manual_case = dataclasses.replace(
-            controller.binary_fit_case_definitions()[0],
+            next(case for case in controller.binary_fit_case_definitions() if case.case_id == "binary-fit-getver"),
             case_id="binary-fit-getver-awaiting",
             manual_verification=True,
             manual_prompt="Verify manually.",

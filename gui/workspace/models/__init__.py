@@ -3,6 +3,7 @@
 from .action_item import ActionItem
 from .detail_item import DetailItem
 from .firmware_command_definition import FirmwareCommandDefinition
+from .firmware_report import FirmwareFitReport
 from .firmware_test_case import FirmwareBinaryFitSnapshot, FirmwareTestCase, FirmwareTestResult, FirmwareTextFitSnapshot
 from .metric_item import MetricItem
 from .navigation_item import NavigationItem
@@ -14,6 +15,7 @@ __all__ = [
     "ActionItem",
     "DetailItem",
     "FirmwareCommandDefinition",
+    "FirmwareFitReport",
     "FirmwareBinaryFitSnapshot",
     "FirmwareTestCase",
     "FirmwareTestResult",

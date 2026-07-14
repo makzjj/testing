@@ -190,14 +190,22 @@ Start by identifying what kind of feature it is.
 - Firmware Integration packet ingress belongs in `services/firmware_transport_adapter.py`
 - Manual Binary dialog is UI-only and should not build packets, parse packets, or access the backend directly
 - Manual Text dialog is UI-only and should not build packets, parse packets, or access the backend directly
-- Automated Binary FIT core sequencing lives in a private `_BinaryFitWorkflow`; Config UI, Report UI, Export, Save Location, and Automated Text FIT are still future work
-- Binary FIT Configuration and Report dialogs are UI-only and should render `FirmwareIntegrationController.binary_fit_status_snapshot()` plus controller signals rather than reaching into workflow internals
-- Automated Text FIT core sequencing lives in a private `_TextFitWorkflow`; Export and Save Location are still future work
-- Text FIT Config and Report dialogs are UI-only and should render `FirmwareIntegrationController.text_fit_status_snapshot()` plus controller signals rather than reaching into workflow internals
+- Automated Binary FIT core sequencing lives in a private `_BinaryFitWorkflow`; response-match vs semantic-decode policy, `CONTRACT_UNKNOWN` non-sending results, no-response completion, reboot recovery, logging cleanup, manual-verification pauses, and report export must stay outside the run dialog
+- Binary FIT Configuration and Report dialogs are UI-only and should render `FirmwareIntegrationController.binary_fit_status_snapshot()` plus controller signals rather than reaching into workflow internals; the config dialog may edit metadata-driven parameters but must not own validation, response matching, cleanup, or sequencing
+- Automated Text FIT core sequencing lives in a private `_TextFitWorkflow`; policy-specific cleanup, unsupported-command results, and manual-verification pauses stay in the workflow, and report export must stay outside the run dialog
+- Text FIT Config and Report dialogs are UI-only and should render `FirmwareIntegrationController.text_fit_status_snapshot()` plus controller signals rather than reaching into workflow internals; the config dialog may edit metadata-driven values but must not own validation, prefix matching, cleanup, or sequencing
+- The legacy Firmware Integration Test file is the required layout and operator-flow reference for the Firmware Integration module, Manual Binary/Text command modes, Binary/Text FIT configuration dialogs, Binary/Text FIT report dialogs, and HTML report information hierarchy. Use BioBot orange styling only; do not import or instantiate the legacy widget.
 - `WorkspaceRuntimeBridge` owns the Firmware Integration send boundaries for Manual Binary and Manual Text
 - command builders and parsers for Manual Binary remain canonical in `data/binary_cmd_builders.py` and `data/binary_cmd_parser.py`
 - Manual Text framing and direct-UART ASCII decode remain canonical in `data/text_cmd_builders.py`
-- `FirmwareCommandDefinition` describes reusable commands, while `FirmwareTestCase` / `FirmwareTestResult` describe future automated FIT instances and outcomes
+- `FirmwareCommandDefinition` describes reusable commands, `FirmwareTestCase` describes automated FIT case metadata, and `FirmwareTestResult` is the data-only per-case reporting contract for current FIT UI and future export work
+- The complete represented Binary and Text command catalogs are metadata-driven through `FirmwareCommandDefinition`/`FirmwareTestCase`; commands requiring operator or hardware observation must remain visible through explicit execution capability metadata instead of being silently omitted
+- Binary FIT follows the legacy Firmware Integration Test functional workflow: documented Binary commands execute when request framing and expected response opcode are known, response matching by selected node plus opcode is sufficient unless `RESPONSE_DECODE` is available, semantic decoding enhances verification but is not required for `RESPONSE_MATCH`, manual-verification commands send and pause for operator confirmation, logging commands send start and cleanup stop, reboot/no-response commands use explicit lifecycle policies, and only `CONTRACT_UNKNOWN` remains non-sending
+- `FirmwareFitReport` is the data-only run-level report contract assembled from completed FIT results
+- `FirmwareReportBuilder` owns pure in-memory HTML generation, reproduces the legacy HTML report layout with BioBot orange styling, and must remain filesystem-free
+- `FirmwareReportExportDialog` owns shared Reports / Export interaction. Binary/Text run report dialogs may expose the legacy Export button, but it must delegate to `FirmwareReportBuilder` and `FirmwareReportExportService` rather than owning export logic.
+- `FirmwareReportExportService` owns HTML file writing, filename collision handling, and save-location persistence through `QSettings("Biobot", "RobotArmTester")` key `report_save_location`
+- PDF/CSV export, report history, and final hardware validation remain future work
 
 ### Protocol Command
 

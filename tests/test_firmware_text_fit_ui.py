@@ -7,7 +7,7 @@ import unittest
 from dataclasses import FrozenInstanceError
 
 from PyQt6.QtCore import QObject, pyqtSignal
-from PyQt6.QtWidgets import QApplication, QCheckBox, QComboBox, QLabel, QPushButton, QTableWidget
+from PyQt6.QtWidgets import QApplication, QCheckBox, QComboBox, QLabel, QLineEdit, QPushButton, QTableWidget
 
 import gui.workspace.dialogs.text_fit_config_dialog as text_fit_config_dialog_module
 import gui.workspace.dialogs.text_fit_report_dialog as text_fit_report_dialog_module
@@ -122,10 +122,18 @@ class FirmwareTextFitUiTests(unittest.TestCase):
         assert case_table is not None
         self.assertIsNone(node_combo)
         self.assertEqual(case_table.rowCount(), len(controller.text_fit_case_definitions()))
-        self.assertEqual(case_table.item(0, 1).text(), controller.text_fit_case_definitions()[0].name)
-        self.assertEqual(case_table.item(0, 2).text(), "ver?")
-        self.assertEqual(case_table.item(0, 3).text(), "--")
-        self.assertEqual(case_table.item(0, 4).text(), "Query")
+        self.assertEqual(case_table.columnCount(), 4)
+        self.assertEqual(
+            [case_table.horizontalHeaderItem(i).text() for i in range(case_table.columnCount())],
+            ["Test?", "Command Format", "Value/Param", "Type"],
+        )
+        self.assertEqual(case_table.item(0, 1).text(), "ver?")
+        value_widget = case_table.cellWidget(0, 2)
+        value_input = value_widget if isinstance(value_widget, QLineEdit) else value_widget.findChild(QLineEdit)
+        self.assertIsNotNone(value_input)
+        assert value_input is not None
+        self.assertFalse(value_input.isEnabled())
+        self.assertEqual(case_table.item(0, 3).text(), "QUERY")
 
     def test_config_dialog_select_all_deselect_all_reset_defaults_and_accept_values(self) -> None:
         controller = FirmwareIntegrationController(_FakeBridge())
@@ -157,7 +165,7 @@ class FirmwareTextFitUiTests(unittest.TestCase):
         self._app.processEvents()
 
         self.assertEqual(dialog.result(), dialog.DialogCode.Accepted)
-        self.assertEqual(emitted, [[controller.text_fit_case_definitions()[0].case_id]])
+        self.assertEqual([[case.case_id for case in event] for event in emitted], [[controller.text_fit_case_definitions()[0].case_id]])
 
     def test_page_launch_flow_opens_report_dialog_and_starts_controller_after_run_confirmation(self) -> None:
         bridge = _FakeBridge()
@@ -199,8 +207,8 @@ class FirmwareTextFitUiTests(unittest.TestCase):
 
         self.assertEqual(dialog.results_table.rowCount(), 1)
         self.assertEqual(dialog.results_table.item(0, 0).text(), "Version Query")
-        self.assertEqual(dialog.results_table.item(0, 1).text(), "ver?")
-        self.assertEqual(dialog.results_table.item(0, 7).text(), "PASS")
+        self.assertEqual(dialog.results_table.item(0, 1).text(), "ver:")
+        self.assertEqual(dialog.results_table.item(0, 6).text(), "PASS")
         self.assertEqual(dialog.current_case_label.text(), "UART Status Query")
         self.assertEqual(dialog.progress_label.text(), "1 / 2")
 
@@ -216,7 +224,7 @@ class FirmwareTextFitUiTests(unittest.TestCase):
         self._app.processEvents()
 
         self.assertEqual(dialog.results_table.rowCount(), 2)
-        self.assertEqual(dialog.results_table.item(1, 7).text(), "CANCELLED")
+        self.assertEqual(dialog.results_table.item(1, 6).text(), "CANCELLED")
         self.assertFalse(dialog.cancel_button.isEnabled())
         self.assertTrue(dialog.close_button.isEnabled())
 
@@ -227,7 +235,7 @@ class FirmwareTextFitUiTests(unittest.TestCase):
         second_bridge._runtime_window.packet_received.emit({"status": "ok", "type": "direct_uart", "raw_payload": list(b"ver:1.2.3\r\n")})
         self._app.processEvents()
         self.assertEqual(second_dialog.results_table.rowCount(), 1)
-        self.assertEqual(second_dialog.results_table.item(0, 7).text(), "PASS")
+        self.assertEqual(second_dialog.results_table.item(0, 6).text(), "PASS")
         self.assertFalse(second_dialog.cancel_button.isEnabled())
         self.assertTrue(second_dialog.close_button.isEnabled())
 
@@ -262,7 +270,7 @@ class FirmwareTextFitUiTests(unittest.TestCase):
 
         self.assertEqual(calls, [(True, "Operator confirmed output.")])
         self.assertEqual(dialog.results_table.rowCount(), 1)
-        self.assertEqual(dialog.results_table.item(0, 7).text(), "PASS")
+        self.assertEqual(dialog.results_table.item(0, 6).text(), "PASS")
         self.assertFalse(dialog.manual_prompt_container.isVisible())
 
     def test_config_cancel_close_lifecycle_and_reopen_are_clean(self) -> None:

@@ -410,15 +410,19 @@ class FirmwareReportExportArchitectureTests(unittest.TestCase):
         self.assertNotIn("write_text", source)
         self.assertNotIn("FirmwareReportExportService", source)
 
-    def test_binary_and_text_report_dialogs_remain_export_free(self) -> None:
+    def test_binary_and_text_report_dialogs_delegate_export_without_filesystem_ownership(self) -> None:
         for path in (
             Path("gui/workspace/dialogs/binary_fit_report_dialog.py"),
             Path("gui/workspace/dialogs/text_fit_report_dialog.py"),
         ):
             source = path.read_text(encoding="utf-8")
-            self.assertNotIn("FirmwareReportExportService", source)
-            self.assertNotIn("Export HTML", source)
+            self.assertIn("FirmwareReportExportService", source)
+            self.assertIn("Export Report", source)
             self.assertNotIn("QFileDialog", source)
+            self.assertNotIn("QSettings", source)
+            self.assertNotIn("write_text", source)
+            self.assertNotIn("write_bytes", source)
+            self.assertNotIn("open(", source)
 
     def test_export_dialog_uses_public_report_access_only(self) -> None:
         source = Path("gui/workspace/dialogs/firmware_report_export_dialog.py").read_text(encoding="utf-8")

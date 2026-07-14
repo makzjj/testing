@@ -105,11 +105,13 @@ class FirmwareWorkflowFoundationTests(unittest.TestCase):
         self.assertEqual(command_definition.name, "GETVER")
         self.assertEqual(test_case.command_key, "GETVER")
         self.assertEqual(test_result.case_id, "binary-getver")
-        self.assertNotIn("selected_by_default", {field.name for field in dataclasses.fields(command_definition)})
+        self.assertIn("selected_by_default", {field.name for field in dataclasses.fields(command_definition)})
+        self.assertIn("execution_policy", {field.name for field in dataclasses.fields(command_definition)})
         self.assertIn("selected_by_default", {field.name for field in dataclasses.fields(test_case)})
+        self.assertIn("execution_policy", {field.name for field in dataclasses.fields(test_case)})
         self.assertIn("status", {field.name for field in dataclasses.fields(test_result)})
 
-    def test_no_legacy_full_tables_or_automated_execution_are_introduced(self) -> None:
+    def test_no_legacy_widget_tables_or_generic_workflow_framework_are_introduced(self) -> None:
         controller_source = inspect.getsource(firmware_controller_module)
         self.assertNotIn("ALL_BINARY_COMMANDS", controller_source)
         self.assertNotIn("ALL_TEXT_COMMANDS", controller_source)

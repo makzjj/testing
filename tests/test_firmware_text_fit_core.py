@@ -83,26 +83,22 @@ class FirmwareTextFitCoreTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls._app = QApplication.instance() or QApplication([])
 
-    def test_text_fit_catalog_exists_and_uses_small_query_subset(self) -> None:
+    def test_text_fit_catalog_exists_and_uses_complete_text_catalog(self) -> None:
         controller = FirmwareIntegrationController()
         cases = controller.text_fit_case_definitions()
         definitions = {definition.name: definition for definition in controller.manual_text_command_definitions()}
 
-        self.assertEqual(
-            [case.name for case in cases],
-            [
-                "Version Query",
-                "UART Status Query",
-                "Operating Mode Query",
-                "Robot Power Query",
-            ],
-        )
+        self.assertEqual(len(cases), 70)
+        self.assertEqual([case.name for case in cases[:4]], ["Version Query", "UART Status Query", "Operating Mode Query", "Robot Power Query"])
         for case in cases:
             self.assertEqual(case.mode, "text")
-            self.assertTrue(case.selected_by_default)
-            self.assertIsNone(case.parameter_value)
             self.assertIn(case.command_key, definitions)
-        self.assertNotIn("Robot Power Set", [case.name for case in cases])
+            self.assertIsNotNone(case.execution_policy)
+            self.assertIsNotNone(case.category)
+            self.assertIsNotNone(case.expected_response_description)
+        self.assertIn("Robot Power Set", [case.name for case in cases])
+        self.assertTrue(all(case.selected_by_default for case in cases if str(definitions[case.command_key].text_command).endswith("?")))
+        self.assertFalse(any(case.selected_by_default for case in cases if not str(definitions[case.command_key].text_command).endswith("?")))
 
     def test_text_fit_snapshot_is_immutable_and_read_only(self) -> None:
         controller = FirmwareIntegrationController()

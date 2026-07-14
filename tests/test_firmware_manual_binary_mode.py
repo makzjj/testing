@@ -153,7 +153,7 @@ class FirmwareManualBinaryModeTests(unittest.TestCase):
 
         controller.send_manual_binary_command = _fake_send_manual_binary_command  # type: ignore[method-assign]
         dialog.node_combo.setCurrentIndex(0)
-        dialog.command_combo.setCurrentIndex(0)
+        dialog.command_combo.setCurrentIndex(dialog.command_combo.findData("GETVER"))
         dialog.findChild(QPushButton, "ManualBinarySendButton").click()
 
         self.assertEqual(len(calls), 1)
@@ -174,22 +174,36 @@ class FirmwareManualBinaryModeTests(unittest.TestCase):
         self.assertIsNone(controller.pending_manual_binary_request)
         self.assertIn("Cancelled pending manual binary command", controller.last_action or "")
 
-    def test_controller_supported_manual_binary_subset_exists(self) -> None:
+    def test_controller_supported_manual_binary_catalog_exists(self) -> None:
         controller = FirmwareIntegrationController()
         names = [definition.name for definition in controller.manual_binary_command_definitions()]
+        display_names = [str(definition.display_name or definition.name) for definition in controller.manual_binary_command_definitions()]
 
+        self.assertEqual(len(names), 83)
+        self.assertEqual(names[:6], ["TPOS - Move Motor Position", "GETPOS", "GETRPS - Get Speed", "VEL Write", "GETVEL", "NODEIDref - Get ID Reference"])
+        self.assertIn("VEL Write", names)
+        self.assertIn("RUN", names)
+        self.assertIn("NODETYPE - Get node type", names)
+        self.assertIn("NODETYPE - Set node type", names)
+        self.assertIn("bcmd_NODECONFIG (Query Node Configuration)", display_names)
+        self.assertIn("bcmd_INTERRUPT (Query Interrupt State)", display_names)
+        self.assertIn("bcmd_MOTOR_I (Query Motor Current)", display_names)
+        self.assertEqual(len(set(names)), len(names))
+
+    def test_manual_binary_dialog_uses_canonical_order_and_display_labels(self) -> None:
+        dialog = ManualBinaryCommandDialog(FirmwareIntegrationController(_FakeBridge()))
+        items = [(dialog.command_combo.itemText(index), dialog.command_combo.itemData(index)) for index in range(dialog.command_combo.count())]
+
+        self.assertEqual(items[0], ("TPOS - Move Motor Position", "TPOS - Move Motor Position"))
+        self.assertEqual(items[1], ("GETPOS", "GETPOS"))
+        self.assertEqual(items[2], ("GETRPS - Get Speed", "GETRPS - Get Speed"))
+        self.assertLess(
+            next(index for index, item in enumerate(items) if item[1] == "NODECONFIG Query"),
+            next(index for index, item in enumerate(items) if item[1] == "SAVEEEPROM - Save settings"),
+        )
         self.assertEqual(
-            names,
-            [
-                "GETVER",
-                "GETPOS",
-                "GETVEL",
-                "VEL Write",
-                "RUN",
-                "NODECONFIG Query",
-                "INTERRUPT Query",
-                "MOTOR_I Query",
-            ],
+            next(item[0] for item in items if item[1] == "NODECONFIG Query"),
+            "bcmd_NODECONFIG (Query Node Configuration)",
         )
 
     def test_controller_send_creates_pending_request_and_uses_bridge_send_boundary(self) -> None:

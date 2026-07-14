@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import QApplication, QLabel, QPushButton
 from gui.workspace.controllers.firmware_integration_controller import FirmwareIntegrationController
 from gui.workspace.dialogs import (
     BinaryFitConfigDialog,
+    FirmwareReportExportDialog,
     ManualBinaryCommandDialog,
     ManualTextCommandDialog,
     TextFitConfigDialog,
@@ -101,9 +102,9 @@ class FirmwareFitScaffoldTests(unittest.TestCase):
         expected_buttons = {
             "FirmwareFitManualBinaryButton": "Manual Binary Command",
             "FirmwareFitManualTextButton": "Manual Text Command",
-            "FirmwareFitRunBinaryButton": "Run Binary FIT",
-            "FirmwareFitRunTextButton": "Run Text FIT",
-            "FirmwareFitReportsButton": "Reports / Export",
+            "FirmwareFitRunBinaryButton": "Run Binary Tests",
+            "FirmwareFitRunTextButton": "Run Text-based Tests",
+            "FirmwareFitReportsButton": "Save Location",
         }
 
         for object_name, label in expected_buttons.items():
@@ -115,36 +116,31 @@ class FirmwareFitScaffoldTests(unittest.TestCase):
         status_label = page.findChild(QLabel, "FirmwareIntegrationStatusLabel")
         self.assertIsNotNone(status_label)
         assert status_label is not None
-        self.assertIn("Manual Binary Command", status_label.text())
+        self.assertIn("Firmware Integration Test", status_label.text())
 
-    def test_fit_placeholder_buttons_stay_inert_and_do_not_send_commands(self) -> None:
+    def test_reports_button_opens_export_dialog_without_sending_commands(self) -> None:
         bridge = _FakeBridge()
         page = FirmwarePage(bridge)
         runtime_window = bridge._runtime_window
         receiver_count_before = runtime_window.receivers(runtime_window.packet_received)
 
-        button_names = [
-            "FirmwareFitReportsButton",
-        ]
-
-        for object_name in button_names:
-            button = page.findChild(QPushButton, object_name)
-            self.assertIsNotNone(button)
-            assert button is not None
-            button.click()
+        button = page.findChild(QPushButton, "FirmwareFitReportsButton")
+        self.assertIsNotNone(button)
+        assert button is not None
+        button.click()
 
         self._app.processEvents()
 
+        dialog = page._report_export_dialog
+        self.assertIsNotNone(dialog)
+        assert dialog is not None
+        self.assertIsInstance(dialog, FirmwareReportExportDialog)
+        self.assertTrue(dialog.isVisible())
         self.assertEqual(runtime_window.backend_client.sent_commands, [])
         self.assertEqual(runtime_window.backend_client.writes, [])
         self.assertEqual(runtime_window.receivers(runtime_window.packet_received), receiver_count_before)
         self.assertEqual(bridge.runtime_window_requests, 0)
         self.assertNotIn("legacy_reference.firmware_integration_test", sys.modules)
-
-        status_label = page.findChild(QLabel, "FirmwareIntegrationStatusLabel")
-        self.assertIsNotNone(status_label)
-        assert status_label is not None
-        self.assertIn("not implemented", status_label.text())
 
     def test_run_binary_fit_button_opens_config_dialog_without_sending_commands(self) -> None:
         bridge = _FakeBridge()

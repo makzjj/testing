@@ -122,20 +122,19 @@ class FirmwareManualTextCoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not accept a value"):
             text_builders.build_text_command_payload("ver?", "1")
 
-    def test_controller_supported_manual_text_subset_exists(self) -> None:
+    def test_controller_supported_manual_text_catalog_exists(self) -> None:
         controller = FirmwareIntegrationController()
         names = [definition.name for definition in controller.manual_text_command_definitions()]
 
-        self.assertEqual(
-            names,
-            [
-                "Version Query",
-                "UART Status Query",
-                "Operating Mode Query",
-                "Robot Power Query",
-                "Robot Power Set",
-            ],
-        )
+        self.assertEqual(len(names), 70)
+        self.assertEqual(names[:4], ["Version Query", "UART Status Query", "Operating Mode Query", "Robot Power Query"])
+        self.assertIn("Robot Power Set", names)
+        for definition in controller.manual_text_command_definitions():
+            self.assertEqual(definition.mode, "text")
+            self.assertIsNotNone(definition.text_command)
+            self.assertIsNotNone(definition.expected_response)
+            self.assertIsNotNone(definition.execution_policy)
+            self.assertIsNotNone(definition.category)
 
     def test_controller_uses_canonical_text_builder_and_bridge_send_once(self) -> None:
         bridge = _FakeBridge()

@@ -225,7 +225,7 @@ class FirmwareManualBinaryArchitectureTests(unittest.TestCase):
         controller.send_manual_binary_command = _fake_send_manual_binary_command  # type: ignore[method-assign]
 
         dialog.node_combo.setCurrentIndex(0)
-        dialog.command_combo.setCurrentIndex(0)
+        dialog.command_combo.setCurrentIndex(dialog.command_combo.findData("GETVER"))
         dialog.send_button.click()
         dialog.raw_hex_toggle.setChecked(True)
         dialog.raw_hex_input.setPlainText("C8 3F")

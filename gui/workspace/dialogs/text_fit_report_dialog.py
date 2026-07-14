@@ -5,10 +5,11 @@ from __future__ import annotations
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QDialog,
-    QGridLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QTableWidget,
@@ -18,7 +19,9 @@ from PyQt6.QtWidgets import (
 )
 
 from ..controllers.firmware_integration_controller import FirmwareIntegrationController
-from ..models import FirmwareTestCase, FirmwareTestResult, FirmwareTextFitSnapshot
+from ..models import FirmwareTestResult, FirmwareTextFitSnapshot
+from services.firmware_report_builder import FirmwareReportBuilder
+from services.firmware_report_export_service import FirmwareReportExportService
 
 
 class TextFitReportDialog(QDialog):
@@ -36,36 +39,27 @@ class TextFitReportDialog(QDialog):
             if definition.name == case.command_key
         }
 
-        self.setWindowTitle("Text FIT Report")
+        self.setWindowTitle("Automated Text Integration Test")
         self.setModal(False)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        self.resize(980, 700)
-        self.setMinimumSize(860, 620)
+        self.resize(1150, 500)
+        self.setMinimumSize(980, 500)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(8)
+        root.setSpacing(10)
 
-        summary_grid = QGridLayout()
-        summary_grid.setContentsMargins(0, 0, 0, 0)
-        summary_grid.setHorizontalSpacing(8)
-        summary_grid.setVerticalSpacing(6)
-
-        self.current_case_label = QLabel("--")
-        self.current_case_label.setObjectName("TextFitReportCurrentCaseLabel")
-        self.status_label = QLabel("Idle")
+        self.status_label = QLabel("Preparing to run 0 tests...")
         self.status_label.setObjectName("TextFitReportStatusLabel")
         self.status_label.setWordWrap(True)
-        self.progress_label = QLabel("0 / 0")
+        self.status_label.setStyleSheet("font-weight: bold;")
+        root.addWidget(self.status_label)
+        self.current_case_label = QLabel("--", self)
+        self.current_case_label.setObjectName("TextFitReportCurrentCaseLabel")
+        self.current_case_label.hide()
+        self.progress_label = QLabel("0 / 0", self)
         self.progress_label.setObjectName("TextFitReportProgressLabel")
-
-        summary_grid.addWidget(QLabel("Current Case"), 0, 0)
-        summary_grid.addWidget(self.current_case_label, 0, 1)
-        summary_grid.addWidget(QLabel("Status"), 1, 0)
-        summary_grid.addWidget(self.status_label, 1, 1)
-        summary_grid.addWidget(QLabel("Progress"), 2, 0)
-        summary_grid.addWidget(self.progress_label, 2, 1)
-        root.addLayout(summary_grid)
+        self.progress_label.hide()
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setObjectName("TextFitReportProgressBar")
@@ -73,13 +67,21 @@ class TextFitReportDialog(QDialog):
         self.progress_bar.setValue(0)
         root.addWidget(self.progress_bar)
 
-        self.results_table = QTableWidget(0, 9)
+        self.results_table = QTableWidget(0, 7)
         self.results_table.setObjectName("TextFitReportResultsTable")
         self.results_table.setHorizontalHeaderLabels(
-            ["Case", "Command", "Expected", "Actual", "Latency", "TX", "RX", "Result", "Message"]
+            ["Command/Feature", "Expected Response", "Actual Response", "TX (Hex)", "RX (Hex)", "Latency (ms)", "Test Status"]
         )
         self.results_table.verticalHeader().setVisible(False)
         self.results_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.results_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.results_table.horizontalHeader().setStretchLastSection(True)
+        self.results_table.setColumnWidth(0, 170)
+        self.results_table.setColumnWidth(1, 250)
+        self.results_table.setColumnWidth(2, 160)
+        self.results_table.setColumnWidth(3, 120)
+        self.results_table.setColumnWidth(4, 120)
+        self.results_table.setColumnWidth(5, 85)
         root.addWidget(self.results_table, 1)
 
         self.manual_prompt_container = QWidget()
@@ -127,7 +129,12 @@ class TextFitReportDialog(QDialog):
         self.close_button.setObjectName("TextFitReportCloseButton")
         self.close_button.setProperty("tone", "secondary")
         self.close_button.clicked.connect(self.close)
+        self.export_button = QPushButton("Export Report")
+        self.export_button.setObjectName("TextFitReportExportButton")
+        self.export_button.setEnabled(False)
+        self.export_button.clicked.connect(self._export_report)
         footer.addWidget(self.cancel_button)
+        footer.addWidget(self.export_button)
         footer.addWidget(self.close_button)
         root.addLayout(footer)
 
@@ -182,16 +189,19 @@ class TextFitReportDialog(QDialog):
         self._refresh_from_snapshot(self._controller.text_fit_status_snapshot())
 
     def _refresh_from_snapshot(self, snapshot: FirmwareTextFitSnapshot) -> None:
-        self.current_case_label.setText("--" if snapshot.current_case is None else snapshot.current_case.name)
-        status_parts = [snapshot.state.replace("_", " ").title()]
-        if snapshot.overall_status:
-            status_parts.append(f"({snapshot.overall_status})")
-        self.status_label.setText(" ".join(status_parts))
-        self.progress_label.setText(f"{snapshot.completed_cases} / {snapshot.total_cases}")
+        if snapshot.running and snapshot.current_index < snapshot.total_cases:
+            self.status_label.setText(f"Running test {snapshot.current_index + 1} of {snapshot.total_cases}...")
+        elif snapshot.total_cases:
+            self.status_label.setText(f"Test run completed. Passed {self._pass_count(snapshot.results)} of {snapshot.total_cases} test cases.")
+        else:
+            self.status_label.setText("Preparing to run 0 tests...")
         self.progress_bar.setRange(0, max(1, snapshot.total_cases))
         self.progress_bar.setValue(min(snapshot.completed_cases, snapshot.total_cases))
+        self.current_case_label.setText("--" if snapshot.current_case is None else snapshot.current_case.name)
+        self.progress_label.setText(f"{snapshot.completed_cases} / {snapshot.total_cases}")
         self.cancel_button.setEnabled(snapshot.running)
         self.close_button.setEnabled(not snapshot.running)
+        self.export_button.setEnabled((not snapshot.running) and bool(snapshot.results))
 
         awaiting = snapshot.awaiting_manual_verification
         self.manual_prompt_container.setVisible(awaiting)
@@ -213,17 +223,31 @@ class TextFitReportDialog(QDialog):
         self.results_table.setRowCount(len(results))
         for row, result in enumerate(results):
             case_name = self._case_names_by_id.get(result.case_id, result.case_id)
-            command_text = self._command_by_case_id.get(result.case_id, "--")
             self.results_table.setItem(row, 0, QTableWidgetItem(case_name))
-            self.results_table.setItem(row, 1, QTableWidgetItem(command_text))
-            self.results_table.setItem(row, 2, QTableWidgetItem(str(result.expected or "--")))
-            self.results_table.setItem(row, 3, QTableWidgetItem(str(result.actual or "--")))
+            self.results_table.setItem(row, 1, QTableWidgetItem(str(result.expected or "--")))
+            self.results_table.setItem(row, 2, QTableWidgetItem(str(result.actual or result.message or "--")))
             latency = "--" if result.latency_ms is None else f"{float(result.latency_ms):.1f} ms"
-            self.results_table.setItem(row, 4, QTableWidgetItem(latency))
             tx_hex = "--" if result.tx_bytes is None else " ".join(f"{byte:02X}" for byte in result.tx_bytes)
             rx_hex = "--" if result.rx_bytes is None else " ".join(f"{byte:02X}" for byte in result.rx_bytes)
-            self.results_table.setItem(row, 5, QTableWidgetItem(tx_hex))
-            self.results_table.setItem(row, 6, QTableWidgetItem(rx_hex))
-            self.results_table.setItem(row, 7, QTableWidgetItem(result.status))
-            self.results_table.setItem(row, 8, QTableWidgetItem(str(result.message or "--")))
+            self.results_table.setItem(row, 3, QTableWidgetItem(tx_hex))
+            self.results_table.setItem(row, 4, QTableWidgetItem(rx_hex))
+            self.results_table.setItem(row, 5, QTableWidgetItem(latency))
+            self.results_table.setItem(row, 6, QTableWidgetItem(result.status))
         self.results_table.resizeColumnsToContents()
+
+    def _export_report(self) -> None:
+        report = self._controller.latest_text_fit_report()
+        if report is None:
+            QMessageBox.warning(self, "Export Report", "No completed Text FIT report is available.")
+            return
+        service = FirmwareReportExportService()
+        html = FirmwareReportBuilder().build_html(report)
+        result = service.export_html(html, service.last_export_directory(), service.suggest_filename(report))
+        if result.success:
+            QMessageBox.information(self, "Success", f"Report exported successfully!\n{result.path}")
+        else:
+            QMessageBox.critical(self, "Error", f"Failed to export report: {result.error or result.message}")
+
+    @staticmethod
+    def _pass_count(results: tuple[FirmwareTestResult, ...]) -> int:
+        return sum(1 for result in results if str(result.status).upper() == "PASS")

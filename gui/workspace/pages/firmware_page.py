@@ -7,6 +7,7 @@ from ..controllers.firmware_integration_controller import FirmwareIntegrationCon
 from ..dialogs import (
     BinaryFitConfigDialog,
     BinaryFitReportDialog,
+    FirmwareReportExportDialog,
     ManualBinaryCommandDialog,
     ManualTextCommandDialog,
     TextFitConfigDialog,
@@ -33,6 +34,7 @@ class FirmwarePage(BaseWorkspacePage):
         self._binary_fit_report_dialog: BinaryFitReportDialog | None = None
         self._text_fit_config_dialog: TextFitConfigDialog | None = None
         self._text_fit_report_dialog: TextFitReportDialog | None = None
+        self._report_export_dialog: FirmwareReportExportDialog | None = None
         self._manual_binary_dialog: ManualBinaryCommandDialog | None = None
         self._manual_text_dialog: ManualTextCommandDialog | None = None
         self.integration_section = FirmwareIntegrationSection(
@@ -41,6 +43,7 @@ class FirmwarePage(BaseWorkspacePage):
             open_manual_text_dialog=self._open_manual_text_dialog,
             open_binary_fit_dialog=self._open_binary_fit_dialog,
             open_text_fit_dialog=self._open_text_fit_dialog,
+            open_reports_dialog=self._open_reports_dialog,
         )
         self.command_section = CommandDebugSection(bridge)
         self.protocol_section = UartProtocolSection(bridge)
@@ -94,13 +97,17 @@ class FirmwarePage(BaseWorkspacePage):
         return "Opened Binary Firmware Integration Test configuration dialog."
 
     def _start_binary_fit_run(self, node_id: int, case_ids: object) -> None:
-        selected_case_ids = [str(case_id) for case_id in list(case_ids) if str(case_id).strip()]
+        selected_items = list(case_ids)
         self._binary_fit_report_dialog = BinaryFitReportDialog(self.fit_controller, self)
         self._binary_fit_report_dialog.destroyed.connect(self._clear_binary_fit_report_dialog)
         self._binary_fit_report_dialog.show()
         self._binary_fit_report_dialog.raise_()
         self._binary_fit_report_dialog.activateWindow()
-        started = self.fit_controller.start_binary_fit(node_id=int(node_id), selected_case_ids=selected_case_ids)
+        if all(hasattr(item, "case_id") for item in selected_items):
+            started = self.fit_controller.start_binary_fit(node_id=int(node_id), cases=selected_items)
+        else:
+            selected_case_ids = [str(case_id) for case_id in selected_items if str(case_id).strip()]
+            started = self.fit_controller.start_binary_fit(node_id=int(node_id), selected_case_ids=selected_case_ids)
         if started is not True:
             self._binary_fit_report_dialog.close()
 
@@ -124,15 +131,31 @@ class FirmwarePage(BaseWorkspacePage):
         return "Opened Text Firmware Integration Test configuration dialog."
 
     def _start_text_fit_run(self, case_ids: object) -> None:
-        selected_case_ids = [str(case_id) for case_id in list(case_ids) if str(case_id).strip()]
+        selected_items = list(case_ids)
         self._text_fit_report_dialog = TextFitReportDialog(self.fit_controller, self)
         self._text_fit_report_dialog.destroyed.connect(self._clear_text_fit_report_dialog)
         self._text_fit_report_dialog.show()
         self._text_fit_report_dialog.raise_()
         self._text_fit_report_dialog.activateWindow()
-        started = self.fit_controller.start_text_fit(selected_case_ids=selected_case_ids)
+        if selected_items and all(hasattr(item, "case_id") for item in selected_items):
+            started = self.fit_controller.start_text_fit(cases=selected_items)
+        else:
+            selected_case_ids = [str(case_id) for case_id in selected_items if str(case_id).strip()]
+            started = self.fit_controller.start_text_fit(selected_case_ids=selected_case_ids)
         if started is not True:
             self._text_fit_report_dialog.close()
 
     def _clear_text_fit_report_dialog(self, _destroyed: object = None) -> None:
         self._text_fit_report_dialog = None
+
+    def _open_reports_dialog(self) -> str:
+        if self._report_export_dialog is None:
+            self._report_export_dialog = FirmwareReportExportDialog(self.fit_controller, self)
+            self._report_export_dialog.destroyed.connect(self._clear_report_export_dialog)
+        self._report_export_dialog.show()
+        self._report_export_dialog.raise_()
+        self._report_export_dialog.activateWindow()
+        return "Opened Firmware Reports / Export dialog."
+
+    def _clear_report_export_dialog(self, _destroyed: object = None) -> None:
+        self._report_export_dialog = None

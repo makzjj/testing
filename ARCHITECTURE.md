@@ -164,26 +164,36 @@ Completed work:
 - Firmware Integration Manual Text dialog
 - Firmware Integration Automated Binary FIT core logic
 - Firmware Integration Automated Binary FIT configuration and report dialogs
+- Firmware Integration Automated Text FIT core logic
+- Firmware Integration Automated Text FIT configuration and report dialogs
+- Firmware Integration shared report model, HTML builder, and Reports / Export UI
+- Firmware Integration complete canonical Text command catalog representation
+- Firmware Integration complete canonical Binary command catalog representation
 
 Current state:
 
 - the layered ownership model is active and usable
 - the legacy `main_window.py` shell still exists beside the newer workspace shell
 - runtime-backed UI rendering is established for shared state such as interrupts and motor current
-- Manual Text protocol construction is canonical in the protocol layer, but Manual Text UI is still deferred
 - Manual Text protocol construction remains canonical in the protocol layer, and Manual Text UI now renders controller-owned state through a dialog
 - `FirmwareIntegrationController` remains the single public Firmware Integration owner; any mode-specific workflow helpers are private implementation details under that controller boundary
-- `FirmwareCommandDefinition` remains reusable command metadata, while `FirmwareTestCase` / `FirmwareTestResult` are separate data-only models for future automated FIT workflows
-- Automated Binary FIT core sequencing now lives in a private `_BinaryFitWorkflow` under `FirmwareIntegrationController`; config/report UI, export, save location, and Automated Text FIT remain future work
-- Binary FIT configuration and report dialogs are UI-only and render controller-owned state through one read-only snapshot contract rather than owning sequencing, timeout, or result truth
-- Automated Text FIT core sequencing now lives in a private `_TextFitWorkflow` under `FirmwareIntegrationController`; export and save location remain future work
+- `FirmwareCommandDefinition` remains reusable command metadata, while `FirmwareTestCase` describes automated FIT case metadata and `FirmwareTestResult` is the shared per-case reporting contract for future export work
+- Automated Binary FIT core sequencing now lives in a private `_BinaryFitWorkflow` under `FirmwareIntegrationController`; response-match, semantic-decode, no-response, reboot-recovery, logging-cleanup, timeout, and manual-verification transitions stay workflow-owned
+- The complete legacy Binary command catalog is represented as controller-owned `FirmwareCommandDefinition` metadata and `FirmwareTestCase` metadata. The current catalog has 83 definitions/cases: 80 legacy entries plus the already-proven `NODECONFIG Query`, `INTERRUPT Query`, and `MOTOR_I Query` forms. Legacy FIT behavior is the Binary FIT functional acceptance contract: documented commands remain executable when request framing and response opcode are known, semantic decoding enhances verification where available, manual-verification commands still send and pause for operator confirmation, logging commands execute start/stop cleanup, reboot/no-response commands use explicit lifecycle policies, and only `CONTRACT_UNKNOWN` remains non-sending.
+- Binary FIT configuration and report dialogs are UI-only and render controller-owned state through one read-only snapshot contract rather than owning sequencing, timeout, parameter validation, cleanup policy, or result truth
+- Automated Text FIT core sequencing now lives in a private `_TextFitWorkflow` under `FirmwareIntegrationController`; policy-specific Text execution and cleanup remain workflow-owned, not UI-owned
+- The complete legacy Text command catalog is represented as controller-owned `FirmwareCommandDefinition` metadata and `FirmwareTestCase` metadata; commands still requiring hardware validation remain visible through policy/unsupported metadata rather than being silently omitted
 - Text FIT configuration and report dialogs are UI-only and render controller-owned state through one read-only snapshot contract rather than owning sequencing, timeout, or result truth
+- The legacy Firmware Integration Test UI is the layout and workflow specification for the refactored Firmware Integration module: main actions, Manual Binary/Text command rows, Binary/Text FIT configuration dialogs, Binary/Text live report dialogs, table columns, and operator flow should match the legacy surface while using the BioBot orange theme. The legacy widget remains reference-only and is not imported or instantiated.
+- `FirmwareFitReport` is the shared run-level reporting contract assembled from completed Binary/Text FIT results, and `FirmwareReportBuilder` owns pure in-memory HTML generation using the legacy report information hierarchy with BioBot orange styling
+- Reports / Export is a shared UI-only dialog for selecting the latest completed Binary/Text FIT report and invoking the export service; Binary/Text live report dialogs may expose the legacy Export button but delegate HTML generation and filesystem writing to `FirmwareReportBuilder` and `FirmwareReportExportService`. `FirmwareReportExportService` owns HTML file writing, filename collision handling, and last-folder persistence through `QSettings("Biobot", "RobotArmTester")` key `report_save_location`.
+- PDF/CSV export, report history, and final hardware validation remain future work
 
 Remaining work is primarily additive rather than structural:
 
 - additional diagnostic plots
-- remaining automated Firmware Integration behavior beyond Manual Binary and Manual Text dialogs
-- remaining Firmware Integration Test behavior beyond Manual Binary and Manual Text core transport
+- Binary/Text hardware validation
+- FIT PDF/CSV export and report history if those become product requirements
 - UI polish
 - documentation refinement
 - future workflow and product features

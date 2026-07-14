@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QSpinBox,
     QTextEdit,
@@ -79,10 +80,13 @@ class ManualBinaryCommandDialog(QDialog):
         self.parameter_spin.setRange(-32768, 32767)
         self.parameter_spin.setValue(30)
 
+        self.parameter_text_input = QLineEdit()
+        self.parameter_text_input.setObjectName("ManualBinaryParameterTextInput")
+
         self.parameter_placeholder = QLabel("No parameters")
         self.parameter_placeholder.setObjectName("ManualBinaryParameterPlaceholder")
 
-        self.send_button = QPushButton("Send")
+        self.send_button = QPushButton("Send Binary")
         self.send_button.setObjectName("ManualBinarySendButton")
         self.send_button.setProperty("tone", "primary")
         self.send_button.clicked.connect(self._handle_send_clicked)
@@ -92,15 +96,16 @@ class ManualBinaryCommandDialog(QDialog):
         self.close_button.setProperty("tone", "secondary")
         self.close_button.clicked.connect(self.close)
 
-        controls.addWidget(QLabel("Node"), 0, 0)
+        controls.addWidget(QLabel("Node ID:"), 0, 0)
         controls.addWidget(self.node_combo, 0, 1)
-        controls.addWidget(QLabel("Command"), 0, 2)
+        controls.addWidget(QLabel("Cmd:"), 0, 2)
         controls.addWidget(self.command_combo, 0, 3)
         controls.addWidget(self.raw_hex_toggle, 0, 4)
         controls.addWidget(self.send_button, 0, 5)
         controls.addWidget(self.close_button, 0, 6)
         controls.addWidget(self.parameter_label, 1, 0)
         controls.addWidget(self.parameter_spin, 1, 1)
+        controls.addWidget(self.parameter_text_input, 1, 1, 1, 3)
         controls.addWidget(self.parameter_placeholder, 1, 2, 1, 3)
         root.addLayout(controls)
         root.addWidget(self.raw_hex_input)
@@ -169,18 +174,20 @@ class ManualBinaryCommandDialog(QDialog):
     def _populate_command_options(self) -> None:
         self.command_combo.clear()
         for definition in self._controller.manual_binary_command_definitions():
-            self.command_combo.addItem(definition.name, definition.name)
+            self.command_combo.addItem(str(definition.display_name or definition.name), definition.name)
 
     def _handle_raw_hex_toggled(self, checked: bool) -> None:
         self.raw_hex_input.setEnabled(bool(checked))
         self.raw_hex_input.setVisible(bool(checked))
         self.command_combo.setEnabled(not checked)
         self.parameter_spin.setEnabled(not checked and self._current_parameter_kind() == "int16")
+        self.parameter_text_input.setEnabled(not checked and self._current_parameter_kind() not in {"none", "query_3f", "int16"})
         self.parameter_label.setEnabled(not checked)
         self.parameter_placeholder.setEnabled(not checked)
         if checked:
             self.parameter_label.hide()
             self.parameter_spin.hide()
+            self.parameter_text_input.hide()
             self.parameter_placeholder.hide()
         else:
             self._refresh_parameter_ui()
@@ -203,10 +210,22 @@ class ManualBinaryCommandDialog(QDialog):
             self.parameter_spin.setValue(default)
             self.parameter_label.show()
             self.parameter_spin.show()
+            self.parameter_text_input.hide()
+            self.parameter_placeholder.hide()
+            return
+        if kind in {"int32", "set_3d", "bytes"}:
+            self.parameter_label.setText(str(parameter_schema.get("label", "Parameter")))
+            default = "" if parameter_schema.get("default") is None else str(parameter_schema.get("default"))
+            self.parameter_text_input.setText(default)
+            self.parameter_text_input.setPlaceholderText(default or "Value")
+            self.parameter_label.show()
+            self.parameter_spin.hide()
+            self.parameter_text_input.show()
             self.parameter_placeholder.hide()
             return
         self.parameter_label.hide()
         self.parameter_spin.hide()
+        self.parameter_text_input.hide()
         self.parameter_placeholder.show()
 
     def _handle_send_clicked(self) -> None:
@@ -224,9 +243,11 @@ class ManualBinaryCommandDialog(QDialog):
             return
 
         definition = self._current_definition()
-        parameter_value: int | None = None
+        parameter_value: object | None = None
         if self._current_parameter_kind() == "int16":
             parameter_value = int(self.parameter_spin.value())
+        elif self._current_parameter_kind() in {"int32", "set_3d", "bytes"}:
+            parameter_value = self.parameter_text_input.text()
 
         self._controller.send_manual_binary_command(
             node_id=node_id,
@@ -245,6 +266,8 @@ class ManualBinaryCommandDialog(QDialog):
             self.command_combo.setEnabled(not pending)
             if self._current_parameter_kind() == "int16":
                 self.parameter_spin.setEnabled(not pending)
+            if self._current_parameter_kind() not in {"none", "query_3f", "int16"}:
+                self.parameter_text_input.setEnabled(not pending)
         self.raw_hex_toggle.setEnabled(not pending)
         self.raw_hex_input.setEnabled(self.raw_hex_toggle.isChecked() and not pending)
 
