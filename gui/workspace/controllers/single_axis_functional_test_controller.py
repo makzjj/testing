@@ -134,6 +134,9 @@ class SingleAxisFunctionalTestController:
     def status_changed(self, text: str) -> None:  # pragma: no cover - overridden in tests
         pass
 
+    def state_changed(self, state: str) -> None:  # pragma: no cover - overridden in tests
+        pass
+
     def position_changed(self, pos: int) -> None:  # pragma: no cover - overridden in tests
         pass
 
@@ -170,8 +173,9 @@ class SingleAxisFunctionalTestController:
         self._set_state(self.S_IDLE)
         # Query NODECONFIG first to derive the live motion polarity and sensor profile.
         self._wait_for = "nodeconfig"
-        # Log explicitly for live popup visibility
-        self.status_changed("Querying NODECONFIG: C4 3F")
+        self.status_changed(f"Functional test started for Node {self._node_id}")
+        self.status_changed(f"Tolerance: {int(self.cfg.zero_tolerance):,} counts")
+        self.status_changed("Reading node configuration")
         self._emit_command(build_nodeconfig_query_payload())
 
     def stop(self) -> None:
@@ -181,13 +185,10 @@ class SingleAxisFunctionalTestController:
         """Abort the active functional test from the UI."""
         if not self._running:
             return False
-        node_id = self._node_id
         self._running = False
         self._wait_for = None
         self._set_state(self.S_ABORTED)
         self.status_changed("Functional test aborted by user")
-        if node_id is not None:
-            self.status_changed(f"Node {node_id}: Functional test ABORTED by user.")
         self._request_stopmotor()
         self.test_aborted("Functional test aborted by user")
         return True
@@ -307,26 +308,10 @@ class SingleAxisFunctionalTestController:
 
         # While waiting for RUN ACK, ignore unrelated packets (e.g., GETPOS) and keep waiting
         if self._wait_for in ("run_right_ack", "run_left_ack") and kind != "run_started":
-            # Log raw packet bytes for traceability
-            try:
-                hex_payload = " ".join(f"{b:02X}" for b in data)
-            except Exception:
-                hex_payload = str(data)
-            self.status_changed(f"Ignoring out-of-state packet while waiting for RUN ACK: {hex_payload}")
             return
         if self._state == self.S_VERIFY_ZERO and self._wait_for == "lflag_query" and kind != "lflag":
-            try:
-                hex_payload = " ".join(f"{b:02X}" for b in data)
-            except Exception:
-                hex_payload = str(data)
-            self.status_changed(f"Ignoring out-of-state packet while waiting for SensorL flag: {hex_payload}")
             return
         if self._state == self.S_VERIFY_ZERO and self._wait_for == "rflag_query" and kind != "rflag":
-            try:
-                hex_payload = " ".join(f"{b:02X}" for b in data)
-            except Exception:
-                hex_payload = str(data)
-            self.status_changed(f"Ignoring out-of-state packet while waiting for SensorR flag: {hex_payload}")
             return
 
         if kind == "nodeconfig":
@@ -358,7 +343,7 @@ class SingleAxisFunctionalTestController:
 
     def _set_state(self, state: str) -> None:
         self._state = state
-        self.status_changed(state)
+        self.state_changed(state)
 
     def _request_stopmotor(self) -> None:
         self._emit_command(build_stopmotor())
@@ -367,7 +352,9 @@ class SingleAxisFunctionalTestController:
         self._running = False
         self._wait_for = None
         self._set_state(self.S_FAILED)
-        self.test_failed(reason)
+        operator_reason = self._operator_failure_reason(reason)
+        self.status_changed(f"Functional test FAILED: {operator_reason}")
+        self.test_failed(operator_reason)
 
     def _reset_run_state(self) -> None:
         self._signed_range_1 = None
@@ -398,6 +385,7 @@ class SingleAxisFunctionalTestController:
         self._running = False
         self._wait_for = None
         self._set_state(self.S_PASSED)
+        self.status_changed("Functional test PASSED")
         self.test_passed()
 
     # --- Handlers ---
@@ -453,11 +441,13 @@ class SingleAxisFunctionalTestController:
             if profile is None:
                 return
             if self._movement_phase == "outward" and profile.matches_phase_sensor("outward", event):
+                self.status_changed(f"{self._sensor_label(event)} sensor reached")
                 self._set_state(self.S_READ_RANGE1)
                 self._wait_for = "getpos_r1"
                 self._emit_command(build_getpos())
                 return
             if self._movement_phase == "return" and profile.matches_phase_sensor("return", event):
+                self.status_changed(f"{self._sensor_label(event)} sensor reached")
                 self._set_state(self.S_READ_RANGE2)
                 self._wait_for = "getpos_r2"
                 self._emit_command(build_getpos())
@@ -475,6 +465,7 @@ class SingleAxisFunctionalTestController:
                 self.position_changed(0)
                 self._set_state(self.S_VERIFY_ZERO)
                 self._wait_for = "getpos_zero"
+                self.status_changed("Home position initialized")
                 self._emit_command(build_getpos())
                 return
             # During RUN phases, unexpected reset invalidates measurement
@@ -499,6 +490,7 @@ class SingleAxisFunctionalTestController:
                         self._request_stopmotor()
                         return self._fail("Middle target unknown on reached")
                     if abs(pos - self._middle_target) <= self.cfg.movement_tolerance:
+                        self.status_changed(self._final_position_reached_text())
                         self._complete_pass()
                         return
                     self._request_stopmotor()
@@ -509,6 +501,7 @@ class SingleAxisFunctionalTestController:
                         self._request_stopmotor()
                         return self._fail("Middle target unknown on no-move")
                     if abs(pos - self._middle_target) <= self.cfg.movement_tolerance:
+                        self.status_changed(self._final_position_reached_text())
                         self._complete_pass()
                         return
                     self._request_stopmotor()
@@ -519,6 +512,7 @@ class SingleAxisFunctionalTestController:
                         self._request_stopmotor()
                         return self._fail("Middle target unknown on reached")
                     if abs(pos - self._middle_target) <= self.cfg.movement_tolerance:
+                        self.status_changed(self._final_position_reached_text())
                         self._complete_pass()
                         return
                     self._request_stopmotor()
@@ -539,7 +533,7 @@ class SingleAxisFunctionalTestController:
                 # Before first RUN, query SensorL first, then SensorR only after SensorL response.
                 self._set_state(self.S_VERIFY_ZERO)
                 self._wait_for = "lflag_query"
-                self.status_changed("Querying SensorL flag: C9 3F")
+                self.status_changed(f"Home position verified: {position:,} counts")
                 self._emit_command(build_lflag_query_payload())
             else:
                 self._request_stopmotor()
@@ -555,6 +549,7 @@ class SingleAxisFunctionalTestController:
             self._opposite_pos = position
             self._range_1 = calculate_outward_range(self._home_pos, self._opposite_pos)
             self.range1_changed(self._range_1)
+            self.status_changed(f"First travel range: {self._range_1:,} counts")
             # Now send RUN in return direction back to reference/home sensor
             polarity = self._require_motion_polarity()
             if polarity is None:
@@ -567,7 +562,7 @@ class SingleAxisFunctionalTestController:
             run_velocity = self._run_velocity_for_sign(run_sign)
             expected_sensor = profile.completion_sensor_for_phase("return")
             self.status_changed(
-                f"Returning home: RUN {run_velocity}, expected sensor {expected_sensor}"
+                f"Returning from {polarity.opposite_sensor} to {polarity.home_sensor}"
             )
             if expected_sensor == "R":
                 self._set_state(self.S_RUN_TO_RIGHT)
@@ -588,6 +583,7 @@ class SingleAxisFunctionalTestController:
                 return self._fail("Opposite position unavailable for range_2 computation")
             self._range_2 = calculate_return_range(self._opposite_pos, position)
             self.range2_changed(self._range_2)
+            self.status_changed(f"Second travel range: {self._range_2:,} counts")
             # Compare ranges
             self._set_state(self.S_COMPARE)
             if self._range_1 is None or self._range_2 is None:
@@ -595,6 +591,7 @@ class SingleAxisFunctionalTestController:
                 return self._fail("Range values unavailable for compare")
             difference = abs(self._range_1 - self._range_2)
             self.difference_changed(difference)
+            self.status_changed(f"Range difference: {difference:,} counts")
             if difference > self.cfg.movement_tolerance:
                 self._request_stopmotor()
                 return self._fail("Range difference exceeds tolerance")
@@ -611,9 +608,7 @@ class SingleAxisFunctionalTestController:
         if not isinstance(value, int):
             return
         self._lflag = value & 0xFF
-        self.status_changed(f"SensorL flag received: 0x{self._lflag:02X}")
         self._wait_for = "rflag_query"
-        self.status_changed("Querying SensorR flag: CA 3F")
         self._emit_command(build_rflag_query_payload())
 
     def _handle_rflag(self, value) -> None:
@@ -622,7 +617,6 @@ class SingleAxisFunctionalTestController:
         if not isinstance(value, int):
             return
         self._rflag = value & 0xFF
-        self.status_changed(f"SensorR flag received: 0x{self._rflag:02X}")
         self._wait_for = "check_flags"
         self._maybe_start_first_run()
 
@@ -673,16 +667,12 @@ class SingleAxisFunctionalTestController:
         except ValueError as exc:
             self._request_stopmotor()
             return self._fail(str(exc))
-        self.status_changed(f"NODECONFIG received: 0x{nodeconfig:02X}")
-        self.status_changed("Motion polarity:")
-        for line in polarity.format_motion_summary().splitlines():
-            self.status_changed(f"  {line}")
-        self.status_changed("Sensor profile:")
-        for line in self._sensor_profile.format_summary().splitlines():
-            self.status_changed(line)
+        self.status_changed(
+            f"Home sensor: {polarity.home_sensor} | Opposite sensor: {polarity.opposite_sensor}"
+        )
         # Proceed to HUNTING
         self._set_state(self.S_HUNTING)
-        self.status_changed("Starting HUNTING")
+        self.status_changed("Homing motor")
         self._emit_command(build_hunting_timeout(self.cfg.hunt_timeout_ms))
         self._wait_for = "hunting_ack"
 
@@ -708,15 +698,14 @@ class SingleAxisFunctionalTestController:
         has_resp = bool(flag_val & 0x01)
         if has_reset or not (has_stop and has_resp):
             self._request_stopmotor()
-            self.status_changed("Sensor flag safety check failed")
-            self._fail("Opposite sensor flags unsafe for range (need response+stop, no reset)")
+            self._fail("Sensor configuration check failed")
             return
-        self.status_changed("Sensor flag safety check passed")
+        self.status_changed("Sensor configuration verified")
         # Safe to start first RUN toward opposite, using the NODECONFIG polarity model.
         self._movement_phase = "outward"
         run_sign = polarity.sign_to_opposite()
         run_velocity = self._run_velocity_for_sign(run_sign)
-        self.status_changed(f"Moving outward: RUN {run_velocity}, expected sensor {opposite}")
+        self.status_changed(f"Moving from {polarity.home_sensor} to {polarity.opposite_sensor}")
         if opposite == 'R':
             self._set_state(self.S_RUN_TO_RIGHT)
             self._emit_command(build_run(run_velocity))
@@ -823,5 +812,56 @@ class SingleAxisFunctionalTestController:
 
     def _final_position_status_text(self) -> str:
         if self._uses_safe_park_target():
-            return "Final position: moving to safe position -44000 counts (half revolution from home)"
-        return f"Final position: moving to midpoint {int(self._middle_target or 0)}"
+            return "Moving to safe position"
+        return "Moving to midpoint"
+
+    def _final_position_reached_text(self) -> str:
+        if self._uses_safe_park_target():
+            return "Safe position reached"
+        return "Midpoint reached"
+
+    @staticmethod
+    def _sensor_label(sensor: str) -> str:
+        return "Left" if str(sensor).strip().upper() == "L" else "Right"
+
+    @staticmethod
+    def _operator_failure_reason(reason: str) -> str:
+        replacements = {
+            "NODECONFIG query timeout": "Node configuration read timed out",
+            "Invalid NODECONFIG response": "Node configuration check failed",
+            "HUNTING no ACK/NACK/timeout": "Homing timed out",
+            "HUNTING rejected/NACK": "Homing command was rejected",
+            "HUNTING timeout": "Homing timed out",
+            "HUNTING timed out before reference sensor event": "Homing timed out",
+            "Encoder init timeout after Left sensor": "Home position initialization timed out",
+            "GETPOS timeout during zero verification": "Home position verification timed out",
+            "SensorL flag timeout": "Sensor configuration check timed out",
+            "SensorR flag timeout": "Sensor configuration check timed out",
+            "Zero position outside tolerance": "Home position is outside the allowed zero range",
+            "Sensor configuration check failed": "Sensor configuration check failed",
+            "RUN-to-right ACK not received": "Rightward movement did not start",
+            "RUN-to-right ACK missing/invalid": "Rightward movement did not start",
+            "Right sensor event timeout": "Right sensor was not reached within the timeout",
+            "GETPOS timeout after right sensor": "First travel-range measurement timed out",
+            "RUN-to-left ACK not received": "Return movement did not start",
+            "RUN-to-left ACK missing/invalid": "Return movement did not start",
+            "Left sensor event timeout": "Left sensor was not reached within the timeout",
+            "GETPOS timeout after left sensor": "Second travel-range measurement timed out",
+            "Range difference exceeds tolerance": "Travel-range difference exceeded tolerance",
+            "TPOS ACK not received": "Midpoint movement did not start",
+            "TPOS completion timeout": "Midpoint movement timed out",
+            "Middle reached but outside tolerance": "Midpoint position is outside tolerance",
+            "Already at middle but outside tolerance": "Midpoint position is outside tolerance",
+            "Encoder reset during RUN invalidates measurement": "Encoder reset during movement",
+        }
+        if reason in replacements:
+            return replacements[reason]
+        if reason.startswith("Wrong sensor event during hunting"):
+            return "Unexpected sensor event during homing"
+        if reason.startswith("Wrong sensor event during"):
+            return "Unexpected sensor event during movement"
+        if reason.startswith("Unsupported or missing NODECONFIG"):
+            return "Motion configuration unavailable"
+        if reason.startswith("Unsupported or missing node sensor profile"):
+            return "Sensor configuration unavailable"
+        return reason

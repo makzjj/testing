@@ -184,7 +184,7 @@ class SingleAxisFunctionalPopup(QDialog):
 
     # Public API used by controller/state-machine integration
     def append_status(self, message: str) -> None:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        timestamp = datetime.now().strftime("%H:%M:%S")
         self.status_block.append(f"[{timestamp}] {message}")
 
     def update_position(self, value: object) -> None:
@@ -198,8 +198,6 @@ class SingleAxisFunctionalPopup(QDialog):
         self.range_field.setText(str(value))
 
     def mark_passed(self) -> None:
-        node_text = self._selected_node_text()
-        self.append_status(f"Node {node_text}: Functional test PASSED.")
         node_id, node_name = self._selected_node_data()
         self.functional_passed.emit(node_id, node_name)
         # Re-enable controls after finish
@@ -212,8 +210,6 @@ class SingleAxisFunctionalPopup(QDialog):
     def mark_failed(self, reason: str) -> None:
         from PyQt6.QtWidgets import QMessageBox  # local import to keep top clean
 
-        node_text = self._selected_node_text()
-        self.append_status(f"Node {node_text}: Functional test FAILED. Reason: {reason}")
         node_id, node_name = self._selected_node_data()
         self.functional_failed.emit(node_id, node_name, str(reason))
         self._clear_middle_travel_state()
@@ -319,9 +315,6 @@ class SingleAxisFunctionalPopup(QDialog):
         self._attach_runtime_packet_listener()
         self._refresh_interrupt_leds()
 
-        # Add session separator
-        self.append_status("— New functional test session —")
-        self.append_status(f"Tolerance selected: {int(tolerance)} counts")
         # Start controller with real transport if available
         self._ensure_controller()
         assert self.controller is not None
@@ -338,8 +331,8 @@ class SingleAxisFunctionalPopup(QDialog):
                 adapter = FunctionalTransportAdapter(
                     backend_client,
                     node_id=node_id,
-                    tx_logger=self.append_status,
-                    rx_logger=self.append_status,
+                    tx_logger=lambda _message: None,
+                    rx_logger=lambda _message: None,
                     controller_handler=self.controller.handle_runtime_packet,
                     controller_relevance=self.controller.accepts_workflow_packet,
                 )
@@ -351,11 +344,10 @@ class SingleAxisFunctionalPopup(QDialog):
                 self._transport_sender = self._build_live_transport_sender(adapter)
                 self.controller.command_requested = self._handle_controller_command_requested
                 self._adapter = adapter
-                self.append_status(f"Using live transport for Node {node_id}")
             except Exception as exc:
                 # Fall back to safe TX only if explicitly allowed (tests). Otherwise abort.
                 if self._allow_safe_tx:
-                    self.append_status(f"Live transport unavailable, falling back to safe TX: {exc}")
+                    self.append_status("Transport adapter unavailable. Using safe test transport.")
                 else:
                     self.append_status("Transport not connected. Functional test not started.")
                     QMessageBox.warning(
@@ -367,7 +359,6 @@ class SingleAxisFunctionalPopup(QDialog):
                     return
         else:
             # Safe TX path explicitly enabled (tests only)
-            self.append_status("Using safe TX mode (test).")
             self._transport_sender = self._build_safe_transport_sender()
 
         # Start controller sequence
@@ -449,24 +440,14 @@ class SingleAxisFunctionalPopup(QDialog):
         # Safe TX handler: log and store only
         def _safe_tx(payload: list[int]) -> bool:
             self._tx_log.append(list(payload))
-            hex_str = " ".join(f"{b:02X}" for b in payload)
-            if payload == [0xDD] and self._active_node_id is not None:
-                self.append_status(f"TX Node {self._active_node_id}: {hex_str}")
-            else:
-                self.append_status(f"TX requested: {hex_str}")
             return True
 
-        # Range/diff helpers: update range label and append status for visibility
+        # Range/diff helpers: update displayed values only.
         def _on_range1(val: int) -> None:
             self.update_range(val)
-            self.append_status(f"Range 1: {int(val)}")
 
         def _on_range2(val: int) -> None:
             self.update_range(val)
-            self.append_status(f"Range 2: {int(val)}")
-
-        def _on_diff(val: int) -> None:
-            self.append_status(f"Difference: {int(val)}")
 
         # Pass/fail wrappers
         def _on_pass() -> None:
@@ -486,7 +467,6 @@ class SingleAxisFunctionalPopup(QDialog):
         self.controller.position_changed = self.update_position
         self.controller.range1_changed = _on_range1
         self.controller.range2_changed = _on_range2
-        self.controller.difference_changed = _on_diff
         self.controller.test_passed = _on_pass
         self.controller.test_failed = _on_fail
         self.controller.test_aborted = _on_abort
@@ -500,7 +480,7 @@ class SingleAxisFunctionalPopup(QDialog):
     def _maybe_start_middle_travel_display(self, payload: list[int]) -> None:
         if len(payload) != 5 or payload[0] != 0x81:
             return
-        target = int.from_bytes(bytes(payload[1:]), byteorder="big", signed=False)
+        target = int.from_bytes(bytes(payload[1:]), byteorder="big", signed=True)
         self._middle_travel_active = True
         self._middle_travel_target_position = target
         self._middle_travel_origin_position = self._last_position_value
@@ -508,7 +488,6 @@ class SingleAxisFunctionalPopup(QDialog):
             self._middle_travel_display_value = target
         else:
             self._middle_travel_display_value = abs(target - self._middle_travel_origin_position)
-        self.append_status(f"Middle travel distance: {int(self._middle_travel_display_value)}")
 
     def _ensure_controller(self) -> None:
         if self.controller is None:
@@ -602,11 +581,6 @@ class SingleAxisFunctionalPopup(QDialog):
     def _build_safe_transport_sender(self):
         def _safe_send(payload: list[int]) -> bool:
             self._tx_log.append(list(payload))
-            hex_str = " ".join(f"{b:02X}" for b in payload)
-            if payload == [0xDD] and self._active_node_id is not None:
-                self.append_status(f"TX Node {self._active_node_id}: {hex_str}")
-            else:
-                self.append_status(f"TX requested: {hex_str}")
             return True
 
         return _safe_send
@@ -627,10 +601,9 @@ class SingleAxisFunctionalPopup(QDialog):
         try:
             sent = bool(sender(list(payload)))
         except Exception as exc:
-            self.append_status(f"[ReleaseWatch] Command send failed: {exc}")
+            self.append_status(f"Command send failed: {exc}")
             sent = False
         if not sent:
-            self._log_release_watch_skip("command send failed")
             return
         self._maybe_start_middle_travel_display(payload)
         self._maybe_start_release_watch(payload)
@@ -656,10 +629,8 @@ class SingleAxisFunctionalPopup(QDialog):
             on_timeout=self._on_release_watch_timeout,
             on_stopped=self._on_release_watch_stopped,
         )
-        if started:
-            self.append_status(f"[ReleaseWatch] Started for Node {node_id} sensor {sensor_or_reason}")
-        else:
-            self._log_release_watch_skip("duplicate watch active")
+        if not started:
+            return
 
     def _expected_release_watch_sensor(self, payload: list[int]) -> str | None:
         if not self._is_running:
@@ -743,14 +714,13 @@ class SingleAxisFunctionalPopup(QDialog):
         self._release_watch_helper.stop_release_watch(str(reason))
 
     def _on_release_watch_released(self, node_id: int, sensor: str) -> None:
-        self.append_status(f"[ReleaseWatch] Release detected for Node {node_id} sensor {sensor}")
+        return
 
     def _on_release_watch_timeout(self, node_id: int, sensor: str) -> None:
-        self.append_status(f"[ReleaseWatch] Timeout waiting for Node {node_id} sensor {sensor}")
+        return
 
     def _on_release_watch_stopped(self, node_id: int, sensor: str, reason: str) -> None:
-        if reason not in {"released", "timeout"}:
-            self.append_status(f"[ReleaseWatch] Cancelled for Node {node_id} sensor {sensor}: {reason}")
+        return
 
     def _log_release_watch_skip(self, reason: str) -> None:
-        self.append_status(f"[ReleaseWatch] Skipped: {reason}")
+        return

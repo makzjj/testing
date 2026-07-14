@@ -29,6 +29,7 @@ class Recorder(SingleAxisFunctionalTestController):
         super().__init__(cfg)
         self.commands = []
         self.statuses = []
+        self.states = []
         self.positions = []
         self.flags = {"L": [], "R": []}
         self.range1 = None
@@ -45,6 +46,9 @@ class Recorder(SingleAxisFunctionalTestController):
 
     def status_changed(self, text: str) -> None:
         self.statuses.append(text)
+
+    def state_changed(self, state: str) -> None:
+        self.states.append(state)
 
     def position_changed(self, pos: int) -> None:
         self.positions.append(pos)
@@ -257,7 +261,7 @@ class FunctionalControllerTests(unittest.TestCase):
     def test_normal_axis_retains_midpoint_final_target(self):
         self._drive_to_compare(2_500_000, 0)
         self.assertEqual(self.ctrl.commands[-1], build_tpos(1_250_000))
-        self.assertIn("Final position: moving to midpoint 1250000", self.ctrl.statuses)
+        self.assertIn("Moving to midpoint", self.ctrl.statuses)
 
     def test_z_axis_uses_safe_park_target_after_successful_validation(self):
         ctrl = Recorder(self.ctrl.cfg)
@@ -266,7 +270,7 @@ class FunctionalControllerTests(unittest.TestCase):
         ctrl.handle_runtime_packet(pkt(0xC4, 0x3A, 0x00))
         self._drive_to_compare(5000, 0, ctrl=ctrl)
         self.assertEqual(ctrl.commands[-1], build_tpos(-44000))
-        self.assertIn("Final position: moving to safe position -44000 counts (half revolution from home)", ctrl.statuses)
+        self.assertIn("Moving to safe position", ctrl.statuses)
         self.assertIn(0, ctrl.positions)
 
     def test_pz_axis_uses_safe_park_target_after_successful_validation(self):
@@ -297,11 +301,11 @@ class FunctionalControllerTests(unittest.TestCase):
 
         # 2) Hunting accepted
         self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41, 0x00))
-        self.assertIn("WAIT_FOR_HUNTING_COMPLETION", self.ctrl.statuses[-1])
+        self.assertEqual(self.ctrl.states[-1], self.ctrl.S_WAIT_HUNTING_SENSOR)
 
         # 3) Left sensor cut (home)
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
-        self.assertIn("WAIT_FOR_ENCODER_INITIALIZATION", self.ctrl.statuses[-1])
+        self.assertEqual(self.ctrl.states[-1], self.ctrl.S_WAIT_ZERO)
         self.assertTrue(self.ctrl.flags["L"][-1])
 
         # 4) Encoder zeroed
@@ -323,7 +327,7 @@ class FunctionalControllerTests(unittest.TestCase):
 
         # 6) RUN started ACK
         self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0x00, 0xBE))
-        self.assertIn("WAIT_FOR_RIGHT_SENSOR", self.ctrl.statuses[-1])
+        self.assertEqual(self.ctrl.states[-1], self.ctrl.S_WAIT_RIGHT)
 
         # 7) Right sensor hit (opposite)
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('R')))
@@ -337,7 +341,7 @@ class FunctionalControllerTests(unittest.TestCase):
 
         # 9) RUN-to-right started
         self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x84, 0x00, 0xBE))
-        self.assertIn("WAIT_FOR_LEFT_SENSOR", self.ctrl.statuses[-1])
+        self.assertEqual(self.ctrl.states[-1], self.ctrl.S_WAIT_LEFT)
 
         # 10) Left sensor hit (return home)
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('L')))
@@ -357,7 +361,7 @@ class FunctionalControllerTests(unittest.TestCase):
         cur = 49990
         cur_be = list((cur).to_bytes(4, 'big', signed=True))
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('S'), 0x82, *cur_be))
-        self.assertIn("WAIT_FOR_MIDDLE_COMPLETION", self.ctrl.statuses[-1])
+        self.assertEqual(self.ctrl.states[-1], self.ctrl.S_WAIT_MIDDLE)
 
         # 14) Completion reached within tolerance (50002 vs 50000 tol=5)
         fin = 50002
@@ -366,7 +370,8 @@ class FunctionalControllerTests(unittest.TestCase):
 
         # PASS directly after completion
         self.assertTrue(self.ctrl.passed)
-        self.assertIn("PASSED", self.ctrl.statuses[-1])
+        self.assertEqual(self.ctrl.states[-1], self.ctrl.S_PASSED)
+        self.assertIn("Functional test PASSED", self.ctrl.statuses)
         # Ensure no POSITION zero (EA ...) was ever requested
         for cmd in self.ctrl.commands:
             assert not cmd or cmd[0] != 0xEA
@@ -383,7 +388,7 @@ class FunctionalControllerTests(unittest.TestCase):
         # Live ACK format: 88 53 00 BE (no 0x84)
         self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x00, 0xBE))
         # Should transition to waiting for right sensor
-        self.assertIn("WAIT_FOR_RIGHT_SENSOR", self.ctrl.statuses[-1])
+        self.assertEqual(self.ctrl.states[-1], self.ctrl.S_WAIT_RIGHT)
 
     def test_accepts_workflow_packet_requires_matching_run_ack_velocity(self):
         self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
@@ -431,13 +436,12 @@ class FunctionalControllerTests(unittest.TestCase):
         # While waiting for RUN ACK, an out-of-state GETPOS arrives — must be ignored
         last_status_count = len(self.ctrl.statuses)
         self.ctrl.handle_runtime_packet(pkt(0x82, 0xFF, 0xFF, 0xFF, 0xFE))
-        # No failure; statuses appended with ignore log
-        self.assertGreater(len(self.ctrl.statuses), last_status_count)
-        self.assertIn("Ignoring out-of-state packet while waiting for RUN ACK", self.ctrl.statuses[-1])
+        # No failure; operator log stays clean
+        self.assertEqual(len(self.ctrl.statuses), last_status_count)
         self.assertFalse(self.ctrl.failed)
         # Now the valid ACK arrives (live format) and we proceed to wait for left sensor
         self.ctrl.handle_runtime_packet(pkt(0x88, 0x53, 0x00, 0xBE))
-        self.assertIn("WAIT_FOR_RIGHT_SENSOR", self.ctrl.statuses[-1])
+        self.assertEqual(self.ctrl.states[-1], self.ctrl.S_WAIT_RIGHT)
 
     def test_timeout_waiting_for_run_ack_stops_and_fails(self):
         # Reach state awaiting return RUN ACK (second leg)
@@ -541,7 +545,7 @@ class FunctionalControllerTests(unittest.TestCase):
         cmd_count = len(self.ctrl.commands)
         self.ctrl.handle_runtime_packet(pkt(0xCA, 0x3A, 0x09))
         self.assertEqual(len(self.ctrl.commands), cmd_count)
-        self.assertIn("Ignoring out-of-state packet while waiting for SensorL flag", self.ctrl.statuses[-1])
+        self.assertEqual(self.ctrl.statuses[-1], "Home position verified: 0 counts")
         self.ctrl.on_timeout()
         self.assertTrue(self.ctrl.failed)
         self.assertEqual(self.ctrl.commands[-1], build_stopmotor())
@@ -830,7 +834,7 @@ class FunctionalControllerTests(unittest.TestCase):
         self.ctrl.handle_runtime_packet(pkt(0xC3, 0x41))
         # Reference via Z-form (e.g., stopped by L flag)
         self.ctrl.handle_runtime_packet(pkt(0x81, 0x5A, 0x4C))  # 'Z','L'
-        self.assertIn("WAIT_FOR_ENCODER_INITIALIZATION", self.ctrl.statuses[-1])
+        self.assertEqual(self.ctrl.states[-1], self.ctrl.S_WAIT_ZERO)
         # Zeroed
         self.ctrl.handle_runtime_packet(pkt(0x81, ord('I')))
         self.assertEqual(self.ctrl.commands[-1], build_getpos())

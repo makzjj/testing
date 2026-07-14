@@ -139,10 +139,8 @@ class ProductionPage(BaseWorkspacePage):
         self._sampling_sensor_profile: NodeSensorProfile | None = None
         self._sampling_session: _SamplingSession | None = None
 
-        self.stage_section.configuration_requested.connect(self._handle_run_test)
         self.stage_section.single_axis_requested.connect(self._handle_single_axis_test_requested)
         self.stage_section.sampling_requested.connect(self._handle_start_sampling_requested)
-        self.stage_section.performance_requested.connect(self._handle_performance_test_requested)
         self.uuid_section.load_workbook_requested.connect(self._handle_load_ipqc_workbook)
         self.uuid_section.write_requested.connect(self._handle_write_uuid)
         self.uuid_section.verify_requested.connect(self._handle_verify_uuid)
@@ -454,6 +452,12 @@ class ProductionPage(BaseWorkspacePage):
     def _handle_single_axis_test_requested(self) -> None:
         if not self._ensure_production_metadata_for_test_start():
             return
+        if not self._workbook_verification_passed:
+            reason = "Single Axis is disabled until Parameter Verification passes."
+            self.console_message.emit(f"[Production] {reason}")
+            self.progress_section.append_step(reason, level="warning")
+            self._refresh_test_stage_states()
+            return
         if self._single_axis_popup is None:
             # Pass the workspace bridge so the popup can discover the already-connected backend
             self._single_axis_popup = SingleAxisFunctionalPopup(
@@ -475,6 +479,7 @@ class ProductionPage(BaseWorkspacePage):
         self.console_message.emit(f"[Production] Single Axis Functional Test PASSED for Node {node_id} {node_name}")
         self.progress_section.append_step(f"Single Axis PASSED for Node {node_id} {node_name}", level="success")
         self.stage_section.set_stage_status("single_axis", "pass")
+        self._refresh_test_stage_states()
         self._refresh_sampling_action_states()
 
     def _handle_single_axis_failed(self, node_id: int, node_name: str, reason: str) -> None:
@@ -486,6 +491,7 @@ class ProductionPage(BaseWorkspacePage):
         self.console_message.emit(f"[Production] Single Axis Functional Test FAILED for Node {node_id} {node_name}: {reason}")
         self.progress_section.append_step(f"Single Axis FAILED for Node {node_id} {node_name}: {reason}", level="error")
         self.stage_section.set_stage_status("single_axis", "fail")
+        self._refresh_test_stage_states()
         self._refresh_sampling_action_states()
 
     def _handle_single_axis_aborted(self, node_id: int, node_name: str, reason: str) -> None:
@@ -497,6 +503,7 @@ class ProductionPage(BaseWorkspacePage):
         self.console_message.emit(f"[Production] Single Axis Functional Test ABORTED for Node {node_id} {node_name}: {reason}")
         self.progress_section.append_step(f"Single Axis ABORTED for Node {node_id} {node_name}", level="warning")
         self.stage_section.set_stage_status("single_axis", "fail")
+        self._refresh_test_stage_states()
         self._refresh_sampling_action_states()
 
     def _refresh_sampling_context_from_single_axis(self) -> None:
@@ -518,9 +525,6 @@ class ProductionPage(BaseWorkspacePage):
             return self._bridge.get_runtime_window(create_if_missing=create_if_missing)
         except Exception:
             return None
-
-    def _handle_performance_test_requested(self) -> None:
-        self.progress_section.append_step("Performance Test UI is present but command flow is not enabled yet")
 
     def _handle_start_sampling_requested(self) -> None:
         if not self._ensure_production_metadata_for_test_start():
@@ -1344,6 +1348,7 @@ class ProductionPage(BaseWorkspacePage):
                     level="pass" if result.passed else "error",
         )
         self._pending_parameter_requests = []
+        self._refresh_test_stage_states()
         self._refresh_workbook_action_states()
 
     def _cache_parameter_verification_results(self, results: list[ParameterVerificationResult]) -> None:
@@ -1739,6 +1744,7 @@ class ProductionPage(BaseWorkspacePage):
             if has_workbook and self._workbook_verification_passed
             else "Save / Download Completed Workbook is enabled after verification passes."
         )
+        self._refresh_test_stage_states()
         self._refresh_sampling_action_states()
 
     def _set_workbook_workflow_phase(self, phase: ProductionWorkbookWorkflowPhase) -> None:
@@ -1859,6 +1865,19 @@ class ProductionPage(BaseWorkspacePage):
                 display_resume = str(resume_text) if resume_text not in (None, "") else resume_reason
                 self._sampling_popup.set_resume_available(resume_enabled, display_resume)
                 self._sampling_popup.set_resume_hint(display_resume)
+
+    def _refresh_test_stage_states(self) -> None:
+        verification_status = "fail"
+        if self._workbook_workflow_phase is ProductionWorkbookWorkflowPhase.VERIFYING:
+            verification_status = "testing"
+        elif self._workbook_verification_passed:
+            verification_status = "pass"
+        self.stage_section.set_stage_status("parameter_verification", verification_status)
+        self.stage_section.set_stage_enabled(
+            "single_axis",
+            self._workbook_verification_passed,
+            "Single Axis is available after Parameter Verification passes.",
+        )
 
     def _get_supported_workbook_parameter_definitions(self) -> tuple[list[ParameterDefinition], str | None]:
         if not self._ipqc_excel_adapter.has_loaded_workbook():
@@ -2363,25 +2382,29 @@ class _ProductionInfoSection(PanelFrame):
 
 
 class _TestStagesSection(PanelFrame):
-    configuration_requested = pyqtSignal()
     single_axis_requested = pyqtSignal()
     sampling_requested = pyqtSignal()
-    performance_requested = pyqtSignal()
 
     def __init__(self) -> None:
         super().__init__("Test Stages", "")
-        self._rows: dict[str, tuple[QLabel, QPushButton]] = {}
+        self._rows: dict[str, tuple[QLabel, QPushButton | None]] = {}
+        self._rows_container = QWidget()
+        self._rows_layout = QVBoxLayout(self._rows_container)
+        self._rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._rows_layout.setSpacing(10)
         self.body_layout.addStretch(1)
+        self.body_layout.addWidget(self._rows_container)
+        self._add_stage_row("parameter_verification", "Parameter Verification Test")
         self._add_stage_row("single_axis", "Single Axis Functional Test", self.single_axis_requested.emit)
         self._add_stage_row("sampling", "Sampling Test", self.sampling_requested.emit)
-        self._add_stage_row("performance", "Performance Test", self.performance_requested.emit)
         self.body_layout.addStretch(1)
         self.reset_stage_states()
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setMinimumHeight(190)
 
-    def _add_stage_row(self, key: str, label_text: str, handler) -> None:
+    def _add_stage_row(self, key: str, label_text: str, handler=None) -> None:
         row = QWidget()
+        row.setMinimumHeight(40)
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(8)
@@ -2395,26 +2418,33 @@ class _TestStagesSection(PanelFrame):
         label.setObjectName("DetailValue")
         row_layout.addWidget(label, 1)
 
-        button = QPushButton("Start Test")
-        button.setProperty("tone", "secondary")
-        button.clicked.connect(handler)
-        row_layout.addWidget(button)
+        button: QPushButton | None = None
+        if handler is not None:
+            button = QPushButton("Start Test")
+            button.setProperty("tone", "secondary")
+            button.clicked.connect(handler)
+            row_layout.addWidget(button)
+        else:
+            spacer = QWidget()
+            probe = QPushButton("Start Test")
+            spacer.setFixedWidth(probe.sizeHint().width())
+            row_layout.addWidget(spacer)
 
         self._rows[key] = (dot, button)
-        self.body_layout.addWidget(row)
+        self._rows_layout.addWidget(row)
 
     def reset_stage_states(self) -> None:
         for key in self._rows:
             self.set_stage_status(key, "neutral")
-        self.set_stage_enabled("single_axis", True)
+        self.set_stage_status("parameter_verification", "fail")
+        self.set_stage_enabled("single_axis", False, "Single Axis is available after Parameter Verification passes.")
         self.set_stage_enabled("sampling", False, "Sampling is available after Single Axis passes.")
-        self.set_stage_enabled("performance", False, "Performance Test is not implemented yet.")
 
     def set_stage_status(self, key: str, status: str) -> None:
         row = self._rows.get(key)
         if row is None:
             return
-        dot, button = row
+        dot, _button = row
         normalized = status.strip().lower()
         color = "#B0B7C3"
         if normalized in {"testing", "pending"}:
@@ -2430,6 +2460,8 @@ class _TestStagesSection(PanelFrame):
         if row is None:
             return
         _dot, button = row
+        if button is None:
+            return
         button.setEnabled(bool(enabled))
         if enabled:
             button.setToolTip("Start Test")
@@ -2440,13 +2472,19 @@ class _TestStagesSection(PanelFrame):
         row = self._rows.get(key)
         if row is None:
             return False
-        return row[1].isEnabled()
+        button = row[1]
+        if button is None:
+            return False
+        return button.isEnabled()
 
     def stage_tooltip(self, key: str) -> str:
         row = self._rows.get(key)
         if row is None:
             return ""
-        return row[1].toolTip()
+        button = row[1]
+        if button is None:
+            return ""
+        return button.toolTip()
 
 
 class _NodeStatusSection(PanelFrame):

@@ -1,5 +1,6 @@
 import sys
 import types
+import re
 
 import pytest
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -189,11 +190,12 @@ def test_run_with_selected_node_starts_controller(monkeypatch):
     assert popup.controller.cfg.movement_tolerance == 512
     assert popup.controller.cfg.range_tolerance == 512
     assert popup.controller.cfg.middle_position_tolerance == 512
-    assert "Tolerance selected: 512 counts" in popup.status_block.toPlainText()
-
-    # Status block should contain some status lines (e.g., IDLE/state updates)
     text = popup.status_block.toPlainText()
-    assert "IDLE" in text
+    assert "Functional test started for Node 3" in text
+    assert "Tolerance: 512 counts" in text
+    assert "Reading node configuration" in text
+    assert "IDLE" not in text
+    assert re.search(r"^\[\d{2}:\d{2}:\d{2}\] ", text, re.MULTILINE)
 
 
 def test_footer_button_order_and_stop_state(monkeypatch):
@@ -229,7 +231,7 @@ def test_status_and_command_logging(monkeypatch):
     payload = [0xC3, 0x21, 0x27, 0x10]
     popup.controller.command_requested(payload)
     assert popup._tx_log and popup._tx_log[-1] == payload
-    assert "TX requested: C3 21 27 10" in popup.status_block.toPlainText()
+    assert "TX requested: C3 21 27 10" not in popup.status_block.toPlainText()
 
 
 def test_popup_leds_render_from_runtime_interrupt_state(monkeypatch):
@@ -386,7 +388,7 @@ def test_release_watch_starts_for_left_cut_when_run_moves_away(monkeypatch):
     assert helper.start_calls == [(9, "L")]
     assert helper.sent_queries == [[0xD8, 0x3F]]
     assert popup._tx_log[-2:] == [build_run(-100), [0xD8, 0x3F]]
-    assert "[ReleaseWatch] Started for Node 9 sensor L" in popup.status_block.toPlainText()
+    assert "[ReleaseWatch]" not in popup.status_block.toPlainText()
 
 
 def test_release_watch_starts_for_right_cut_when_run_moves_away(monkeypatch):
@@ -448,7 +450,7 @@ def test_release_watch_moving_toward_cut_sensor_skips_with_reason(monkeypatch):
     popup.controller.command_requested(build_run(100))
 
     assert helper.start_calls == []
-    assert "[ReleaseWatch] Skipped: moving toward cut sensor" in popup.status_block.toPlainText()
+    assert "[ReleaseWatch]" not in popup.status_block.toPlainText()
 
 
 def test_release_watch_unknown_interrupt_state_skips_with_reason(monkeypatch):
@@ -479,7 +481,7 @@ def test_release_watch_unknown_interrupt_state_skips_with_reason(monkeypatch):
     popup.controller.command_requested(build_run(-100))
 
     assert helper.start_calls == []
-    assert "[ReleaseWatch] Skipped: unknown interrupt state" in popup.status_block.toPlainText()
+    assert "[ReleaseWatch]" not in popup.status_block.toPlainText()
 
 
 def test_release_watch_unknown_polarity_skips_with_reason(monkeypatch):
@@ -502,7 +504,7 @@ def test_release_watch_unknown_polarity_skips_with_reason(monkeypatch):
     popup.controller.command_requested(build_run(-100))
 
     assert helper.start_calls == []
-    assert "[ReleaseWatch] Skipped: unknown motion polarity" in popup.status_block.toPlainText()
+    assert "[ReleaseWatch]" not in popup.status_block.toPlainText()
 
 
 def test_release_watch_no_cut_sensor_skips(monkeypatch):
@@ -533,7 +535,7 @@ def test_release_watch_no_cut_sensor_skips(monkeypatch):
     popup.controller.command_requested(build_run(-100))
 
     assert helper.start_calls == []
-    assert "[ReleaseWatch] Skipped: no cut sensor" in popup.status_block.toPlainText()
+    assert "[ReleaseWatch]" not in popup.status_block.toPlainText()
 
 
 def test_release_watch_both_cut_skips(monkeypatch):
@@ -564,7 +566,7 @@ def test_release_watch_both_cut_skips(monkeypatch):
     popup.controller.command_requested(build_run(-100))
 
     assert helper.start_calls == []
-    assert "[ReleaseWatch] Skipped: both sensors cut" in popup.status_block.toPlainText()
+    assert "[ReleaseWatch]" not in popup.status_block.toPlainText()
 
 
 def test_release_watch_no_duplicate_watch_is_started(monkeypatch):
@@ -596,7 +598,7 @@ def test_release_watch_no_duplicate_watch_is_started(monkeypatch):
     popup.controller.command_requested(build_run(-100))
 
     assert helper.start_calls == [(9, "L")]
-    assert popup.status_block.toPlainText().count("[ReleaseWatch] Skipped: duplicate watch active") >= 1
+    assert "[ReleaseWatch]" not in popup.status_block.toPlainText()
 
 
 def test_release_watch_timeout_does_not_fail_or_advance_controller(monkeypatch):
@@ -635,7 +637,7 @@ def test_release_watch_timeout_does_not_fail_or_advance_controller(monkeypatch):
     assert popup.controller.current_wait_for == before_wait
     assert popup._is_running is True
     assert popup.controller._state != popup.controller.S_FAILED
-    assert "[ReleaseWatch] Timeout waiting for Node 9 sensor L" in popup.status_block.toPlainText()
+    assert "[ReleaseWatch]" not in popup.status_block.toPlainText()
 
 
 def test_release_watch_release_does_not_advance_controller(monkeypatch):
@@ -672,7 +674,7 @@ def test_release_watch_release_does_not_advance_controller(monkeypatch):
 
     assert popup.controller._state == before_state
     assert popup.controller.current_wait_for == before_wait
-    assert "[ReleaseWatch] Release detected for Node 8 sensor R" in popup.status_block.toPlainText()
+    assert "[ReleaseWatch]" not in popup.status_block.toPlainText()
 
 
 def test_release_watch_stop_completion_failure_and_node_change_cancel(monkeypatch):
@@ -760,9 +762,7 @@ def test_position_and_range_difference_updates(monkeypatch):
     assert popup.range_field.text() == "1100"
     popup.controller.difference_changed(100)
     text = popup.status_block.toPlainText()
-    assert "Range 1: 1000" in text
-    assert "Range 2: 1100" in text
-    assert "Difference: 100" in text
+    assert text == ""
     # range_field keeps the latest real movement value, not the difference.
     assert popup.range_field.text() == "1100"
 
@@ -801,8 +801,8 @@ class SingleAxisFunctionalPopupTests:
 
         assert popup.range_field.text() == "2499778"
         assert differences[-1] == 100
-        assert "Middle travel distance: 1249939" in popup.status_block.toPlainText()
-        assert "Difference: 100" in popup.status_block.toPlainText()
+        assert "Moving to midpoint" in popup.status_block.toPlainText()
+        assert "Middle travel distance" not in popup.status_block.toPlainText()
         popup.close()
 
 
@@ -822,7 +822,7 @@ def test_range_display_resets_between_runs(monkeypatch):
     popup._handle_run_clicked()
 
     assert popup.range_field.text() == "-"
-    assert popup.status_block.toPlainText().count("Middle travel distance: 49988") == 1
+    assert "Middle travel distance" not in popup.status_block.toPlainText()
 
 
 def test_pass_triggers_sampling_prompt_and_reenables(monkeypatch):
@@ -870,8 +870,8 @@ def test_stop_button_aborts_logs_dd_and_allows_rerun(monkeypatch):
 
     text = popup.status_block.toPlainText()
     assert "Functional test aborted by user" in text
-    assert "Functional test ABORTED by user." in text
-    assert "TX Node 7: DD" in text
+    assert "Functional test ABORTED by user." not in text
+    assert "TX Node 7: DD" not in text
     assert popup._tx_log[-1] == [0xDD]
     assert popup._is_running is False
     assert popup.run_button.isEnabled()

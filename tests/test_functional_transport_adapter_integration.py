@@ -99,7 +99,9 @@ def test_connected_backend_sends_and_receives(monkeypatch):
     # Should be running in live mode
     assert popup._is_running is True
     text = popup.status_block.toPlainText()
-    assert f"Using live transport for Node {node_id}" in text
+    assert f"Functional test started for Node {node_id}" in text
+    assert "TX Node" not in text
+    assert "RX Node" not in text
 
     # The controller will request a HUNTING command first; ensure that went to backend
     assert backend.sent, "Expected at least one command to be sent via backend"
@@ -120,13 +122,11 @@ def test_connected_backend_sends_and_receives(monkeypatch):
         "params": [0x00, 0x00, 0x00, 0x10],  # position 16
     })
 
-    # Check status logs include RX labels
+    # Operator-facing popup log stays free of raw transport labels.
     t = popup.status_block.toPlainText()
-    assert f"RX Node {node_id}: 81 4C - Left sensor has been cut" in t
-    assert f"RX Node {node_id}: 82 00 00 00 10 - Position 16" in t
-
-    # Ensure TX logs include node
-    assert any(f"TX Node {node_id}:" in line for line in t.splitlines())
+    assert f"RX Node {node_id}: 81 4C - Left sensor has been cut" not in t
+    assert f"RX Node {node_id}: 82 00 00 00 10 - Position 16" not in t
+    assert f"TX Node {node_id}:" not in t
 
 
 def test_wrong_node_nodeconfig_is_ignored_and_logged(monkeypatch):
@@ -148,7 +148,7 @@ def test_wrong_node_nodeconfig_is_ignored_and_logged(monkeypatch):
     })
 
     text = popup.status_block.toPlainText()
-    assert "ignored packet: node=5, payload=C4 3A 00, reason=wrong node 5" in text
+    assert "ignored packet:" not in text
     assert popup.controller is not None
     assert popup.controller._wait_for == "nodeconfig"
     assert backend.sent == [(node_id, [0xC4, 0x3F])]
@@ -222,9 +222,9 @@ def test_adapter_forwards_parsed_nodeconfig_from_split_uart_chunks(monkeypatch):
     runtime_window.packet_received.emit(packets[0])
 
     text = popup.status_block.toPlainText()
-    assert f"RX Node {node_id}: C4 3A 00" in text
-    assert "NODECONFIG received: 0x00" in text
-    assert "HUNTING" in text
+    assert f"RX Node {node_id}: C4 3A 00" not in text
+    assert "Home sensor: L | Opposite sensor: R" in text
+    assert "Homing motor" in text
 
 
 def test_adapter_ignores_non_decoded_packet_fragments(monkeypatch):
@@ -247,7 +247,7 @@ def test_adapter_ignores_non_decoded_packet_fragments(monkeypatch):
     text = popup.status_block.toPlainText()
     assert "raw AMX" not in text
     assert "C4 3A 02" not in text
-    assert "ignored packet:" in text
+    assert "ignored packet:" not in text
 
 
 def test_popup_logs_only_decoded_payload_not_raw_amx_stream(monkeypatch):
@@ -269,5 +269,5 @@ def test_popup_logs_only_decoded_payload_not_raw_amx_stream(monkeypatch):
     })
 
     text = popup.status_block.toPlainText()
-    assert f"RX Node {node_id}: C4 3A 02" in text
+    assert f"RX Node {node_id}: C4 3A 02" not in text
     assert "25 A5" not in text

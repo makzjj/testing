@@ -743,6 +743,10 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             ):
                 page._handle_load_ipqc_workbook()
             self._app.processEvents()
+            page._workbook_verification_passed = True
+            page._parameter_verification_context_key = page._current_production_context_key()
+            page._refresh_workbook_action_states()
+            self._app.processEvents()
             with patch(
                 "gui.workspace.pages.single_axis_functional_popup.SingleAxisFunctionalPopup.ask_start_sampling",
                 return_value=False,
@@ -801,7 +805,7 @@ class ProductionPageWorkflowTests(unittest.TestCase):
             page._handle_test_control_node_selected()
             self.assertFalse(page._single_axis_passed)
             self.assertFalse(page.stage_section.stage_enabled("sampling"))
-            self.assertTrue(page.stage_section.stage_enabled("single_axis"))
+            self.assertFalse(page.stage_section.stage_enabled("single_axis"))
             self.assertFalse(page._workbook_verification_passed)
             self.assertEqual(page._last_parameter_verification_results_by_name, {})
             self.assertIsNone(page._sampling_controller.resume_context)
@@ -2897,7 +2901,14 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             page._handle_load_ipqc_workbook()
         self._app.processEvents()
 
+    def _seed_parameter_verification_pass(self, page: ProductionPage) -> None:
+        page._workbook_verification_passed = True
+        page._parameter_verification_context_key = page._current_production_context_key()
+        page._refresh_workbook_action_states()
+        self._app.processEvents()
+
     def _enable_single_axis_pass(self, page: ProductionPage, *, start_sampling_prompt: bool = False) -> None:
+        self._seed_parameter_verification_pass(page)
         with patch(
             "gui.workspace.pages.single_axis_functional_popup.SingleAxisFunctionalPopup.ask_start_sampling",
             return_value=start_sampling_prompt,
@@ -2943,6 +2954,12 @@ class SamplingPageIntegrationTests(unittest.TestCase):
 
     def _sampling_stage_button(self, page: ProductionPage) -> QPushButton:
         return page.stage_section._rows["sampling"][1]
+
+    def _single_axis_stage_button(self, page: ProductionPage) -> QPushButton:
+        return page.stage_section._rows["single_axis"][1]
+
+    def _parameter_verification_stage_led(self, page: ProductionPage) -> QLabel:
+        return page.stage_section._rows["parameter_verification"][0]
 
     @staticmethod
     def _create_7nz_ipqc_workbook(path: Path) -> None:
@@ -4736,13 +4753,20 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         self.assertNotIn("Safe Movement Test", button_texts)
         self.assertFalse(hasattr(page.test_control_section, "_profile_combo"))
         stage_labels = [label.text() for label in page.stage_section.findChildren(QLabel)]
+        self.assertIn("Parameter Verification Test", stage_labels)
         self.assertIn("Single Axis Functional Test", stage_labels)
         self.assertIn("Sampling Test", stage_labels)
-        self.assertIn("Performance Test", stage_labels)
+        self.assertNotIn("Performance Test", stage_labels)
         stage_button_texts = [button.text() for button in page.stage_section.findChildren(QPushButton)]
-        self.assertEqual(stage_button_texts.count("Start Test"), 3)
+        self.assertEqual(stage_button_texts.count("Start Test"), 2)
+        self.assertIsNone(page.stage_section._rows["parameter_verification"][1])
+        self.assertFalse(hasattr(page.stage_section, "_workbook_verification_passed"))
+        self.assertFalse(hasattr(page.stage_section, "_single_axis_passed"))
+        self.assertFalse(self._single_axis_stage_button(page).isEnabled())
+        self.assertFalse(self._sampling_stage_button(page).isEnabled())
+        self.assertIn("#c62828", self._parameter_verification_stage_led(page).styleSheet().lower())
 
-    def test_single_axis_stage_opens_functional_popup(self) -> None:
+    def test_single_axis_stage_stays_blocked_until_parameter_verification_passes(self) -> None:
         runtime_window = _FakeRuntimeWindow()
         bridge = _FakeBridge(runtime_window)
         page = ProductionPage(bridge)
@@ -4750,10 +4774,62 @@ class SamplingPageIntegrationTests(unittest.TestCase):
         page._handle_single_axis_test_requested()
         self._app.processEvents()
 
+        self.assertIsNone(page._single_axis_popup)
+        self.assertFalse(self._single_axis_stage_button(page).isEnabled())
+        self.assertIn("Parameter Verification passes", self._single_axis_stage_button(page).toolTip())
+
+    def test_parameter_verification_pass_enables_single_axis_and_opens_functional_popup(self) -> None:
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        self._seed_parameter_verification_pass(page)
+        page._handle_single_axis_test_requested()
+        self._app.processEvents()
+
+        self.assertTrue(self._single_axis_stage_button(page).isEnabled())
+        self.assertIn("#2e7d32", self._parameter_verification_stage_led(page).styleSheet().lower())
         self.assertIsNotNone(page._single_axis_popup)
         assert page._single_axis_popup is not None
         self.assertIsInstance(page._single_axis_popup, SingleAxisFunctionalPopup)
         self.assertEqual(page._single_axis_popup.windowTitle(), "Functional")
+
+    def test_stage_unlocks_persist_across_popup_reopen_and_reset_on_new_workbook(self) -> None:
+        if not _HAS_OPENPYXL:
+            self.skipTest("openpyxl is required for workbook flow tests.")
+
+        runtime_window = _FakeRuntimeWindow()
+        bridge = _FakeBridge(runtime_window)
+        page = ProductionPage(bridge)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "ipqc.xlsx"
+            workbook_path_2 = Path(tmpdir) / "ipqc_2.xlsx"
+            self._create_ipqc_workbook(workbook_path)
+            self._create_ipqc_workbook(workbook_path_2)
+            self._load_workbook(page, workbook_path)
+            self._enable_single_axis_pass(page)
+
+            self.assertTrue(self._single_axis_stage_button(page).isEnabled())
+            self.assertTrue(self._sampling_stage_button(page).isEnabled())
+            popup = page._single_axis_popup
+            assert popup is not None
+
+            popup.close()
+            self._app.processEvents()
+            self.assertTrue(self._sampling_stage_button(page).isEnabled())
+
+            page._single_axis_popup = None
+            page._handle_single_axis_test_requested()
+            self._app.processEvents()
+            self.assertTrue(self._single_axis_stage_button(page).isEnabled())
+            self.assertTrue(self._sampling_stage_button(page).isEnabled())
+
+            self._load_workbook(page, workbook_path_2)
+
+        self.assertFalse(self._single_axis_stage_button(page).isEnabled())
+        self.assertFalse(self._sampling_stage_button(page).isEnabled())
+        self.assertIn("#c62828", self._parameter_verification_stage_led(page).styleSheet().lower())
 
     def test_single_axis_popup_warns_when_run_without_node(self) -> None:
         popup = SingleAxisFunctionalPopup(node_options=[(3, "X")])
@@ -4784,7 +4860,9 @@ class SamplingPageIntegrationTests(unittest.TestCase):
             popup.mark_passed()
 
             status_text = popup.status_block.toPlainText()
-            self.assertIn("Functional test PASSED.", status_text)
+            self.assertIn("Functional test started for Node 3", status_text)
+            self.assertNotIn("TX Node", status_text)
+            self.assertNotIn("RX Node", status_text)
             self.assertTrue(popup.run_button.isEnabled())
             self.assertTrue(popup.node_combo.isEnabled())
 
