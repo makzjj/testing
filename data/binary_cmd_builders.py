@@ -7,7 +7,7 @@ this stable module path.
 
 from __future__ import annotations
 
-from myconfig.constants import BCMD_LOGMOTOR_I, BCMD_LOGPOS, BCMD_MOTOR_I
+from myconfig.constants import BCMD_GET_INTERRUPT, BCMD_GET_NODE_TYPE, BCMD_GET_UUID, BCMD_LOGMOTOR_I, BCMD_LOGPOS, BCMD_MOTOR_I
 
 
 def parse_binary_hex_bytes(value: object | None) -> list[int]:
@@ -94,6 +94,16 @@ def build_getver_query_payload() -> list[int]:
     return [0xC8, 0x3F]
 
 
+def build_get_nodetype_query_payload() -> list[int]:
+    """Build node-type (CD) query payload."""
+    return [BCMD_GET_NODE_TYPE, 0x3F]
+
+
+def build_get_uuid_query_payload() -> list[int]:
+    """Build UUID (E0) query payload."""
+    return [BCMD_GET_UUID, 0x3F]
+
+
 def _twos_complement_16(value: int) -> tuple[int, int]:
     value &= 0xFFFF
     return (value >> 8) & 0xFF, value & 0xFF
@@ -162,7 +172,7 @@ def build_rflag_query_payload() -> list[int]:
 
 def build_interrupt_query_payload() -> list[int]:
     """Build interrupt-state (D8) query payload."""
-    return [0xD8, 0x3F]
+    return [BCMD_GET_INTERRUPT, 0x3F]
 
 
 def build_motor_current_query_payload() -> list[int]:

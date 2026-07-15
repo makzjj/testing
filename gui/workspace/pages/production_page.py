@@ -2509,7 +2509,7 @@ class _NodeStatusSection(PanelFrame):
         button_row.addStretch(1)
         self._emergency_badge = QLabel("")
         self._emergency_badge.setObjectName("EmergencyStopBadge")
-        self._emergency_badge.setFixedWidth(80)
+        self._emergency_badge.setFixedWidth(148)
         self._emergency_badge.setMinimumHeight(36)
         self._emergency_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._emergency_badge.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -2571,13 +2571,13 @@ class _NodeStatusSection(PanelFrame):
     def set_emergency_stop_state(self, active: bool | None) -> None:
         self._emergency_stop_active = active
         if active is True:
-            self._emergency_badge.setText("E BUTTON")
+            self._emergency_badge.setText("EMERGENCY BUTTON")
             self._emergency_badge.setStyleSheet(
                 "background: #D92D20; color: white; border: 1px solid #B42318; "
                 "border-radius: 16px; font-weight: 700; padding: 8px 14px;"
             )
             return
-        self._emergency_badge.setText("E Button")
+        self._emergency_badge.setText("Emergency Button")
         self._emergency_badge.setStyleSheet(
             "background: #2E9F58; color: white; border: 1px solid #247A45; "
             "border-radius: 16px; font-weight: 600; padding: 8px 14px;"

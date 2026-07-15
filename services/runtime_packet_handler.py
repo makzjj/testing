@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from data.binary_cmd_parser import decode_command, parse_comm_stats, parse_get_interrupt
+from data.text_cmd_builders import decode_text_command_response
 from myconfig.constants import BCMD_COMM_STATS, BCMD_COMM_TEST_FRAME, BCMD_GET_MCU_VERSION, BCMD_GET_NODE_ID, BCMD_MOTOR_I
 
 from .node_status_store import append_motor_current_sample, build_default_interrupt_state, ensure_node_status
@@ -240,6 +241,11 @@ class RuntimePacketHandler:
 
         if packet.get("mcu_version_response"):
             events.append(RuntimePacketEvent("mcu_version", value=packet.get("mcu_version", "Unknown")))
+        else:
+            normalized_text = decode_text_command_response(payload)
+            text_version = self._parse_text_mcu_version(normalized_text)
+            if text_version is not None:
+                events.append(RuntimePacketEvent("mcu_version", value=text_version))
 
         if command == 0xD8:
             emergency_state = self._decode_emergency_stop_state(params)
@@ -304,3 +310,25 @@ class RuntimePacketHandler:
         if params[1] == 0x00 and params[2] == 0x01:
             return False
         return None
+
+    @staticmethod
+    def _parse_text_mcu_version(text: str | None) -> str | None:
+        if text is None:
+            return None
+        normalized = str(text).strip()
+        if not normalized.lower().startswith("ver:"):
+            return None
+        version_text = normalized.partition(":")[2].strip()
+        if not version_text:
+            return None
+        compact = version_text.replace("_", ".")
+        if compact.lower().startswith("v"):
+            compact = compact[1:].strip()
+        parts = [part.strip() for part in compact.split(".") if part.strip()]
+        if len(parts) < 4:
+            return f"v{compact}"
+        try:
+            normalized_parts = [str(int(part)) for part in parts[:4]]
+        except ValueError:
+            return f"v{compact}"
+        return f"v{'.'.join(normalized_parts)}"

@@ -495,6 +495,42 @@ class WorkspaceRuntimeBridge:
             )
         return {"connected_nodes": connected_nodes, "detected_nodes": detected_nodes, "rows": rows}
 
+    def get_runtime_mcu_firmware_version(self, *, create_if_missing: bool = False) -> str | None:
+        """Return the runtime-owned MCU firmware version when known."""
+        runtime_window = self.get_runtime_window(create_if_missing=create_if_missing)
+        if runtime_window is None:
+            return None
+        value = getattr(runtime_window, "mcu_version", None)
+        text = str(value).strip() if value is not None else ""
+        return text or None
+
+    def get_runtime_node_system_info(self, node_id: int, *, create_if_missing: bool = False) -> dict[str, object]:
+        """Return one node's runtime-owned firmware, UUID, type, and detection state."""
+        runtime_window = self.get_runtime_window(create_if_missing=create_if_missing)
+        if runtime_window is None:
+            return {
+                "node_id": int(node_id),
+                "detected": False,
+                "connected": False,
+                "firmware": None,
+                "uuid": None,
+                "node_type": None,
+            }
+
+        node_status = getattr(runtime_window, "node_status", {}) or {}
+        status = node_status.get(int(node_id), {}) if isinstance(node_status, dict) else {}
+        detected_nodes = getattr(runtime_window, "detected_nodes", set()) or set()
+        connected = bool(status.get("connected", False)) if isinstance(status, dict) else False
+        detected = connected or int(node_id) in {int(value) for value in detected_nodes}
+        return {
+            "node_id": int(node_id),
+            "detected": detected,
+            "connected": connected,
+            "firmware": self._normalize_runtime_text(status.get("firmware") if isinstance(status, dict) else None),
+            "uuid": self._normalize_runtime_text(status.get("uuid") if isinstance(status, dict) else None),
+            "node_type": self._normalize_runtime_text(status.get("type") if isinstance(status, dict) else None),
+        }
+
     def get_plot_node_options(self, *, create_if_missing: bool = False) -> list[tuple[int, str]]:
         """Return plot-eligible node options from current config/runtime context."""
         if self._uses_ml20_plot_node_map():
@@ -647,6 +683,13 @@ class WorkspaceRuntimeBridge:
         if is_cut is False:
             return "not_cut"
         return "unknown"
+
+    @staticmethod
+    def _normalize_runtime_text(value: object) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
 
     def get_runtime_node_motion_polarity(self, node_id: int, *, create_if_missing: bool = False) -> dict[str, object]:
         """Return canonical NODECONFIG-derived motion polarity for one node when known."""

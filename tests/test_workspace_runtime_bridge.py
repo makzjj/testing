@@ -284,6 +284,51 @@ mcu:
             with patch.object(bridge, "get_runtime_window", return_value=runtime_window):
                 self.assertTrue(bridge.get_runtime_emergency_stop_state(create_if_missing=False))
 
+    def test_bridge_exposes_runtime_mcu_firmware_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "demo.yaml"
+            config_path.write_text("project:\n  name: demo\n", encoding="utf-8")
+
+            project = ProjectDefinition(name="demo", display_name="Demo", config_path=config_path)
+            bridge = WorkspaceRuntimeBridge(project)
+            runtime_window = SimpleNamespace(mcu_version="v1.2.3.4")
+
+            with patch.object(bridge, "get_runtime_window", return_value=runtime_window):
+                version = bridge.get_runtime_mcu_firmware_version(create_if_missing=False)
+
+            self.assertEqual(version, "v1.2.3.4")
+
+    def test_bridge_exposes_runtime_node_system_info(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "demo.yaml"
+            config_path.write_text("project:\n  name: demo\n", encoding="utf-8")
+
+            project = ProjectDefinition(name="demo", display_name="Demo", config_path=config_path)
+            bridge = WorkspaceRuntimeBridge(project)
+            runtime_window = SimpleNamespace(
+                node_status={
+                    8: {
+                        "connected": True,
+                        "firmware": "v1.2.3.4",
+                        "uuid": "123456 (0x000001E240)",
+                        "type": "MTR (Motor Controller)",
+                    }
+                },
+                detected_nodes={8},
+            )
+
+            with patch.object(bridge, "get_runtime_window", return_value=runtime_window):
+                info = bridge.get_runtime_node_system_info(8, create_if_missing=False)
+                unknown = bridge.get_runtime_node_system_info(9, create_if_missing=False)
+
+            self.assertTrue(info["detected"])
+            self.assertTrue(info["connected"])
+            self.assertEqual(info["firmware"], "v1.2.3.4")
+            self.assertEqual(info["uuid"], "123456 (0x000001E240)")
+            self.assertEqual(info["node_type"], "MTR (Motor Controller)")
+            self.assertFalse(unknown["detected"])
+            self.assertIsNone(unknown["firmware"])
+
     def test_bridge_exposes_per_node_interrupt_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "demo.yaml"

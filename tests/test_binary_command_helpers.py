@@ -3,8 +3,11 @@ import unittest
 from data.binary_cmd_builders import (
     build_hunting_timeout,
     build_getpos,
+    build_get_nodetype_query_payload,
+    build_get_uuid_query_payload,
     build_getvel_query_payload,
     build_getver_query_payload,
+    build_interrupt_query_payload,
     build_run,
     build_vel,
     build_tpos,
@@ -44,6 +47,12 @@ class BinaryCommandBuilderTests(unittest.TestCase):
     def test_getver_builder(self):
         self.assertEqual(build_getver_query_payload(), [0xC8, 0x3F])
 
+    def test_nodetype_builder(self):
+        self.assertEqual(build_get_nodetype_query_payload(), [0xCD, 0x3F])
+
+    def test_uuid_builder(self):
+        self.assertEqual(build_get_uuid_query_payload(), [0xE0, 0x3F])
+
     def test_run_builder_positive_190(self):
         self.assertEqual(build_run(190), [0x88, 0x00, 0xBE])
 
@@ -79,6 +88,7 @@ class BinaryCommandBuilderTests(unittest.TestCase):
     def test_flag_query_builders(self):
         self.assertEqual(build_lflag_query_payload(), [0xC9, 0x3F])
         self.assertEqual(build_rflag_query_payload(), [0xCA, 0x3F])
+        self.assertEqual(build_interrupt_query_payload(), [0xD8, 0x3F])
 
     def test_motor_current_query_builder(self):
         self.assertEqual(build_motor_current_query_payload(), [0xCF, 0x3F])

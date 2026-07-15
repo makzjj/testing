@@ -188,6 +188,7 @@ Start by identifying what kind of feature it is.
 - Firmware Integration Test uses one public controller owner: `FirmwareIntegrationController`
 - mode-specific Firmware Integration workflow helpers may exist only as private implementation details under `FirmwareIntegrationController`
 - Firmware Integration packet ingress belongs in `services/firmware_transport_adapter.py`
+- Firmware page System Information is a simple one-shot refresh surface: reuse the canonical `ver?` text builder, canonical Binary query builders, runtime-owned packet parsing/state, and `WorkspaceRuntimeBridge` reads; do not add background polling or a second runtime store
 - Manual Binary dialog is UI-only and should not build packets, parse packets, or access the backend directly
 - Manual Text dialog is UI-only and should not build packets, parse packets, or access the backend directly
 - Automated Binary FIT core sequencing lives in a private `_BinaryFitWorkflow`; response-match vs semantic-decode policy, `CONTRACT_UNKNOWN` non-sending results, no-response completion, reboot recovery, logging cleanup, manual-verification pauses, and report export must stay outside the run dialog

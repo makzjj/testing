@@ -5,28 +5,144 @@ from __future__ import annotations
 from datetime import datetime
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor, QBrush
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QCompleter,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QListWidget,
     QPushButton,
     QSpinBox,
     QStackedWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QTextEdit,
+    QVBoxLayout,
     QWidget,
+    QHeaderView,
+    QAbstractItemView,
 )
 
-from ...bridges import WorkspaceRuntimeBridge
 from ...controllers.firmware_integration_controller import FirmwareIntegrationController
-from ...models import SelectionField, SelectionOption
-from ...widgets import ChipGroupWidget, DetailListWidget, LabeledControl, PanelFrame, SelectorFieldGrid, SimpleTableWidget
+from ...widgets import PanelFrame
 from ...widgets.layout_utils import clear_layout
-from ..section_utils import build_grid_layout
+
+
+class SystemInformationSection(PanelFrame):
+    """Simple runtime-backed Firmware system information module."""
+
+    _HEADERS = ("Node", "Firmware", "UUID", "Node Type", "INT Status")
+
+    def __init__(self, *, on_update_clicked) -> None:
+        super().__init__("System Information")
+        self._on_update_clicked = on_update_clicked
+        self._mcu_version_value: QLabel | None = None
+        self._update_button: QPushButton | None = None
+        self._table: QTableWidget | None = None
+        self._build_ui()
+
+    def render(self, *, mcu_version: str, rows: list[dict[str, object]]) -> None:
+        if self._mcu_version_value is not None:
+            self._mcu_version_value.setText(str(mcu_version))
+        if self._table is None:
+            return
+
+        self._table.setRowCount(len(rows))
+        for row_index, row in enumerate(rows):
+            values = [
+                str(row.get("node", "")),
+                str(row.get("firmware", "")),
+                str(row.get("uuid", "")),
+                str(row.get("node_type", "")),
+                str(row.get("int_status", "")),
+            ]
+            for column_index, value in enumerate(values):
+                item = self._table.item(row_index, column_index)
+                if item is None:
+                    item = QTableWidgetItem()
+                    item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                    self._table.setItem(row_index, column_index, item)
+                item.setText(value)
+                item.setBackground(QBrush())
+            int_item = self._table.item(row_index, 4)
+            if int_item is not None:
+                int_item.setText("")
+            self._table.setCellWidget(
+                row_index,
+                4,
+                self._build_int_status_badge(
+                    text=str(row.get("int_status", "")),
+                    background=str(row.get("int_color", "#E37B7B")),
+                    foreground=str(row.get("int_text_color", "#FFFFFF")),
+                ),
+            )
+
+        self._table.resizeRowsToContents()
+        total_height = self._table.horizontalHeader().height()
+        for row_index in range(self._table.rowCount()):
+            total_height += self._table.rowHeight(row_index)
+        total_height += (self._table.frameWidth() * 2) + 2
+        self._table.setFixedHeight(total_height)
+
+    def set_refresh_active(self, active: bool) -> None:
+        if self._update_button is not None:
+            self._update_button.setEnabled(not active)
+
+    def _build_ui(self) -> None:
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(8)
+
+        top_row.addWidget(QLabel("MCU Firmware Version:"))
+
+        self._mcu_version_value = QLabel("Unknown")
+        self._mcu_version_value.setObjectName("FirmwareSystemInfoMcuVersionValue")
+        top_row.addWidget(self._mcu_version_value, alignment=Qt.AlignmentFlag.AlignVCenter)
+        top_row.addStretch(1)
+
+        self._update_button = QPushButton("Update")
+        self._update_button.setObjectName("FirmwareSystemInfoUpdateButton")
+        self._update_button.setProperty("tone", "primary")
+        self._update_button.clicked.connect(lambda _checked=False: self._on_update_clicked())
+        top_row.addWidget(self._update_button, alignment=Qt.AlignmentFlag.AlignVCenter)
+        self.body_layout.addLayout(top_row)
+
+        self._table = QTableWidget(0, len(self._HEADERS))
+        self._table.setObjectName("FirmwareSystemInfoTable")
+        self._table.setHorizontalHeaderLabels(list(self._HEADERS))
+        self._table.verticalHeader().hide()
+        self._table.horizontalHeader().setStretchLastSection(False)
+        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._table.horizontalHeader().setHighlightSections(False)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._table.setShowGrid(False)
+        self._table.setAlternatingRowColors(False)
+        self._table.setWordWrap(False)
+        self._table.setCornerButtonEnabled(False)
+        self._table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.body_layout.addWidget(self._table)
+
+    def _build_int_status_badge(self, *, text: str, background: str, foreground: str) -> QWidget:
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(10, 4, 10, 4)
+        layout.setSpacing(0)
+
+        badge = QLabel(text)
+        badge.setObjectName("FirmwareSystemInfoIntBadge")
+        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        badge.setStyleSheet(
+            f"background: {background}; color: {foreground}; "
+            "border-radius: 12px; padding: 6px 10px; font-weight: 600;"
+        )
+        layout.addWidget(badge)
+        return container
 
 
 class FirmwareIntegrationSection(PanelFrame):
@@ -106,7 +222,6 @@ class FirmwareIntegrationSection(PanelFrame):
         auto_layout.addStretch()
         self.body_layout.addLayout(auto_layout)
 
-        # Compatibility aliases for older callers; the visible legacy control is the mode combo below.
         self._manual_binary_alias_button = QPushButton("Manual Binary Command")
         self._manual_binary_alias_button.setObjectName("FirmwareFitManualBinaryButton")
         self._manual_binary_alias_button.clicked.connect(lambda _checked=False: self._update_status(self._open_manual_binary_dialog()))
@@ -373,196 +488,3 @@ class FirmwareIntegrationSection(PanelFrame):
             return
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self._history_output.append(f"[{timestamp}] {message}")
-
-
-class CommandDebugSection(PanelFrame):
-    """Firmware command-debug module home."""
-
-    def __init__(self, bridge: WorkspaceRuntimeBridge) -> None:
-        super().__init__("Command debug", "")
-        self._bridge = bridge
-        self.refresh()
-
-    def refresh(self) -> None:
-        clear_layout(self.body_layout)
-        axis_nodes = _axis_node_options(self._bridge.raw_config)
-        target_options = [SelectionOption("All", "Broadcast", "Send to every available node"), *axis_nodes[:3]]
-
-        top = build_grid_layout()
-
-        payload = QLineEdit("0x00 0x00")
-
-        send_button = QPushButton("Send")
-        send_button.setProperty("tone", "primary")
-
-        selector_fields = [
-            [
-                SelectionField(
-                    "Command",
-                    [
-                        SelectionOption("Node ID", "GET_NODE_ID", "Read the active node identifier"),
-                        SelectionOption("UUID", "GET_UUID", "Fetch the MCU UUID"),
-                        SelectionOption("Version", "READ_VERSION", "Read the installed firmware version"),
-                    ],
-                    style="list",
-                ),
-                SelectionField("Target", target_options, style="list"),
-            ]
-        ]
-
-        top.addWidget(SelectorFieldGrid(selector_fields), 0, 0, 1, 2)
-        top.addWidget(send_button, 0, 2)
-        top.addWidget(LabeledControl("Payload", payload), 1, 0, 1, 3)
-        self.body_layout.addLayout(top)
-
-        self.body_layout.addWidget(ChipGroupWidget([("Binary mode", "info"), ("Text mode", "warning")], columns=2))
-
-        log_list = QListWidget()
-        log_list.setObjectName("CommandLogList")
-        log_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        log_list.setWordWrap(True)
-        log_list.addItems(
-            [
-                "[TX] 0x7E 0x04 0x10",
-                f"[RX] {axis_nodes[0].label if axis_nodes else 'Node 03'} version OK",
-                f"[RX] {axis_nodes[1].label if len(axis_nodes) > 1 else 'Node 11'} UUID ready",
-                "[RX] interrupt=0",
-            ]
-        )
-        self.body_layout.addWidget(log_list)
-
-
-class UartProtocolSection(PanelFrame):
-    """UART protocol monitor module home."""
-
-    def __init__(self, bridge: WorkspaceRuntimeBridge) -> None:
-        super().__init__("UART protocol monitor", "")
-        self._bridge = bridge
-        self.refresh()
-
-    def refresh(self) -> None:
-        clear_layout(self.body_layout)
-        axis_nodes = _axis_node_options(self._bridge.raw_config)
-        rows = [
-            ["13:28:01", "TX", "broadcast", "GET_NODE_ID"],
-            ["13:28:02", "RX", axis_nodes[0].label if axis_nodes else "3", "MCU version OK"],
-            ["13:28:04", "RX", axis_nodes[1].label if len(axis_nodes) > 1 else "11", "Interrupt=0"],
-            ["13:28:06", "RX", axis_nodes[2].label if len(axis_nodes) > 2 else "14", "Range ready"],
-        ]
-        self.body_layout.addWidget(SimpleTableWidget(["Time", "Dir", "Node", "Summary"], rows))
-
-
-class FrameLossSection(PanelFrame):
-    """Frame-loss summary module home."""
-
-    def __init__(self, bridge: WorkspaceRuntimeBridge) -> None:
-        super().__init__("Frame loss summary", "")
-        self._bridge = bridge
-        self.refresh()
-
-    def refresh(self) -> None:
-        clear_layout(self.body_layout)
-        self.body_layout.addWidget(DetailListWidget(self._bridge.get_frame_loss_items()))
-
-
-class MotionCommandSection(PanelFrame):
-    """Firmware-side motion command module home."""
-
-    def __init__(self, bridge: WorkspaceRuntimeBridge) -> None:
-        super().__init__("Motion command panel", "")
-        self._bridge = bridge
-        self.refresh()
-
-    def refresh(self) -> None:
-        clear_layout(self.body_layout)
-        axis_nodes = _axis_node_options(self._bridge.raw_config)
-
-        grid = build_grid_layout()
-
-        value_edit = QLineEdit("40")
-
-        node_options = axis_nodes[:4] or [SelectionOption("Node 03", "Node 03")]
-        top_selector_fields = [
-            [
-                SelectionField("Node", node_options, style="list"),
-                SelectionField(
-                    "Control mode",
-                    [
-                        SelectionOption("Vel PID", "Velocity PID", "Closed-loop speed control"),
-                        SelectionOption("Pos PID", "Position PID", "Closed-loop position control"),
-                    ],
-                    style="list",
-                ),
-            ]
-        ]
-        preset_selector_fields = [
-            [
-                SelectionField(
-                    "Command preset",
-                    [
-                        SelectionOption("Set V20", "Set Velocity 20", "Low-speed validation"),
-                        SelectionOption("Set V40", "Set Velocity 40", "High-speed validation"),
-                    ],
-                    style="list",
-                ),
-            ]
-        ]
-        grid.addWidget(SelectorFieldGrid(top_selector_fields), 0, 0, 1, 2)
-        grid.addWidget(SelectorFieldGrid(preset_selector_fields), 1, 0)
-        grid.addWidget(LabeledControl("Value", value_edit), 1, 1)
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 1)
-        self.body_layout.addLayout(grid)
-
-        actions = QHBoxLayout()
-        actions.setContentsMargins(0, 0, 0, 0)
-        actions.setSpacing(8)
-
-        query_button = QPushButton("Query")
-        query_button.setProperty("tone", "secondary")
-        actions.addWidget(query_button)
-
-        run_button = QPushButton("Run")
-        run_button.setProperty("tone", "primary")
-        actions.addWidget(run_button)
-
-        stop_button = QPushButton("Stop")
-        stop_button.setProperty("tone", "danger")
-        actions.addWidget(stop_button)
-
-        self.body_layout.addLayout(actions)
-
-
-class SensorSnapshotSection(PanelFrame):
-    """Firmware sensor snapshot module home."""
-
-    def __init__(self, bridge: WorkspaceRuntimeBridge) -> None:
-        super().__init__("Sensor snapshot", "")
-        self._bridge = bridge
-        self.refresh()
-
-    def refresh(self) -> None:
-        clear_layout(self.body_layout)
-        rows = []
-        encoders = self._bridge.raw_config.get("robot", {}).get("encoders", {})
-        for sensor_name, sensor_data in encoders.items():
-            rows.append([sensor_name.upper(), str(sensor_data.get("node_id", "?")), "Ready"])
-        if not rows:
-            rows = [["ENCODER", "n/a", "Idle"]]
-        self.body_layout.addWidget(SimpleTableWidget(["Sensor", "Node", "State"], rows))
-
-
-def _axis_node_options(raw_config: dict) -> list[SelectionOption]:
-    axis_options: list[SelectionOption] = []
-    axes = raw_config.get("robot", {}).get("axes", {})
-    if isinstance(axes, dict):
-        for axis_name, axis_data in axes.items():
-            node_id = axis_data.get("node_id", "?") if isinstance(axis_data, dict) else "?"
-            axis_options.append(
-                SelectionOption(
-                    label=f"{axis_name.upper()} N{node_id}",
-                    value=f"{axis_name.upper()} / Node {node_id}",
-                    description=f"Direct selection for axis {axis_name.upper()} on node {node_id}",
-                )
-            )
-    return axis_options

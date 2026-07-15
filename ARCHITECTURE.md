@@ -175,6 +175,7 @@ Current state:
 - the layered ownership model is active and usable
 - the legacy `main_window.py` shell still exists beside the newer workspace shell
 - runtime-backed UI rendering is established for shared state such as interrupts and motor current
+- the Firmware page now contains a System Information module plus Firmware Integration; System Information performs a page-owned one-shot refresh only, while MCU/node firmware, UUID, node type, and interrupt truth remain on the existing protocol -> runtime -> bridge path
 - Manual Text protocol construction remains canonical in the protocol layer, and Manual Text UI now renders controller-owned state through a dialog
 - `FirmwareIntegrationController` remains the single public Firmware Integration owner; any mode-specific workflow helpers are private implementation details under that controller boundary
 - `FirmwareCommandDefinition` remains reusable command metadata, while `FirmwareTestCase` describes automated FIT case metadata and `FirmwareTestResult` is the shared per-case reporting contract for future export work
