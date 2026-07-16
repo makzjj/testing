@@ -17,7 +17,9 @@ except ImportError:  # pragma: no cover - environment dependent.
 from data.binary_cmd_builders import build_run, build_tpos, build_vel
 from data.binary_cmd_parser import decode_nodeconfig_motion_polarity
 from gui.workspace.controllers.sampling_test_controller import SamplingResumeContext, SamplingTestConfig, SamplingTestController
+from gui.workspace.models.node_motion_calibration import NodeMotionCalibration
 from services.ipqc_excel_adapter import IpqcExcelAdapter
+from services.node_motion_calibration_store import NodeMotionCalibrationStore
 from services.node_sensor_profile import NodeSensorProfile
 from services.sampling_transport_adapter import SamplingTransportAdapter
 
@@ -66,6 +68,21 @@ def _populate_sampling_sheet(sheet) -> None:
             row += 3
 
 
+def _build_calibration_store() -> NodeMotionCalibrationStore:
+    return NodeMotionCalibrationStore(
+        [
+            NodeMotionCalibration(3, "X", "Linear", "mm", 32.0, 88064.0),
+            NodeMotionCalibration(5, "V", "Rotational", "deg", 49.0, -34117.16),
+            NodeMotionCalibration(6, "H", "Rotational", "deg", 49.0, -34117.16),
+            NodeMotionCalibration(7, "NZ", "Linear", "mm", 69.5, -80058.18),
+            NodeMotionCalibration(8, "RZ", "Rotational", "deg", 119.0, 19569.78),
+            NodeMotionCalibration(9, "PZ", "Linear", "mm", 168.0, 9784.89),
+            NodeMotionCalibration(12, "Z", "Linear", "mm", 50.0, 88064.0),
+        ],
+        Path("config/node_motion_calibration.xml"),
+    )
+
+
 class _SamplingManualClock:
     def __init__(self, values: list[float]) -> None:
         self._values = list(values)
@@ -80,8 +97,21 @@ class _SamplingManualClock:
 
 
 class _RecordingSamplingController(SamplingTestController):
-    def __init__(self, adapter: IpqcExcelAdapter, config: SamplingTestConfig, clock, *, node_id: int = 8) -> None:
-        super().__init__(adapter, config, clock=clock)
+    def __init__(
+        self,
+        adapter: IpqcExcelAdapter,
+        config: SamplingTestConfig,
+        clock,
+        *,
+        node_id: int = 8,
+        calibration_store: NodeMotionCalibrationStore | None = None,
+    ) -> None:
+        super().__init__(
+            adapter,
+            config,
+            clock=clock,
+            node_motion_calibration_store=calibration_store or _build_calibration_store(),
+        )
         self.commands: list[list[int]] = []
         self.logs: list[str] = []
         self.states: list[str] = []
@@ -1124,8 +1154,16 @@ class SamplingControllerTests(unittest.TestCase):
             self.assertEqual(controller.aborts, [])
             self.assertEqual(controller.completed_counts[-1], (4, 4))
             self.assertEqual(len(controller.measurements), 4)
+            self.assertEqual(controller.completed_results, tuple(controller.measurements))
             self.assertEqual(controller.measurements[0].range_value, 60)
             self.assertIsNone(controller.measurements[0].return_error)
+            self.assertAlmostEqual(controller.measurements[0].expected_range_counts, 119.0 * 19569.78)
+            self.assertAlmostEqual(controller.measurements[0].error_counts, 60.0 - (119.0 * 19569.78))
+            self.assertAlmostEqual(
+                controller.measurements[0].error_units,
+                (60.0 - (119.0 * 19569.78)) / 19569.78,
+            )
+            self.assertEqual(controller.measurements[0].error_unit, "deg")
             self.assertAlmostEqual(controller.measurements[0].elapsed_seconds, 0.5)
             self.assertAlmostEqual(controller.measurements[0].speed, 120.0)
             self.assertEqual(controller.measurements[1].range_value, 50)
@@ -1147,6 +1185,28 @@ class SamplingControllerTests(unittest.TestCase):
         self.assertEqual(sampling_sheet["C4"].value, 60)
         self.assertAlmostEqual(sampling_sheet["C20"].value, 100.0)
         self.assertAlmostEqual(sampling_sheet["C37"].value, 0.8)
+
+    def test_sampling_completed_results_clear_on_fresh_start_and_survive_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controller = self._build_sampling_controller(tmpdir, [0.0, 0.5, 1.0, 1.4])
+
+            self.assertTrue(controller.start(8, "RZ"))
+            self._drive_home_sequence(controller, start_pos=10)
+            controller.handle_runtime_packet([0x88, 0x53, 0x00, 0x64])
+            controller.handle_runtime_packet([0x81, 0x52])
+            controller.handle_runtime_packet([0x82, 0x00, 0x00, 0x00, 70])
+            controller.handle_runtime_packet([0x88, 0x53, 0xFF, 0x9C])
+            controller.on_timeout()
+
+            self.assertEqual(len(controller.completed_results), 1)
+            self.assertTrue(controller.can_resume)
+            self.assertTrue(controller.resume(node_id=8, node_name="RZ", base_group="3X"))
+            self.assertEqual(len(controller.completed_results), 1)
+
+            controller._running = False
+            controller._state = controller.S_COMPLETED
+            self.assertTrue(controller.start(8, "RZ"))
+            self.assertEqual(controller.completed_results, ())
 
     def test_sampling_time_is_rounded_only_for_output_and_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

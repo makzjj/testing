@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
 
 from myconfig.project_loader import load_available_projects
 from myconfig.project_models import ProjectDefinition, ValidationIssue
+from services.node_motion_calibration_store import NodeMotionCalibrationStore
 
 
 BRAND_IMAGE_PATH = Path(__file__).resolve().parents[1] / "resources" / "Screenshot 2026-04-01 132426.png"
@@ -62,11 +63,12 @@ class SelectorBackground(QWidget):
 
 
 class ProgramSelectorWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, node_motion_calibration_store: NodeMotionCalibrationStore | None = None) -> None:
         super().__init__()
         self._projects: list[ProjectDefinition] = []
         self._invalid_projects: list[ValidationIssue] = []
         self._workspace_windows: list[QMainWindow] = []
+        self._node_motion_calibration_store = node_motion_calibration_store or NodeMotionCalibrationStore.load_default()
         self.setWindowTitle("BioBot Robot Arm Tester")
         self.resize(1120, 680)
         self._setup_ui()
@@ -296,7 +298,7 @@ class ProgramSelectorWindow(QMainWindow):
 
         from gui.workspace.shell.project_workspace_window import ProjectWorkspaceWindow
 
-        window = ProjectWorkspaceWindow(project)
+        window = ProjectWorkspaceWindow(project, node_motion_calibration_store=self._node_motion_calibration_store)
         window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         window.destroyed.connect(lambda *_: self._restore_selector(window))
         self._workspace_windows.append(window)

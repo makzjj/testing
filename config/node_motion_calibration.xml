@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<NodeMotionCalibration version="1">
+    <Node id="3" name="X">
+        <AxisType>Linear</AxisType>
+        <Unit>mm</Unit>
+        <SoftwareRange>32</SoftwareRange>
+        <CountsPerUnit>88064</CountsPerUnit>
+    </Node>
+    <Node id="4" name="Y">
+        <AxisType>Linear</AxisType>
+        <Unit>mm</Unit>
+        <SoftwareRange>29.5</SoftwareRange>
+        <CountsPerUnit>88064</CountsPerUnit>
+    </Node>
+    <Node id="5" name="V">
+        <AxisType>Rotational</AxisType>
+        <Unit>deg</Unit>
+        <SoftwareRange>49</SoftwareRange>
+        <CountsPerUnit>-34117.16</CountsPerUnit>
+    </Node>
+    <Node id="6" name="H">
+        <AxisType>Rotational</AxisType>
+        <Unit>deg</Unit>
+        <SoftwareRange>49</SoftwareRange>
+        <CountsPerUnit>-34117.16</CountsPerUnit>
+    </Node>
+    <Node id="7" name="NZ">
+        <AxisType>Linear</AxisType>
+        <Unit>mm</Unit>
+        <SoftwareRange>69.5</SoftwareRange>
+        <CountsPerUnit>-80058.18</CountsPerUnit>
+    </Node>
+    <Node id="8" name="RZ">
+        <AxisType>Rotational</AxisType>
+        <Unit>deg</Unit>
+        <SoftwareRange>119</SoftwareRange>
+        <CountsPerUnit>19569.78</CountsPerUnit>
+    </Node>
+    <Node id="9" name="PZ">
+        <AxisType>Linear</AxisType>
+        <Unit>mm</Unit>
+        <SoftwareRange>168</SoftwareRange>
+        <CountsPerUnit>9784.89</CountsPerUnit>
+    </Node>
+    <Node id="12" name="Z">
+        <AxisType>Linear</AxisType>
+        <Unit>mm</Unit>
+        <SoftwareRange>50</SoftwareRange>
+        <CountsPerUnit>88064</CountsPerUnit>
+    </Node>
+</NodeMotionCalibration>

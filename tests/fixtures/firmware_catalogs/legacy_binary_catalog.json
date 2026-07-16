@@ -1,0 +1,807 @@
+{
+  "schema_version": 1,
+  "source": "HEAD:legacy_reference/firmware_integration_test.py",
+  "mode": "binary",
+  "entries": [
+    {
+      "legacy_index": 0,
+      "name": "bcmd_TPOS (Move Motor Position)",
+      "opcode": 129,
+      "form": "set",
+      "parameter_type": "int32",
+      "default_value": "0",
+      "expected_response": "Multiple response states: 'S' = Start moving [0x81]['S'][pos_byte3]..., 'E' = End reached [0x81]['E']...",
+      "manual_verification_prompt": "Did you observe motor axis rotating to target position?"
+    },
+    {
+      "legacy_index": 1,
+      "name": "bcmd_GETPOS (Get Position)",
+      "opcode": 130,
+      "form": "query",
+      "parameter_type": "int32",
+      "default_value": "0",
+      "expected_response": "[0x82][pos_byte3][pos_byte2][pos_byte1][pos_byte0]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 2,
+      "name": "bcmd_GETRPS (Get Speed)",
+      "opcode": 131,
+      "form": "query",
+      "parameter_type": "none",
+      "default_value": "",
+      "expected_response": "[0x83][rps_b3][rps_b2][rps_b1][rps_b0]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 3,
+      "name": "bcmd_VEL (Set Velocity)",
+      "opcode": 132,
+      "form": "set",
+      "parameter_type": "int16",
+      "default_value": "30",
+      "expected_response": "[0x84]['S'][code_hi][code_lo]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 4,
+      "name": "bcmd_GETVEL (Get Velocity)",
+      "opcode": 133,
+      "form": "query",
+      "parameter_type": "none",
+      "default_value": "",
+      "expected_response": "[0x85][vel_hi][vel_lo]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 5,
+      "name": "bcmd_NODEIDref (Get ID Reference)",
+      "opcode": 134,
+      "form": "query",
+      "parameter_type": "query_3f",
+      "default_value": "",
+      "expected_response": "[0x86][0x3A][node_id]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 6,
+      "name": "bcmd_NODEIDref (Set ID Reference)",
+      "opcode": 134,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "01",
+      "expected_response": "[0x86][0x3A][node_id]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 7,
+      "name": "bcmd_RUN (Run Motor)",
+      "opcode": 136,
+      "form": "set",
+      "parameter_type": "int16",
+      "default_value": "30",
+      "expected_response": "[0x88]['S'][velocity_hi][velocity_lo]",
+      "manual_verification_prompt": "Did you observe the motor running?"
+    },
+    {
+      "legacy_index": 8,
+      "name": "bcmd_RD_SLOPE (Ramp Down Slope)",
+      "opcode": 137,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "00 1E",
+      "expected_response": "[0x89][0x3A][value_hi][value_lo]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 9,
+      "name": "bcmd_RD_STEP (Ramp Down Step)",
+      "opcode": 139,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "01",
+      "expected_response": "[0x8B][0x3A][value]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 10,
+      "name": "bcmd_RD_MINVEL (Ramp Down Min Velocity)",
+      "opcode": 140,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "0A",
+      "expected_response": "[0x8C][0x3A][value]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 11,
+      "name": "bcmd_BITRATE (CAN Bit Rate)",
+      "opcode": 141,
+      "form": "query",
+      "parameter_type": "query_3f",
+      "default_value": "",
+      "expected_response": "[0x8D][0x3A][bitrate_code]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 12,
+      "name": "bcmd_FWDSIZE (Forward Size Parameter)",
+      "opcode": 142,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "05",
+      "expected_response": "[0x8E][0x3A][value]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 13,
+      "name": "bcmd_OUTDIAGLED (Diagnostic LED Output)",
+      "opcode": 143,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "02",
+      "expected_response": "[0x8F][0x3A][value]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 14,
+      "name": "bcmd_SJW (CAN SJW Parameter)",
+      "opcode": 144,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "01",
+      "expected_response": "[0x90][0x3A][value]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 15,
+      "name": "bcmd_PRSEG (CAN PRSEG Parameter)",
+      "opcode": 145,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "02",
+      "expected_response": "[0x91][0x3A][value]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 16,
+      "name": "bcmd_SEG1PH (CAN SEG1PH Parameter)",
+      "opcode": 146,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "03",
+      "expected_response": "[0x92][0x3A][value]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 17,
+      "name": "bcmd_SEG2PH (CAN SEG2PH Parameter)",
+      "opcode": 147,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "03",
+      "expected_response": "[0x93][0x3A][value]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 18,
+      "name": "bcmd_BAUDRATE (CAN Baud Rate)",
+      "opcode": 148,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "04",
+      "expected_response": "[0x94][0x3A][value]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 19,
+      "name": "bcmd_EXTINT (Get EXT Interrupt)",
+      "opcode": 150,
+      "form": "query",
+      "parameter_type": "query_3f",
+      "default_value": "",
+      "expected_response": "[0x96][0x3A][0x00][value_hi][value_lo]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 20,
+      "name": "bcmd_EXTINT (Set EXT Interrupt)",
+      "opcode": 150,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "01",
+      "expected_response": "[0x96][0x3A][0x00][value_hi][value_lo]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 21,
+      "name": "bcmd_FACTORYDEF (Restore Factory Defaults)",
+      "opcode": 151,
+      "form": "action",
+      "parameter_type": "none",
+      "default_value": "",
+      "expected_response": "[0x97]['A']",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 22,
+      "name": "bcmd_MSTPEVNT (Motor stop event delay)",
+      "opcode": 152,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "0F",
+      "expected_response": "[0x98][0x3A][value_hi][value_lo]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 23,
+      "name": "bcmd_ZPOSEVNT (Zero Position Event)",
+      "opcode": 153,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "0A",
+      "expected_response": "[0x99][0x3A][value_hi][value_lo]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 24,
+      "name": "bcmd_FIFOSTAT (FIFO Statistics)",
+      "opcode": 154,
+      "form": "query",
+      "parameter_type": "query_3f",
+      "default_value": "",
+      "expected_response": "[0x9A][0x3A][stat_bytes]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 25,
+      "name": "bcmd_AMXPSTAT (AMX Packet Statistic)",
+      "opcode": 155,
+      "form": "query",
+      "parameter_type": "query_3f",
+      "default_value": "",
+      "expected_response": "[0x9B][0x3A][stat_bytes]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 26,
+      "name": "bcmd_HOSTNODENO (Host Node Number)",
+      "opcode": 156,
+      "form": "query",
+      "parameter_type": "query_3f",
+      "default_value": "",
+      "expected_response": "[0x9C][0x3A][value]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 27,
+      "name": "bcmd_FLASHLED (Flash Heart Beat LED)",
+      "opcode": 157,
+      "form": "action",
+      "parameter_type": "none",
+      "default_value": "",
+      "expected_response": "[0x9D]['A']",
+      "manual_verification_prompt": "Did the node LED flash?"
+    },
+    {
+      "legacy_index": 28,
+      "name": "bcmd_LOGFLAGS (Log INT0/INT1 Flags)",
+      "opcode": 158,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "01",
+      "expected_response": "[0x9E][0x3A][value_hi][value_lo]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 29,
+      "name": "bcmd_LOG_NGSW (Log Needle Guide Switch)",
+      "opcode": 159,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "01",
+      "expected_response": "[0x9F][0x3A][value_hi][value_lo]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 30,
+      "name": "bcmd_QEIENCODER (QEI Encoder ISR Counts)",
+      "opcode": 160,
+      "form": "action",
+      "parameter_type": "none",
+      "default_value": "",
+      "expected_response": "[0xA0][count_byte3][count_byte2][count_byte1][count_byte0]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 31,
+      "name": "bcmd_FFmsg (Free Form Message)",
+      "opcode": 161,
+      "form": "raw",
+      "parameter_type": "hex",
+      "default_value": "AA BB CC",
+      "expected_response": "[0xA1][length][message_bytes]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 32,
+      "name": "bcmd_CHARVALUE (Minimum forward/rev PWM)",
+      "opcode": 162,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "01 0F",
+      "expected_response": "[0xA2][0x3A][datatype][value]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 33,
+      "name": "bcmd_RETRY (Retries count)",
+      "opcode": 164,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "03",
+      "expected_response": "[0xA4][0x3A][value]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 34,
+      "name": "bcmd_SWABPARAM (Configure swab parameters)",
+      "opcode": 165,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "01 02",
+      "expected_response": "[0xA5][0x3A][maxRotarySwabOperationTime]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 35,
+      "name": "bcmd_ACCPPARAM (Acceptable error/parameter)",
+      "opcode": 166,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "05",
+      "expected_response": "No active response handler found in source",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 36,
+      "name": "bcmd_RESTARTDLY (Restart delay config)",
+      "opcode": 167,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "0A 00",
+      "expected_response": "[0xA7][0x3A][value_hi][value_lo]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 37,
+      "name": "bcmd_ENABLEOPT (Enable operational options)",
+      "opcode": 168,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "01",
+      "expected_response": "[0xA8][0x3A][value_hi][value_lo]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 38,
+      "name": "bcmd_MINMOVINGPWM (Min PWM during motion)",
+      "opcode": 169,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "1E",
+      "expected_response": "[0xA9][0x3A]['v'][value_b3][value_b2][value_b1][value_b0]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 39,
+      "name": "bcmd_UCHARVALUE (Optional datatype)",
+      "opcode": 170,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "02 55",
+      "expected_response": "[0xAA][0x3A][datatype][value]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 40,
+      "name": "bcmd_HUNTING (Enable hunting/dithering)",
+      "opcode": 195,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "01",
+      "expected_response": "[0xC3]['A'/'N'][nodeconfig]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 41,
+      "name": "bcmd_NODECONFIG (Configure node operating mode)",
+      "opcode": 196,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "01",
+      "expected_response": "[0xC4][0x3A][operation_mode]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 42,
+      "name": "bcmd_SAVEEEPROM (Save settings)",
+      "opcode": 197,
+      "form": "action",
+      "parameter_type": "none",
+      "default_value": "",
+      "expected_response": "[0xC5]['A']",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 43,
+      "name": "bcmd_TOGGLELED (Toggle LED1/LED2)",
+      "opcode": 198,
+      "form": "raw",
+      "parameter_type": "hex",
+      "default_value": "01",
+      "expected_response": "LED toggles",
+      "manual_verification_prompt": "Did you see LED 1 toggle?"
+    },
+    {
+      "legacy_index": 44,
+      "name": "bcmd_RESET (Reset microcontroller)",
+      "opcode": 199,
+      "form": "action",
+      "parameter_type": "hex",
+      "default_value": "21",
+      "expected_response": "[0xC7][0x3A][node_id]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 45,
+      "name": "bcmd_GETVER (Query firmware version)",
+      "opcode": 200,
+      "form": "query",
+      "parameter_type": "query_3f",
+      "default_value": "",
+      "expected_response": "[0xC8][0x3A][V1][V2][V3] V1 = (verMaj<<4)...",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 46,
+      "name": "bcmd_LFLAG (Left sensor flag behavior)",
+      "opcode": 201,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "01",
+      "expected_response": "[0xC9][0x3A][value]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 47,
+      "name": "bcmd_RFLAG (Right sensor flag behavior)",
+      "opcode": 202,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "01",
+      "expected_response": "[0xCA][0x3A][value]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 48,
+      "name": "bcmd_ECHOTEST (Test comm link)",
+      "opcode": 203,
+      "form": "raw",
+      "parameter_type": "hex",
+      "default_value": "AA 55",
+      "expected_response": "Echo: [0xCB][test_data]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 49,
+      "name": "bcmd_BTNP (Push button input)",
+      "opcode": 204,
+      "form": "raw",
+      "parameter_type": "hex",
+      "default_value": "01",
+      "expected_response": "[0xCC]['0'/'1']",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 50,
+      "name": "bcmd_NODETYPE (Get node type)",
+      "opcode": 205,
+      "form": "query",
+      "parameter_type": "query_3f",
+      "default_value": "",
+      "expected_response": "[0xCD][0x3A][node_type]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 51,
+      "name": "bcmd_NODETYPE (Set node type)",
+      "opcode": 205,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "01",
+      "expected_response": "[0xCD][0x3A][node_type]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 52,
+      "name": "bcmd_STT_FAULT (Motor driver fault status)",
+      "opcode": 206,
+      "form": "query",
+      "parameter_type": "none",
+      "default_value": "",
+      "expected_response": "[0xCE][status][fault_flags]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 53,
+      "name": "bcmd_MOTOR_I (Motor current reading)",
+      "opcode": 207,
+      "form": "query",
+      "parameter_type": "hex",
+      "default_value": "00 00",
+      "expected_response": "[0xCF][adc_hi][adc_lo]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 54,
+      "name": "bcmd_FSR1 (FSR1 force sensor reading)",
+      "opcode": 208,
+      "form": "query",
+      "parameter_type": "hex",
+      "default_value": "00 00 01",
+      "expected_response": "[0xD0][adc_hi][adc_lo][state]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 55,
+      "name": "bcmd_FSR2 (FSR2 force sensor reading)",
+      "opcode": 209,
+      "form": "query",
+      "parameter_type": "hex",
+      "default_value": "00 00 01",
+      "expected_response": "[0xD1][adc_hi][adc_lo][state]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 56,
+      "name": "bcmd_INFOR1 (Send node info)",
+      "opcode": 210,
+      "form": "raw",
+      "parameter_type": "hex",
+      "default_value": "01 10 00",
+      "expected_response": "[0xD2][0x3A][N][port_1]...[port_N]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 57,
+      "name": "bcmd_LOGMOTOR_I (Motor current logging rate)",
+      "opcode": 211,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "03 E8",
+      "expected_response": "[0xD3][0x3A][value_hi][value_lo]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 58,
+      "name": "bcmd_LOGFSR1 (FSR1 logging rate)",
+      "opcode": 212,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "03 E8",
+      "expected_response": "[0xD4][0x3A][value_hi][value_lo]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 59,
+      "name": "bcmd_LOGFSR2 (FSR2 logging rate)",
+      "opcode": 213,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "03 E8",
+      "expected_response": "[0xD5][0x3A][value_hi][value_lo]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 60,
+      "name": "bcmd_HMILED (Set RGB for HMI LED)",
+      "opcode": 214,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "01",
+      "expected_response": "[0xD6][0x3A][red][green][blue]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 61,
+      "name": "bcmd_HMILEDRATE (Set RGB LED update rate)",
+      "opcode": 215,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "00 64",
+      "expected_response": "[0xD7][0x3A][red_hi][red_lo][green_hi][green_lo][blue_hi][blue_lo]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 62,
+      "name": "bcmd_INTERRUPT (Get INT0/INT1 switch status)",
+      "opcode": 216,
+      "form": "query",
+      "parameter_type": "none",
+      "default_value": "",
+      "expected_response": "[0xD8][int0_status][int1_status]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 63,
+      "name": "bcmd_STARTMOVE (Initiate motor movement)",
+      "opcode": 219,
+      "form": "action",
+      "parameter_type": "none",
+      "default_value": "",
+      "expected_response": "[0xDB][isSpeedControl]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 64,
+      "name": "bcmd_BRAKEMOTOR (Apply motor braking)",
+      "opcode": 220,
+      "form": "action",
+      "parameter_type": "none",
+      "default_value": "",
+      "expected_response": "Motor brakes",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 65,
+      "name": "bcmd_STOPMOTOR (Stop motor immediately)",
+      "opcode": 221,
+      "form": "action",
+      "parameter_type": "none",
+      "default_value": "",
+      "expected_response": "Motor stops",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 66,
+      "name": "bcmd_NGSWSTATE (Get needle guide force sensor)",
+      "opcode": 222,
+      "form": "query",
+      "parameter_type": "none",
+      "default_value": "",
+      "expected_response": "[0xDE][fsr_value_hi][fsr_value_lo]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 67,
+      "name": "bcmd_NGSW_SET (Set upper/lower FSR limits)",
+      "opcode": 223,
+      "form": "raw",
+      "parameter_type": "hex",
+      "default_value": "01 00 64 03 E8",
+      "expected_response": "[0xDF][sw_id][0x3A][lower_hi][lower_lo][upper_hi][upper_lo]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 68,
+      "name": "bcmd_RD_OFFSET (Target offset for ramp down)",
+      "opcode": 225,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "00 64",
+      "expected_response": "[0xE1][0x3A][value_hi][value_lo]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 69,
+      "name": "bcmd_RD_REGION (Ramp down region %)",
+      "opcode": 226,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "0A",
+      "expected_response": "[0xE2][0x3A][value]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 70,
+      "name": "bcmd_POSCHANGE (Log position change count)",
+      "opcode": 227,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "0A",
+      "expected_response": "[0xE3][0x3A][value_hi][value_lo]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 71,
+      "name": "bcmd_LOGPOS (Set position logging rate)",
+      "opcode": 228,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "00 64",
+      "expected_response": "[0xE4][0x3A][value_hi][value_lo]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 72,
+      "name": "bcmd_LOGDATA (Configure general logging rate)",
+      "opcode": 230,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "03 E8",
+      "expected_response": "[0xE6][0x3A][datatype][value_hi][value_lo]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 73,
+      "name": "bcmd_PID_Gain (Set PID P/I/D gains)",
+      "opcode": 231,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "01 00 A0",
+      "expected_response": "[0xE7][0x3A][gain_type][value_b3][value_b2][value_b1][value_b0]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 74,
+      "name": "bcmd_POSITION (Get current position)",
+      "opcode": 234,
+      "form": "query",
+      "parameter_type": "query_3f",
+      "default_value": "",
+      "expected_response": "[0xEA][0x3A][pos_b3][pos_b2][pos_b1][pos_b0]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 75,
+      "name": "bcmd_POSITION (Set current position)",
+      "opcode": 234,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "00 00 00 00",
+      "expected_response": "[0xEA][0x3A][pos_b3][pos_b2][pos_b1][pos_b0]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 76,
+      "name": "bcmd_TPOSREL (Move relative to position)",
+      "opcode": 235,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "00 00 27 10",
+      "expected_response": "[0xEB]['S'][pos_b3][pos_b2][pos_b1][pos_b0]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 77,
+      "name": "bcmd_ACCERROR (Set tracking error limit)",
+      "opcode": 236,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "00 0F",
+      "expected_response": "[0xEC][0x3A][value_hi][value_lo]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 78,
+      "name": "bcmd_PID_RATE (PID slew rate/delay)",
+      "opcode": 237,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "00 0A",
+      "expected_response": "[0xED][0x3A][value_hi][value_lo]",
+      "manual_verification_prompt": null
+    },
+    {
+      "legacy_index": 79,
+      "name": "bcmd_NVDATASELECT (Select NVRAM data block)",
+      "opcode": 250,
+      "form": "set",
+      "parameter_type": "set_3d",
+      "default_value": "01",
+      "expected_response": "[0xFA][0x3A][block_id]",
+      "manual_verification_prompt": null
+    }
+  ]
+}

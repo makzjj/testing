@@ -1,0 +1,567 @@
+{
+  "schema_version": 1,
+  "source": "HEAD:legacy_reference/firmware_integration_test.py",
+  "mode": "text",
+  "entries": [
+    {
+      "legacy_index": 0,
+      "command": "uartstat?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "uartstat:",
+      "expected_response": "uartstat:ok,err,empty,end"
+    },
+    {
+      "legacy_index": 1,
+      "command": "opmode?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "opmode:",
+      "expected_response": "opmode:<number> (operating mode)"
+    },
+    {
+      "legacy_index": 2,
+      "command": "opmode=",
+      "type": "set",
+      "default_value": "1",
+      "expected_prefix": "opmode:",
+      "expected_response": "opmode:<number> (operating mode)"
+    },
+    {
+      "legacy_index": 3,
+      "command": "spimem?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "spimem:",
+      "expected_response": "spimem:<errStat(0=OK)>,<nvStatus(1=READ|2=SAVE|4=FACTORYDEF)>"
+    },
+    {
+      "legacy_index": 4,
+      "command": "serialno?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "serialno:",
+      "expected_response": "serialno:<text>"
+    },
+    {
+      "legacy_index": 5,
+      "command": "serialno=",
+      "type": "set",
+      "default_value": "SN1002",
+      "expected_prefix": "serialno:",
+      "expected_response": "serialno:<text>"
+    },
+    {
+      "legacy_index": 6,
+      "command": "product?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "product:",
+      "expected_response": "product:<text>"
+    },
+    {
+      "legacy_index": 7,
+      "command": "product=",
+      "type": "set",
+      "default_value": "MonaLisa2.0",
+      "expected_prefix": "product:",
+      "expected_response": "product:<text>"
+    },
+    {
+      "legacy_index": 8,
+      "command": "mfgdate?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "mfgdate:",
+      "expected_response": "mfgdate:<text>"
+    },
+    {
+      "legacy_index": 9,
+      "command": "mfgdate=",
+      "type": "set",
+      "default_value": "20260520",
+      "expected_prefix": "mfgdate:",
+      "expected_response": "mfgdate:<text>"
+    },
+    {
+      "legacy_index": 10,
+      "command": "HWI?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "HWI:",
+      "expected_response": "HWI:<text>"
+    },
+    {
+      "legacy_index": 11,
+      "command": "HWI=",
+      "type": "set",
+      "default_value": "HW01",
+      "expected_prefix": "HWI:",
+      "expected_response": "HWI:<text>"
+    },
+    {
+      "legacy_index": 12,
+      "command": "factorydef!",
+      "type": "action",
+      "default_value": "",
+      "expected_prefix": "factorydef",
+      "expected_response": "factorydef"
+    },
+    {
+      "legacy_index": 13,
+      "command": "save",
+      "type": "action",
+      "default_value": "",
+      "expected_prefix": "save:ACK",
+      "expected_response": "save:ACK"
+    },
+    {
+      "legacy_index": 14,
+      "command": "dltxfifo=",
+      "type": "set",
+      "default_value": "3",
+      "expected_prefix": "dltxfifo",
+      "expected_response": "dltxfifo<fifo_index>:nodeID,overrun,maxused,size"
+    },
+    {
+      "legacy_index": 15,
+      "command": "dlrxfifo=",
+      "type": "set",
+      "default_value": "3",
+      "expected_prefix": "dlrxfifo",
+      "expected_response": "dlrxfifo<fifo_index>:nodeID,overrun,maxused,size"
+    },
+    {
+      "legacy_index": 16,
+      "command": "utxfifo?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "utxfifo",
+      "expected_response": "utxfifo<fifo_index>:overrun,maxused,size"
+    },
+    {
+      "legacy_index": 17,
+      "command": "urxfifo?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "urxfifo",
+      "expected_response": "urxfifo<fifo_index>:overrun,maxused,size"
+    },
+    {
+      "legacy_index": 18,
+      "command": "cmdparser?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "cmdparser",
+      "expected_response": "cmdparser<fifo_index>:overrun,maxused,size"
+    },
+    {
+      "legacy_index": 19,
+      "command": "m_amx?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "m_amx:",
+      "expected_response": "m_amx:pktSizeMax,dataSize"
+    },
+    {
+      "legacy_index": 20,
+      "command": "ver?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "ver:",
+      "expected_response": "ver:Maj.Min.Sub_<build_number>"
+    },
+    {
+      "legacy_index": 21,
+      "command": "i2cPC?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "i2cPC:",
+      "expected_response": "i2cPC:<status> (0=OK)"
+    },
+    {
+      "legacy_index": 22,
+      "command": "i2cMOT?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "i2cMOT:",
+      "expected_response": "i2cMOT:<status> (0=OK)"
+    },
+    {
+      "legacy_index": 23,
+      "command": "i2cUSB?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "i2cUSB:",
+      "expected_response": "i2cUSB:<status> (0=OK)"
+    },
+    {
+      "legacy_index": 24,
+      "command": "i2cMON?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "i2cMON:",
+      "expected_response": "i2cMON:<status> (0=OK)"
+    },
+    {
+      "legacy_index": 25,
+      "command": "viPC?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "viPC:",
+      "expected_response": "viPC:voltage_mV,current_mA"
+    },
+    {
+      "legacy_index": 26,
+      "command": "viMON?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "viMON:",
+      "expected_response": "viMON:voltage_mV,current_mA"
+    },
+    {
+      "legacy_index": 27,
+      "command": "viMOT?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "viMOT:",
+      "expected_response": "viMOT:voltage_mV,current_mA"
+    },
+    {
+      "legacy_index": 28,
+      "command": "viUSB?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "viUSB:",
+      "expected_response": "viUSB:voltage_mV,current_mA"
+    },
+    {
+      "legacy_index": 29,
+      "command": "onRB?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "onRB:",
+      "expected_response": "onRB:<0|1> (0=OFF, 1=ON)"
+    },
+    {
+      "legacy_index": 30,
+      "command": "onRB=",
+      "type": "set",
+      "default_value": "1",
+      "expected_prefix": "onRB:",
+      "expected_response": "onRB:<0|1>"
+    },
+    {
+      "legacy_index": 31,
+      "command": "onMON?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "onMON:",
+      "expected_response": "onMON:<0|1> (0=OFF, 1=ON)"
+    },
+    {
+      "legacy_index": 32,
+      "command": "onMON=",
+      "type": "set",
+      "default_value": "1",
+      "expected_prefix": "onMON:",
+      "expected_response": "onMON:<0|1>"
+    },
+    {
+      "legacy_index": 33,
+      "command": "onUSB?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "onUSB:",
+      "expected_response": "onUSB:<0|1> (0=OFF, 1=ON)"
+    },
+    {
+      "legacy_index": 34,
+      "command": "onUSB=",
+      "type": "set",
+      "default_value": "1",
+      "expected_prefix": "onUSB:",
+      "expected_response": "onUSB:<0|1>"
+    },
+    {
+      "legacy_index": 35,
+      "command": "onPC?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "onPC:",
+      "expected_response": "onPC:<0|1> (0=OFF, 1=ON)"
+    },
+    {
+      "legacy_index": 36,
+      "command": "onPC=",
+      "type": "set",
+      "default_value": "1",
+      "expected_prefix": "onPC:",
+      "expected_response": "onPC:<0|1>"
+    },
+    {
+      "legacy_index": 37,
+      "command": "onExtUSB?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "onExtUSB:",
+      "expected_response": "onExtUSB:<0|1> (0=OFF, 1=ON)"
+    },
+    {
+      "legacy_index": 38,
+      "command": "onExtUSB=",
+      "type": "set",
+      "default_value": "1",
+      "expected_prefix": "onExtUSB:",
+      "expected_response": "onExtUSB:<0|1>"
+    },
+    {
+      "legacy_index": 39,
+      "command": "onSLPWR?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "onSLPWR:",
+      "expected_response": "onSLPWR:<0|1> (0=OFF, 1=ON)"
+    },
+    {
+      "legacy_index": 40,
+      "command": "onSLPWR=",
+      "type": "set",
+      "default_value": "1",
+      "expected_prefix": "onSLPWR:",
+      "expected_response": "onSLPWR:<0|1>"
+    },
+    {
+      "legacy_index": 41,
+      "command": "sysbtn?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "sysbtn:",
+      "expected_response": "sysbtn:0"
+    },
+    {
+      "legacy_index": 42,
+      "command": "keybtn?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "keybtn:",
+      "expected_response": "keybtn:0"
+    },
+    {
+      "legacy_index": 43,
+      "command": "emobtn?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "emobtn:",
+      "expected_response": "emobtn:<number> (button state)"
+    },
+    {
+      "legacy_index": 44,
+      "command": "ONbtndc?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "ONbtndc:",
+      "expected_response": "ONbtndc:<0-100> (duty cycle %)"
+    },
+    {
+      "legacy_index": 45,
+      "command": "ONbtndc=",
+      "type": "set",
+      "default_value": "50",
+      "expected_prefix": "ONbtndc:",
+      "expected_response": "ONbtndc:<number>"
+    },
+    {
+      "legacy_index": 46,
+      "command": "SWReady?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "SWReady:",
+      "expected_response": "SWReady:<0|1|2> (0=NotReady, 1=Ready, 2=Active)"
+    },
+    {
+      "legacy_index": 47,
+      "command": "SWReady=",
+      "type": "set",
+      "default_value": "2",
+      "expected_prefix": "SWReady:",
+      "expected_response": "SWReady:<number>"
+    },
+    {
+      "legacy_index": 48,
+      "command": "commandshutdown=",
+      "type": "set",
+      "default_value": "0",
+      "expected_prefix": "commandshutdown:",
+      "expected_response": "commandshutdown:<number>"
+    },
+    {
+      "legacy_index": 49,
+      "command": "shdnthreshold?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "shdnthreshold:",
+      "expected_response": "shdnthreshold:<number> (milliamps)"
+    },
+    {
+      "legacy_index": 50,
+      "command": "shdnthreshold=",
+      "type": "set",
+      "default_value": "200",
+      "expected_prefix": "shdnthreshold:",
+      "expected_response": "shdnthreshold:<number>"
+    },
+    {
+      "legacy_index": 51,
+      "command": "shdnsampleperiod?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "shdnsampleperiod:",
+      "expected_response": "shdnsampleperiod:<number> (milliseconds)"
+    },
+    {
+      "legacy_index": 52,
+      "command": "shdnsampleperiod=",
+      "type": "set",
+      "default_value": "4000",
+      "expected_prefix": "shdnsampleperiod:",
+      "expected_response": "shdnsampleperiod:<number>"
+    },
+    {
+      "legacy_index": 53,
+      "command": "ONbtnrt?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "ONbtnrt:",
+      "expected_response": "ONbtnrt:<number> (milliseconds)"
+    },
+    {
+      "legacy_index": 54,
+      "command": "ONbtnrt=",
+      "type": "set",
+      "default_value": "100",
+      "expected_prefix": "ONbtnrt:",
+      "expected_response": "ONbtnrt:<number>"
+    },
+    {
+      "legacy_index": 55,
+      "command": "autoSWReady?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "autoSWReady:",
+      "expected_response": "autoSWReady:<number> (seconds)"
+    },
+    {
+      "legacy_index": 56,
+      "command": "autoSWReady=",
+      "type": "set",
+      "default_value": "0",
+      "expected_prefix": "autoSWReady:",
+      "expected_response": "autoSWReady:<number>"
+    },
+    {
+      "legacy_index": 57,
+      "command": "logEMObtn?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "logEMObtn:",
+      "expected_response": "logEMObtn:<number> (milliseconds)"
+    },
+    {
+      "legacy_index": 58,
+      "command": "logEMObtn=",
+      "type": "set",
+      "default_value": "500",
+      "expected_prefix": "logEMObtn:",
+      "expected_response": "logEMObtn:<number>"
+    },
+    {
+      "legacy_index": 59,
+      "command": "logPC?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "logPC:",
+      "expected_response": "logPC:<number> (log rate ms)"
+    },
+    {
+      "legacy_index": 60,
+      "command": "logPC=",
+      "type": "set",
+      "default_value": "1000",
+      "expected_prefix": "logPC:",
+      "expected_response": "logPC:<number>"
+    },
+    {
+      "legacy_index": 61,
+      "command": "logUSB?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "logUSB:",
+      "expected_response": "logUSB:<number> (log rate ms)"
+    },
+    {
+      "legacy_index": 62,
+      "command": "logUSB=",
+      "type": "set",
+      "default_value": "1000",
+      "expected_prefix": "logUSB:",
+      "expected_response": "logUSB:<number>"
+    },
+    {
+      "legacy_index": 63,
+      "command": "logMOT?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "logMOT:",
+      "expected_response": "logMOT:<number> (log rate ms)"
+    },
+    {
+      "legacy_index": 64,
+      "command": "logMOT=",
+      "type": "set",
+      "default_value": "1000",
+      "expected_prefix": "logMOT:",
+      "expected_response": "logMOT:<number>"
+    },
+    {
+      "legacy_index": 65,
+      "command": "logMON?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "logMON:",
+      "expected_response": "logMON:<number> (log rate ms)"
+    },
+    {
+      "legacy_index": 66,
+      "command": "logMON=",
+      "type": "set",
+      "default_value": "1000",
+      "expected_prefix": "logMON:",
+      "expected_response": "logMON:<number>"
+    },
+    {
+      "legacy_index": 67,
+      "command": "diagLED?",
+      "type": "query",
+      "default_value": "",
+      "expected_prefix": "diagLED:",
+      "expected_response": "diagLED:<number> (LED state)"
+    },
+    {
+      "legacy_index": 68,
+      "command": "diagLED=",
+      "type": "set",
+      "default_value": "2",
+      "expected_prefix": "diagLED:",
+      "expected_response": "diagLED:<number>"
+    },
+    {
+      "legacy_index": 69,
+      "command": "reset!",
+      "type": "action",
+      "default_value": "",
+      "expected_prefix": "reset",
+      "expected_response": "(no response - MCU reboots)"
+    }
+  ]
+}

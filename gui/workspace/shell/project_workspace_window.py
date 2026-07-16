@@ -7,6 +7,7 @@ from PyQt6.QtGui import QFont, QIcon
 from PyQt6.QtWidgets import QHBoxLayout, QMainWindow, QMessageBox, QVBoxLayout, QWidget
 
 from myconfig.project_models import ProjectDefinition
+from services.node_motion_calibration_store import NodeMotionCalibrationStore
 
 from ..bridges import WorkspaceRuntimeBridge
 from ..constants import (
@@ -29,10 +30,17 @@ from .workspace_page_stack import WorkspacePageStack
 class ProjectWorkspaceWindow(QMainWindow):
     """Shared project workspace shell introduced in Phase 2."""
 
-    def __init__(self, project_definition: ProjectDefinition) -> None:
+    def __init__(
+        self,
+        project_definition: ProjectDefinition,
+        node_motion_calibration_store: NodeMotionCalibrationStore | None = None,
+    ) -> None:
         super().__init__()
         self._project_definition = project_definition
-        self._bridge = WorkspaceRuntimeBridge(project_definition)
+        self._bridge = WorkspaceRuntimeBridge(
+            project_definition,
+            node_motion_calibration_store=node_motion_calibration_store,
+        )
         self._navigation_items = build_navigation_items(project_definition)
         self._pages: dict[str, object] = {}
         self._current_route_id = self._resolve_available_route(ROUTE_PRODUCTION)

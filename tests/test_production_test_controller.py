@@ -49,6 +49,7 @@ from gui.workspace.pages.production_parameter_controller import (
 from services.communication_log_store import CommunicationLogStore
 from data.binary_cmd_builders import build_getpos, build_hunting_timeout, build_run, build_stopmotor, build_tpos
 from data.binary_cmd_parser import decode_nodeconfig_motion_polarity
+from services.node_motion_calibration_store import NodeMotionCalibrationStore
 from services.node_sensor_profile import NodeSensorProfile
 from services.node_sensor_profile import NodeSensorProfile
 from myconfig.constants import COMMANDS
@@ -106,6 +107,7 @@ class _FakeBridge:
     def __init__(self, runtime_window: _FakeRuntimeWindow | None) -> None:
         self.runtime_window = runtime_window
         self.create_requests = 0
+        self.node_motion_calibration_store = NodeMotionCalibrationStore.load_default()
 
     def get_runtime_window(self, *, create_if_missing: bool = False):
         if create_if_missing:

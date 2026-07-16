@@ -4,7 +4,7 @@ import pytest
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
-from data.binary_cmd_builders import build_nodeconfig_query_payload
+from data.binary_cmd_builders import build_hunting_timeout, build_nodeconfig_query_payload
 from gui.workspace.pages.single_axis_functional_popup import SingleAxisFunctionalPopup
 
 
@@ -152,7 +152,9 @@ def test_connected_backend_sends_and_receives(monkeypatch):
     # Should be running in live mode
     assert popup._is_running is True
     text = popup.status_block.toPlainText()
-    assert f"Using live transport for Node {node_id}" in text
+    assert f"Functional test started for Node {node_id}" in text
+    assert "TX Node" not in text
+    assert "RX Node" not in text
 
     # The controller will request a HUNTING command first; ensure that went to backend
     assert backend.sent, "Expected at least one command to be sent via backend"
@@ -165,13 +167,14 @@ def test_connected_backend_sends_and_receives(monkeypatch):
     _emit_can(runtime_window, node_id, 0x81, [ord('I')])
     _emit_can(runtime_window, node_id, 0x82, [0x00, 0x00, 0x00, 0x10])
 
-    # Check status logs include RX labels
+    # Operator-facing popup log stays semantic and omits raw transport labels.
     t = popup.status_block.toPlainText()
-    assert f"RX Node {node_id}: 81 4C - Left sensor has been cut" in t
-    assert f"RX Node {node_id}: 82 00 00 00 10 - Position 16" in t
-
-    # Ensure TX logs include node
-    assert any(f"TX Node {node_id}:" in line for line in t.splitlines())
+    assert "Home sensor: L | Opposite sensor: R" in t
+    assert "Home position initialized" in t
+    assert "Home position verified: 16 counts" in t
+    assert f"RX Node {node_id}: 81 4C - Left sensor has been cut" not in t
+    assert f"RX Node {node_id}: 82 00 00 00 10 - Position 16" not in t
+    assert f"TX Node {node_id}:" not in t
 
 
 def test_adapter_forwards_nodeconfig_and_controller_proceeds(monkeypatch):
@@ -193,15 +196,12 @@ def test_adapter_forwards_nodeconfig_and_controller_proceeds(monkeypatch):
         "params": [0x3A, 0x00],
     })
 
-    # The controller should log NODECONFIG received and proceed to HUNTING
+    # The controller should translate NODECONFIG into semantic status and proceed to homing.
     text = popup.status_block.toPlainText()
-    assert f"RX Node {node_id}: C4 3A 00" in text
-    assert "NODECONFIG received: 0x00" in text
-    assert "HUNTING" in text
-    lines = text.splitlines()
-    rx_idx = next(i for i, line in enumerate(lines) if f"RX Node {node_id}: C4 3A 00" in line)
-    tx_idx = next(i for i, line in enumerate(lines[rx_idx + 1 :], start=rx_idx + 1) if f"TX Node {node_id}:" in line)
-    assert rx_idx < tx_idx
+    assert f"RX Node {node_id}: C4 3A 00" not in text
+    assert "Home sensor: L | Opposite sensor: R" in text
+    assert "Homing motor" in text
+    assert backend.sent[1] == (node_id, build_hunting_timeout(10_000))
 
 
 def test_live_stop_button_sends_dd_and_reenables_controls(monkeypatch):
@@ -226,8 +226,9 @@ def test_live_stop_button_sends_dd_and_reenables_controls(monkeypatch):
     assert not popup.stop_button.isEnabled()
     assert backend.sent[-1] == (node_id, [0xDD])
     text = popup.status_block.toPlainText()
-    assert f"TX Node {node_id}: DD" in text
-    assert "Functional test ABORTED by user." in text
+    assert f"TX Node {node_id}: DD" not in text
+    assert "Functional test aborted by user" in text
+    assert "Functional test ABORTED by user." not in text
 
 
 def test_no_out_of_state_ignore_log_while_waiting_for_nodeconfig(monkeypatch):
@@ -250,7 +251,7 @@ def test_no_out_of_state_ignore_log_while_waiting_for_nodeconfig(monkeypatch):
     })
 
     text = popup.status_block.toPlainText()
-    assert "Querying NODECONFIG" in text
+    assert "Reading node configuration" in text
     assert "Ignoring out-of-state packet while waiting for RUN ACK" not in text
 
 
@@ -295,7 +296,8 @@ def test_stale_run_ack_with_wrong_velocity_is_dropped(monkeypatch):
 
     _emit_can(runtime_window, node_id, 0x88, [0x53, 0x00, 0xBE])
     assert popup.controller.current_wait_for == "right_sensor"
-    assert "WAIT_FOR_RIGHT_SENSOR" in popup.status_block.toPlainText()
+    assert "Moving from L to R" in popup.status_block.toPlainText()
+    assert "WAIT_FOR_RIGHT_SENSOR" not in popup.status_block.toPlainText()
 
 
 def test_stale_same_node_getpos_and_middle_tpos_are_dropped_while_waiting_for_sensor(monkeypatch):
@@ -347,8 +349,8 @@ def test_wrong_sensor_during_active_movement_wait_still_reaches_controller_and_f
     assert popup._is_running is False
     assert backend.sent[-1] == (node_id, [0xDD])
     text = popup.status_block.toPlainText()
-    assert f"RX Node {node_id}: 81 4C - Left sensor has been cut" in text
-    assert "FAILED" in text or "Functional test FAILED" in text
+    assert f"RX Node {node_id}: 81 4C - Left sensor has been cut" not in text
+    assert "Functional test FAILED: Unexpected sensor event during movement" in text
 
 
 def test_live_run_away_from_tpos_cut_starts_release_watch_and_sends_d8(monkeypatch):
@@ -387,4 +389,4 @@ def test_live_run_away_from_tpos_cut_starts_release_watch_and_sends_d8(monkeypat
     run_index = backend.sent.index((node_id, [0x88, 0xFF, 0x42]))
     d8_index = backend.sent.index((node_id, [0xD8, 0x3F]))
     assert run_index < d8_index
-    assert "[ReleaseWatch] Started for Node 9 sensor L" in popup.status_block.toPlainText()
+    assert "[ReleaseWatch] Started for Node 9 sensor L" not in popup.status_block.toPlainText()

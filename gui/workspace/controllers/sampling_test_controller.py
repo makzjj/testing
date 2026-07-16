@@ -8,6 +8,7 @@ import time
 
 from data.binary_cmd_builders import build_getpos, build_run, build_stopmotor, build_tpos, build_vel
 from data.binary_cmd_parser import decode_command
+from gui.workspace.models.node_motion_calibration import NodeMotionCalibration
 from services.ipqc_excel_adapter import IpqcExcelAdapter, SamplingWorkbookLayout
 from services.motion_measurements import (
     SAFE_PARK_TARGET_COUNTS,
@@ -17,6 +18,7 @@ from services.motion_measurements import (
     calculate_return_range,
     calculate_safe_park_target,
 )
+from services.node_motion_calibration_store import NodeMotionCalibrationStore
 from services.node_motion_polarity import NodeMotionPolarity
 from services.node_sensor_profile import NodeSensorProfile
 
@@ -41,7 +43,21 @@ class SamplingMeasurementResult:
     r_pos: int | None = None
     l_pos: int | None = None
     return_error: int | None = None
+    expected_range_counts: float | None = None
+    error_counts: float | None = None
+    error_units: float | None = None
+    error_unit: str | None = None
     workbook_cells: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def error_classification(self) -> str | None:
+        if self.error_counts is None:
+            return None
+        if self.error_counts > 0:
+            return "OVERSHOOT"
+        if self.error_counts < 0:
+            return "UNDERSHOOT"
+        return "ON_REFERENCE"
 
 
 @dataclass(frozen=True)
@@ -106,10 +122,13 @@ class SamplingTestController:
         config: SamplingTestConfig | None = None,
         *,
         clock: Callable[[], float] | None = None,
+        node_motion_calibration_store: NodeMotionCalibrationStore | None = None,
     ) -> None:
         self._adapter = workbook_adapter
         self._config = config or SamplingTestConfig()
         self._clock = clock or time.monotonic
+        self._calibration_store = node_motion_calibration_store
+        self._active_calibration: NodeMotionCalibration | None = None
         self._motion_polarity: NodeMotionPolarity | None = None
         self._sensor_profile: NodeSensorProfile | None = None
         self._node_id: int | None = None
@@ -140,6 +159,7 @@ class SamplingTestController:
         self._allow_departure_duplicate: bool = False
         self._pending_getpos_after_sensor: str | None = None
         self._middle_target: int | None = None
+        self._completed_results: list[SamplingMeasurementResult] = []
         self._latest_result: SamplingMeasurementResult | None = None
         self._stop_command_sent = False
         self._resume_context: SamplingResumeContext | None = None
@@ -154,6 +174,10 @@ class SamplingTestController:
     @property
     def last_terminal_result(self) -> SamplingTerminalResult | None:
         return self._latest_terminal_result
+
+    @property
+    def completed_results(self) -> tuple[SamplingMeasurementResult, ...]:
+        return tuple(self._completed_results)
 
     def is_active(self) -> bool:
         return self._running
@@ -420,6 +444,7 @@ class SamplingTestController:
             self.sampling_failed(reason)
             return False
 
+        self._active_calibration = None
         self._node_id = int(node_id)
         self._node_name = node_name
         self._base_group = base_group or self._adapter.active_sheet_group
@@ -436,6 +461,10 @@ class SamplingTestController:
                 resumable=False,
             )
             self.sampling_failed(reason)
+            return False
+
+        calibration = self._resolve_motion_calibration(self._node_id, self._node_name)
+        if calibration is None:
             return False
 
         try:
@@ -455,6 +484,7 @@ class SamplingTestController:
             self.sampling_failed(reason)
             return False
 
+        self._active_calibration = calibration
         run_pwm_values = tuple(int(value) for value in (pwm_values if pwm_values is not None else self._config.pwm_values))
         if not run_pwm_values:
             reason = "No PWM values are configured for Sampling."
@@ -544,6 +574,11 @@ class SamplingTestController:
             self.log_message("[Sampling] Resume unavailable: select the original node sensor profile.")
             return False
 
+        calibration = self._resolve_motion_calibration(context.node_id, context.node_name)
+        if calibration is None:
+            return False
+
+        self._active_calibration = calibration
         self._begin_sampling_run(
             node_id=context.node_id,
             node_name=context.node_name,
@@ -637,7 +672,7 @@ class SamplingTestController:
             self._handle_sys_mode(decoded_value)
             return
 
-    def _reset_runtime_state(self) -> None:
+    def _reset_runtime_state(self, *, clear_results: bool = False) -> None:
         self._wait_for = None
         self._expected_response_description = ""
         self._current_pwm_index = -1
@@ -657,6 +692,8 @@ class SamplingTestController:
         self._allow_departure_duplicate = False
         self._pending_getpos_after_sensor = None
         self._middle_target = None
+        if clear_results:
+            self._completed_results = []
         self._latest_result = None
         self._total_measurements = len(self._run_pwm_values) * self._run_samples_per_pwm * 2
         self._stop_command_sent = False
@@ -677,6 +714,38 @@ class SamplingTestController:
             self._fail_with_stop("Unsupported or missing node sensor profile. Motion blocked for safety.", resumable=False)
             return None
         return self._sensor_profile
+
+    def _resolve_motion_calibration(self, node_id: int, node_name: str | None) -> NodeMotionCalibration | None:
+        if self._calibration_store is None:
+            reason = "Node motion calibration store is unavailable."
+            self.log_message(f"[Sampling] {reason}")
+            self._latest_terminal_result = self._build_terminal_result(
+                terminal_state=self.S_FAILED,
+                final_status="FAILED",
+                status_text="FAILED",
+                reason=reason,
+                failure_context="-",
+                resume_text="Unavailable - sampling requires a fresh start.",
+                resumable=False,
+            )
+            self.sampling_failed(reason)
+            return None
+        try:
+            return self._calibration_store.require(node_id, node_name=node_name)
+        except LookupError as exc:
+            reason = str(exc)
+            self.log_message(f"[Sampling] {reason}")
+            self._latest_terminal_result = self._build_terminal_result(
+                terminal_state=self.S_FAILED,
+                final_status="FAILED",
+                status_text="FAILED",
+                reason=reason,
+                failure_context="-",
+                resume_text="Unavailable - sampling requires a fresh start.",
+                resumable=False,
+            )
+            self.sampling_failed(reason)
+            return None
 
     @property
     def _opposite_sensor(self) -> str:
@@ -736,7 +805,7 @@ class SamplingTestController:
         if resume_context is not None:
             self._run_pwm_values = tuple(resume_context.pwm_values)
             self._run_samples_per_pwm = int(resume_context.samples_per_direction)
-        self._reset_runtime_state()
+        self._reset_runtime_state(clear_results=resume_context is None)
         self._running = True
         self._state = self.S_HOME_WAIT_VEL_ACK
         self.state_changed(self._state)
@@ -1158,6 +1227,14 @@ class SamplingTestController:
             range_value = calculate_return_range(self._current_r_pos, self._current_l_pos)
             return_error = calculate_return_error(self._start_l_pos, self._current_l_pos)
 
+        calibration = self._active_calibration
+        if calibration is None:
+            self._fail_with_stop("No motion calibration is available for the active Sampling run.", resumable=False)
+            return
+
+        expected_range_counts = calibration.expected_range_counts
+        error_counts = float(range_value) - float(expected_range_counts)
+        error_units = error_counts / abs(float(calibration.counts_per_unit))
         speed = float(range_value) / float(elapsed_seconds)
         rounded_elapsed_seconds = round(float(elapsed_seconds), 3)
         result = SamplingMeasurementResult(
@@ -1171,6 +1248,10 @@ class SamplingTestController:
             r_pos=self._current_r_pos,
             l_pos=self._current_l_pos,
             return_error=return_error,
+            expected_range_counts=expected_range_counts,
+            error_counts=error_counts,
+            error_units=error_units,
+            error_unit=calibration.unit,
         )
 
         try:
@@ -1216,9 +1297,14 @@ class SamplingTestController:
             r_pos=result.r_pos,
             l_pos=result.l_pos,
             return_error=result.return_error,
+            expected_range_counts=result.expected_range_counts,
+            error_counts=result.error_counts,
+            error_units=result.error_units,
+            error_unit=result.error_unit,
             workbook_cells={"Range": range_cell, "Speed": speed_cell, "Time": time_cell},
         )
         self._latest_result = result
+        self._completed_results.append(result)
         self.latest_measurement_changed(range_value, elapsed_seconds, speed)
         self.measurement_completed(result)
         self.latest_workbook_cell_written(time_cell)

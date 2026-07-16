@@ -28,7 +28,7 @@ from PyQt6.QtWidgets import (
 
 from ..bridges import WorkspaceRuntimeBridge
 from ..dialogs.communication_log_dialog import CommunicationLogDialog
-from ..dialogs import ProductionMetadataDialog
+from ..dialogs import ProductionMetadataDialog, SamplingErrorPlotDialog
 from ..dialogs.sampling_test_popup import SamplingTestPopup
 from ..models import SessionState
 from ..widgets import DetailListWidget, LabeledControl, PanelFrame, SimpleTableWidget
@@ -132,8 +132,13 @@ class ProductionPage(BaseWorkspacePage):
         self._last_status_entry = ""
         self._single_axis_popup: SingleAxisFunctionalPopup | None = None
         self._sampling_popup: SamplingTestPopup | None = None
+        self._sampling_error_plot_dialog: SamplingErrorPlotDialog | None = None
         self._single_axis_passed = False
-        self._sampling_controller = SamplingTestController(self._ipqc_excel_adapter, SamplingTestConfig())
+        self._sampling_controller = SamplingTestController(
+            self._ipqc_excel_adapter,
+            SamplingTestConfig(),
+            node_motion_calibration_store=self._bridge.node_motion_calibration_store,
+        )
         self._sampling_transport_adapter = SamplingTransportAdapter(self._sampling_controller)
         self._sampling_motion_polarity: NodeMotionPolarity | None = None
         self._sampling_sensor_profile: NodeSensorProfile | None = None
@@ -752,6 +757,7 @@ class ProductionPage(BaseWorkspacePage):
         if self._sampling_popup is not None:
             self._sampling_popup.set_final_status("RUNNING")
             self._sampling_popup.set_stop_available(True)
+        self._refresh_sampling_error_plot()
         self._refresh_sampling_action_states()
 
     def _handle_sampling_stop_requested(self) -> None:
@@ -763,9 +769,53 @@ class ProductionPage(BaseWorkspacePage):
             self._sampling_popup = SamplingTestPopup(self)
             self._sampling_popup.start_requested.connect(self._handle_sampling_popup_start_requested)
             self._sampling_popup.resume_requested.connect(self._handle_sampling_popup_resume_requested)
+            self._sampling_popup.error_plot_requested.connect(self._handle_sampling_error_plot_requested)
             self._sampling_popup.stop_requested.connect(self._handle_sampling_stop_requested)
         self._refresh_sampling_popup_state()
         return self._sampling_popup
+
+    def _handle_sampling_error_plot_requested(self) -> None:
+        if self._sampling_error_plot_dialog is None:
+            self._sampling_error_plot_dialog = SamplingErrorPlotDialog(
+                results_provider=self._current_sampling_plot_results,
+                parent=self,
+            )
+            self._sampling_error_plot_dialog.destroyed.connect(self._handle_sampling_error_plot_destroyed)
+        self._refresh_sampling_error_plot()
+        self._sampling_error_plot_dialog.show()
+        self._sampling_error_plot_dialog.raise_()
+        self._sampling_error_plot_dialog.activateWindow()
+
+    def _handle_sampling_error_plot_destroyed(self, *_args) -> None:
+        self._sampling_error_plot_dialog = None
+
+    def _refresh_sampling_error_plot(self) -> None:
+        if self._sampling_error_plot_dialog is not None:
+            self._sampling_error_plot_dialog.set_results(self._current_sampling_plot_results())
+
+    def _current_sampling_plot_results(self):
+        results = self._sampling_controller.completed_results
+        if not results:
+            return ()
+        if self._sampling_results_match_current_context():
+            return results
+        return ()
+
+    def _sampling_results_match_current_context(self) -> bool:
+        controller_node_id = self._sampling_controller.node_id
+        controller_base_group = self._sampling_controller.base_group
+        if controller_node_id is None or not controller_base_group:
+            return False
+        try:
+            node_id, _node_name = self.test_control_section.selected_node()
+        except RuntimeError:
+            node_id = self._sampling_session.node_id if self._sampling_session is not None else None
+        active_group = self._current_sampling_base_group()
+        return (
+            node_id is not None
+            and int(node_id) == int(controller_node_id)
+            and str(active_group or "") == str(controller_base_group)
+        )
 
     def _refresh_sampling_popup_state(self) -> None:
         if self._sampling_popup is None:
@@ -808,6 +858,11 @@ class ProductionPage(BaseWorkspacePage):
             popup.set_resume_available(resume_enabled, resume_reason)
             popup.set_resume_hint(resume_reason)
             popup.set_stop_available(False)
+        current_results = self._current_sampling_plot_results()
+        if current_results:
+            popup.set_latest_error_result(current_results[-1])
+        else:
+            popup.clear_latest_error()
 
     def _attach_sampling_runtime_window(self, runtime_window) -> None:
         self._sampling_transport_adapter.attach_runtime_window(runtime_window)
@@ -871,31 +926,32 @@ class ProductionPage(BaseWorkspacePage):
                 self._sampling_popup.set_latest_workbook_cell(cell_ref)
 
     def _handle_sampling_measurement_completed(self, result: object) -> None:
-        if self._sampling_popup is None:
-            return
-        cells = getattr(result, "workbook_cells", None)
-        cell_summary_text = "-"
-        if isinstance(cells, dict) and cells:
-            ordered_cells = [f"{name}={cells[name]}" for name in ("Range", "Speed", "Time") if name in cells]
-            if ordered_cells:
-                cell_summary_text = ", ".join(ordered_cells)
+        if self._sampling_popup is not None:
+            cells = getattr(result, "workbook_cells", None)
+            cell_summary_text = "-"
+            if isinstance(cells, dict) and cells:
+                ordered_cells = [f"{name}={cells[name]}" for name in ("Range", "Speed", "Time") if name in cells]
+                if ordered_cells:
+                    cell_summary_text = ", ".join(ordered_cells)
+                else:
+                    cell_summary_text = ", ".join(str(value) for value in cells.values())
+            self._sampling_popup.set_latest_workbook_cell(cell_summary_text)
+            self._sampling_popup.set_latest_error_result(result)
+            direction = str(getattr(result, "direction", "?")).strip()
+            if direction == "+":
+                direction_text = "+"
+            elif direction == "-":
+                direction_text = "-"
             else:
-                cell_summary_text = ", ".join(str(value) for value in cells.values())
-        self._sampling_popup.set_latest_workbook_cell(cell_summary_text)
-        direction = str(getattr(result, "direction", "?")).strip()
-        if direction == "+":
-            direction_text = "+"
-        elif direction == "-":
-            direction_text = "-"
-        else:
-            direction_text = direction
-        message = (
-            f"Sample {getattr(result, 'sample_index', '?')}/{self._sampling_controller.samples_per_direction} "
-            f"{direction_text} complete | range={getattr(result, 'range_value', '?')} | "
-            f"time={float(getattr(result, 'elapsed_seconds', 0.0)):.3f}s | "
-            f"speed={float(getattr(result, 'speed', 0.0)):.2f}"
-        )
-        self._sampling_popup.append_operator_log(message)
+                direction_text = direction
+            message = (
+                f"Sample {getattr(result, 'sample_index', '?')}/{self._sampling_controller.samples_per_direction} "
+                f"{direction_text} complete | range={getattr(result, 'range_value', '?')} | "
+                f"time={float(getattr(result, 'elapsed_seconds', 0.0)):.3f}s | "
+                f"speed={float(getattr(result, 'speed', 0.0)):.2f}"
+            )
+            self._sampling_popup.append_operator_log(message)
+        self._refresh_sampling_error_plot()
 
     def _handle_sampling_completed(self) -> None:
         self._detach_sampling_runtime_window()
@@ -1552,10 +1608,12 @@ class ProductionPage(BaseWorkspacePage):
             self._sampling_popup.set_status_text("Idle")
             self._sampling_popup.set_final_status("IDLE")
             self._sampling_popup.clear_failure_details()
+            self._sampling_popup.clear_latest_error()
             self._sampling_popup.set_resume_available(False, "Resume unavailable: Sampling has not started.")
             self._sampling_popup.set_resume_hint("Resume unavailable: Sampling has not started.")
             self._sampling_popup.set_stop_available(False)
             self._sampling_popup.set_sampling_configuration_enabled(True)
+        self._refresh_sampling_error_plot()
         self._refresh_sampling_action_states()
 
     def _sync_production_context(self, *, log_reason: str | None = None) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -25,6 +26,7 @@ class SamplingTestPopup(QDialog):
 
     start_requested = pyqtSignal()
     resume_requested = pyqtSignal()
+    error_plot_requested = pyqtSignal()
     stop_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -43,15 +45,17 @@ class SamplingTestPopup(QDialog):
         self._current_total_samples = 32
 
         root_layout = QVBoxLayout(self)
-        root_layout.setContentsMargins(10, 10, 10, 10)
+        root_layout.setContentsMargins(8, 8, 8, 8)
         root_layout.setSpacing(8)
+        measurement_label_width = 160
 
         summary_frame, summary_body = self._build_card("Sampling Summary")
         summary_row = QHBoxLayout()
         summary_row.setContentsMargins(0, 0, 0, 0)
-        summary_row.setSpacing(10)
+        summary_row.setSpacing(8)
 
         left_summary = QWidget()
+        left_summary.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         left_summary_layout = QGridLayout(left_summary)
         left_summary_layout.setContentsMargins(0, 0, 0, 0)
         left_summary_layout.setHorizontalSpacing(8)
@@ -60,26 +64,31 @@ class SamplingTestPopup(QDialog):
         self.selected_node_value = self._make_value_label("-")
         self.state_value = self._make_value_label("IDLE")
         self.final_status_value = self._make_value_label("IDLE")
-
-        left_summary_layout.addWidget(QLabel("Selected Node"), 0, 0)
-        left_summary_layout.addWidget(self.selected_node_value, 0, 1)
-        left_summary_layout.addWidget(QLabel("Current State"), 1, 0)
-        left_summary_layout.addWidget(self.state_value, 1, 1)
-        left_summary_layout.addWidget(QLabel("Final Status"), 2, 0)
-        left_summary_layout.addWidget(self.final_status_value, 2, 1)
-        left_summary_layout.setColumnStretch(1, 1)
-
-        middle_summary = QWidget()
-        middle_summary_layout = QGridLayout(middle_summary)
-        middle_summary_layout.setContentsMargins(0, 0, 0, 0)
-        middle_summary_layout.setHorizontalSpacing(8)
-        middle_summary_layout.setVerticalSpacing(6)
-
         self.sampling_sheet_value = self._make_value_label("-")
         self.status_value = self._make_value_label("Idle")
         self.reason_value = self._make_value_label("-")
         self.failure_context_value = self._make_value_label("-")
         self.resume_hint_value = self._make_value_label("Resume unavailable: Sampling has not started.")
+
+        left_summary_layout.addWidget(QLabel("Selected Node"), 0, 0)
+        left_summary_layout.addWidget(self.selected_node_value, 0, 1)
+        left_summary_layout.addWidget(QLabel("Sampling Sheet"), 1, 0)
+        left_summary_layout.addWidget(self.sampling_sheet_value, 1, 1)
+        left_summary_layout.addWidget(QLabel("Status"), 2, 0)
+        left_summary_layout.addWidget(self.final_status_value, 2, 1)
+        left_summary_layout.addWidget(QLabel("Reason"), 3, 0)
+        left_summary_layout.addWidget(self.reason_value, 3, 1)
+        left_summary_layout.addWidget(QLabel("Resume"), 4, 0)
+        left_summary_layout.addWidget(self.resume_hint_value, 4, 1)
+        left_summary_layout.setColumnStretch(1, 1)
+
+        middle_summary = QWidget()
+        middle_summary.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        middle_summary_layout = QGridLayout(middle_summary)
+        middle_summary_layout.setContentsMargins(0, 0, 0, 0)
+        middle_summary_layout.setHorizontalSpacing(8)
+        middle_summary_layout.setVerticalSpacing(6)
+
         self.range_mode_combo = QComboBox()
         self.range_mode_combo.addItems(["Full Range", "Half Range", "Quarter Range"])
         self.range_mode_combo.setEnabled(False)
@@ -93,25 +102,16 @@ class SamplingTestPopup(QDialog):
         self.pwm_selection_combo.addItems(["All", "100", "90", "80", "70", "60"])
         self.pwm_selection_combo.setCurrentIndex(0)
 
-        middle_summary_layout.addWidget(QLabel("Sampling Sheet"), 0, 0)
-        middle_summary_layout.addWidget(self.sampling_sheet_value, 0, 1)
-        middle_summary_layout.addWidget(QLabel("Current Status"), 1, 0)
-        middle_summary_layout.addWidget(self.status_value, 1, 1)
-        middle_summary_layout.addWidget(QLabel("Reason"), 2, 0)
-        middle_summary_layout.addWidget(self.reason_value, 2, 1)
-        middle_summary_layout.addWidget(QLabel("Failure Context"), 3, 0)
-        middle_summary_layout.addWidget(self.failure_context_value, 3, 1)
-        middle_summary_layout.addWidget(QLabel("Resume"), 4, 0)
-        middle_summary_layout.addWidget(self.resume_hint_value, 4, 1)
-        middle_summary_layout.addWidget(QLabel("Range Mode"), 5, 0)
-        middle_summary_layout.addWidget(self.range_mode_combo, 5, 1)
-        middle_summary_layout.addWidget(QLabel("Samples per PWM"), 6, 0)
-        middle_summary_layout.addWidget(self.samples_per_pwm_combo, 6, 1)
-        middle_summary_layout.addWidget(QLabel("PWM Selection"), 7, 0)
-        middle_summary_layout.addWidget(self.pwm_selection_combo, 7, 1)
+        middle_summary_layout.addWidget(QLabel("Range Mode"), 0, 0)
+        middle_summary_layout.addWidget(self.range_mode_combo, 0, 1)
+        middle_summary_layout.addWidget(QLabel("Samples per PWM"), 1, 0)
+        middle_summary_layout.addWidget(self.samples_per_pwm_combo, 1, 1)
+        middle_summary_layout.addWidget(QLabel("PWM Selection"), 2, 0)
+        middle_summary_layout.addWidget(self.pwm_selection_combo, 2, 1)
         middle_summary_layout.setColumnStretch(1, 1)
 
-        button_column = QVBoxLayout()
+        button_container = QWidget()
+        button_column = QVBoxLayout(button_container)
         button_column.setContentsMargins(0, 0, 0, 0)
         button_column.setSpacing(6)
         button_column.addStretch(1)
@@ -137,10 +137,14 @@ class SamplingTestPopup(QDialog):
         self.close_button.setProperty("tone", "secondary")
         self.close_button.clicked.connect(self.hide)
         button_column.addWidget(self.close_button)
+        button_column.addStretch(1)
 
-        summary_row.addWidget(left_summary, 1)
-        summary_row.addWidget(middle_summary, 1)
-        summary_row.addLayout(button_column)
+        for button in (self.start_button, self.resume_button, self.stop_button, self.close_button):
+            button.setMinimumWidth(136)
+
+        summary_row.addWidget(left_summary, 5)
+        summary_row.addWidget(middle_summary, 3)
+        summary_row.addWidget(button_container, 2, Qt.AlignmentFlag.AlignTop)
         summary_body.addLayout(summary_row)
         root_layout.addWidget(summary_frame)
 
@@ -159,19 +163,37 @@ class SamplingTestPopup(QDialog):
         self.current_sample_value = self._make_value_label("Setup / 32")
         self.completed_count_value = self._make_value_label("0 / 320")
 
-        progress_grid.addWidget(QLabel("Current PWM"), 0, 0)
-        progress_grid.addWidget(self.current_pwm_value, 0, 1)
-        progress_grid.addWidget(QLabel("Current Direction"), 0, 2)
-        progress_grid.addWidget(self.current_direction_value, 0, 3)
-        progress_grid.addWidget(QLabel("Sample Index"), 1, 0)
-        progress_grid.addWidget(self.current_sample_value, 1, 1)
-        progress_grid.addWidget(QLabel("Completed Movements"), 1, 2)
-        progress_grid.addWidget(self.completed_count_value, 1, 3)
-        progress_grid.setColumnStretch(1, 1)
-        progress_grid.setColumnStretch(3, 1)
-        progress_body.addLayout(progress_grid)
+        progress_pwm_label = QLabel("Current PWM")
+        progress_pwm_label.setMinimumWidth(measurement_label_width)
+        progress_pwm_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        progress_direction_label = QLabel("Current Direction")
+        progress_direction_label.setMinimumWidth(measurement_label_width)
+        progress_direction_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        progress_sample_label = QLabel("Sample Index")
+        progress_sample_label.setMinimumWidth(measurement_label_width)
+        progress_sample_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        progress_completed_label = QLabel("Completed Movements")
+        progress_completed_label.setMinimumWidth(measurement_label_width)
+        progress_completed_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
 
-        last_sample_frame, last_sample_body = self._build_card("Last Sample")
+        progress_grid.addWidget(progress_pwm_label, 0, 0)
+        progress_grid.addWidget(self.current_pwm_value, 0, 1)
+        progress_grid.addWidget(progress_direction_label, 1, 0)
+        progress_grid.addWidget(self.current_direction_value, 1, 1)
+        progress_grid.addWidget(progress_sample_label, 2, 0)
+        progress_grid.addWidget(self.current_sample_value, 2, 1)
+        progress_grid.addWidget(progress_completed_label, 3, 0)
+        progress_grid.addWidget(self.completed_count_value, 3, 1)
+        progress_grid.setColumnStretch(1, 1)
+        progress_body.addLayout(progress_grid)
+        progress_body.addStretch(1)
+
+        self.error_plot_button = QPushButton("Error Plot")
+        self.error_plot_button.setObjectName("SamplingErrorPlotButton")
+        self.error_plot_button.setProperty("tone", "secondary")
+        self.error_plot_button.clicked.connect(lambda: self.error_plot_requested.emit())
+
+        last_sample_frame, last_sample_body = self._build_card("Last Sample", header_trailing=self.error_plot_button)
         last_sample_grid = QGridLayout()
         last_sample_grid.setContentsMargins(0, 0, 0, 0)
         last_sample_grid.setHorizontalSpacing(8)
@@ -180,18 +202,37 @@ class SamplingTestPopup(QDialog):
         self.latest_range_value = self._make_value_label("-")
         self.latest_time_value = self._make_value_label("-")
         self.latest_speed_value = self._make_value_label("-")
+        self.latest_error_value = self._make_value_label("-")
+        self.latest_error_value.setObjectName("SamplingErrorCountValue")
         self.latest_cell_value = self._make_value_label("-")
 
-        last_sample_grid.addWidget(QLabel("Latest Range"), 0, 0)
-        last_sample_grid.addWidget(self.latest_range_value, 0, 1)
-        last_sample_grid.addWidget(QLabel("Latest Time"), 0, 2)
-        last_sample_grid.addWidget(self.latest_time_value, 0, 3)
-        last_sample_grid.addWidget(QLabel("Latest Speed"), 1, 0)
-        last_sample_grid.addWidget(self.latest_speed_value, 1, 1)
-        last_sample_grid.setColumnStretch(1, 1)
-        last_sample_grid.setColumnStretch(3, 1)
-        last_sample_body.addLayout(last_sample_grid)
+        last_range_label = QLabel("Latest Range")
+        last_range_label.setMinimumWidth(measurement_label_width)
+        last_range_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        last_time_label = QLabel("Latest Time")
+        last_time_label.setMinimumWidth(measurement_label_width)
+        last_time_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        last_speed_label = QLabel("Latest Speed")
+        last_speed_label.setMinimumWidth(measurement_label_width)
+        last_speed_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        last_error_label = QLabel("Error Count")
+        last_error_label.setMinimumWidth(measurement_label_width)
+        last_error_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
 
+        last_sample_grid.addWidget(last_range_label, 0, 0)
+        last_sample_grid.addWidget(self.latest_range_value, 0, 1)
+        last_sample_grid.addWidget(last_time_label, 1, 0)
+        last_sample_grid.addWidget(self.latest_time_value, 1, 1)
+        last_sample_grid.addWidget(last_speed_label, 2, 0)
+        last_sample_grid.addWidget(self.latest_speed_value, 2, 1)
+        last_sample_grid.addWidget(last_error_label, 3, 0)
+        last_sample_grid.addWidget(self.latest_error_value, 3, 1)
+        last_sample_grid.setColumnStretch(1, 1)
+        last_sample_body.addLayout(last_sample_grid)
+        last_sample_body.addStretch(1)
+
+        progress_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        last_sample_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         measurement_row.addWidget(progress_frame, 1)
         measurement_row.addWidget(last_sample_frame, 1)
         root_layout.addLayout(measurement_row)
@@ -199,17 +240,6 @@ class SamplingTestPopup(QDialog):
         logs_row = QHBoxLayout()
         logs_row.setContentsMargins(0, 0, 0, 0)
         logs_row.setSpacing(10)
-
-        logs_header_row = QHBoxLayout()
-        logs_header_row.setContentsMargins(0, 0, 0, 0)
-        logs_header_row.addStretch(1)
-
-        self.clear_logs_button = QPushButton("Clear Logs")
-        self.clear_logs_button.setProperty("tone", "secondary")
-        self.clear_logs_button.setMinimumWidth(120)
-        self.clear_logs_button.clicked.connect(self.clear_logs)
-        logs_header_row.addWidget(self.clear_logs_button)
-        root_layout.addLayout(logs_header_row)
 
         operator_frame, operator_body = self._build_card("Operator Log")
         self.log_output = QTextEdit()
@@ -236,6 +266,17 @@ class SamplingTestPopup(QDialog):
         logs_row.addWidget(operator_frame, 1)
         logs_row.addWidget(packet_frame, 1)
         root_layout.addLayout(logs_row, 1)
+
+        logs_footer_row = QHBoxLayout()
+        logs_footer_row.setContentsMargins(0, 0, 0, 0)
+        logs_footer_row.addStretch(1)
+
+        self.clear_logs_button = QPushButton("Clear Logs")
+        self.clear_logs_button.setProperty("tone", "secondary")
+        self.clear_logs_button.setMinimumWidth(120)
+        self.clear_logs_button.clicked.connect(self.clear_logs)
+        logs_footer_row.addWidget(self.clear_logs_button)
+        root_layout.addLayout(logs_footer_row)
 
         self.reset_flags()
 
@@ -289,6 +330,7 @@ class SamplingTestPopup(QDialog):
         self.set_current_sample("Setup")
         self.set_completed_counts(0, int(total_measurements))
         self.set_latest_measurement("-")
+        self.clear_latest_error()
         self.set_latest_workbook_cell("-")
         self.set_start_available(False, "Sampling is already running.")
         self.set_resume_available(False, "Resume unavailable: Sampling is already running.")
@@ -395,6 +437,20 @@ class SamplingTestPopup(QDialog):
         self.latest_time_value.setText(f"{float(elapsed_seconds):.3f} s")
         self.latest_speed_value.setText(f"{float(speed):.2f} counts/s")
 
+    def clear_latest_error(self) -> None:
+        self.latest_error_value.setText("-")
+
+    def set_latest_error_result(self, result: object | None) -> None:
+        error_counts = getattr(result, "error_counts", None) if result is not None else None
+        error_units = getattr(result, "error_units", None) if result is not None else None
+        error_unit = getattr(result, "error_unit", None) if result is not None else None
+        if error_counts is None or error_units is None or not error_unit:
+            self.clear_latest_error()
+            return
+        count_text = self._format_error_count_display(float(error_counts))
+        units_text = self._format_error_unit_display(float(error_units))
+        self.latest_error_value.setText(f"{count_text} counts / {units_text} {error_unit}")
+
     def set_latest_workbook_cell(self, cell_ref: str) -> None:
         self.latest_cell_value.setText(cell_ref or "-")
 
@@ -482,6 +538,20 @@ class SamplingTestPopup(QDialog):
         event.ignore()
 
     @staticmethod
+    def _format_error_count_display(value: float) -> str:
+        rounded = int(round(float(value)))
+        if rounded == 0:
+            return "0"
+        return f"{rounded:+d}"
+
+    @staticmethod
+    def _format_error_unit_display(value: float) -> str:
+        rounded = round(float(value), 4)
+        if rounded == 0:
+            return "0.0000"
+        return f"{rounded:+.4f}"
+
+    @staticmethod
     def _make_value_label(text: str) -> QLabel:
         label = QLabel(text)
         label.setObjectName("DetailValue")
@@ -489,7 +559,7 @@ class SamplingTestPopup(QDialog):
         return label
 
     @staticmethod
-    def _build_card(title: str) -> tuple[QFrame, QVBoxLayout]:
+    def _build_card(title: str, *, header_trailing: QWidget | None = None) -> tuple[QFrame, QVBoxLayout]:
         frame = QFrame()
         frame.setObjectName("SamplingCard")
         frame.setFrameShape(QFrame.Shape.StyledPanel)
@@ -497,9 +567,21 @@ class SamplingTestPopup(QDialog):
         frame_layout.setContentsMargins(8, 6, 8, 8)
         frame_layout.setSpacing(4)
 
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(8)
+
         title_label = QLabel(title)
         title_label.setObjectName("SectionTitle")
-        frame_layout.addWidget(title_label)
+        title_font = QFont(title_label.font())
+        title_font.setBold(True)
+        title_font.setPointSize(title_font.pointSize() + 1)
+        title_label.setFont(title_font)
+        header_row.addWidget(title_label)
+        header_row.addStretch(1)
+        if header_trailing is not None:
+            header_row.addWidget(header_trailing, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
+        frame_layout.addLayout(header_row)
 
         body_layout = QVBoxLayout()
         body_layout.setContentsMargins(0, 0, 0, 0)

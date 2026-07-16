@@ -57,6 +57,8 @@ $pyinstallerArgs = @(
     "--add-data",
     "$(Join-Path $root 'resources');resources",
     "--add-data",
+    "$(Join-Path $root 'config');config",
+    "--add-data",
     "$(Join-Path $root 'project_configs');project_configs",
     # PyInstaller 6.21 on this environment does not expose the narrower Qt plugin CLI flag,
     # so we collect the PyQt6 package to ensure the required Qt runtime plugins ship with the release.

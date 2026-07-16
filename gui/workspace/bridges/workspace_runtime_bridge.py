@@ -25,6 +25,7 @@ from .raw_project_config_reader import RawProjectConfigReader
 from .workspace_snapshot_factory import WorkspaceSnapshotFactory
 from services.robot_backend_client import RobotBackendClient
 from services.communication_log_store import CommunicationLogStore
+from services.node_motion_calibration_store import NodeMotionCalibrationStore
 from data.binary_cmd_parser import decode_nodeconfig_motion_polarity
 
 _ALLOWED_CONFIG_SUFFIXES = {".yaml", ".yml"}
@@ -36,7 +37,11 @@ if TYPE_CHECKING:
 class WorkspaceRuntimeBridge:
     """Provides page-friendly data and focused actions for the workspace shell."""
 
-    def __init__(self, project_definition: ProjectDefinition) -> None:
+    def __init__(
+        self,
+        project_definition: ProjectDefinition,
+        node_motion_calibration_store: NodeMotionCalibrationStore | None = None,
+    ) -> None:
         self._project_definition = project_definition
         self._config_reader = RawProjectConfigReader(project_definition)
         self._runtime_launcher = LegacyRuntimeLauncher(project_definition)
@@ -45,6 +50,9 @@ class WorkspaceRuntimeBridge:
         self._config_editor_service = ConfigEditorService()
         self._config_save_service = ConfigSaveService()
         self._live_overlay_provider = LiveHardwareOverlayProvider(self._runtime_launcher)
+        self._node_motion_calibration_store = (
+            node_motion_calibration_store or NodeMotionCalibrationStore.load_default()
+        )
 
     def get_boot_messages(self) -> list[str]:
         return self._snapshot_factory.build_boot_messages(self._project_definition)
@@ -805,6 +813,10 @@ class WorkspaceRuntimeBridge:
     @property
     def has_live_runtime(self) -> bool:
         return self._runtime_launcher.has_window()
+
+    @property
+    def node_motion_calibration_store(self) -> NodeMotionCalibrationStore:
+        return self._node_motion_calibration_store
 
     @property
     def _raw_config(self) -> dict:

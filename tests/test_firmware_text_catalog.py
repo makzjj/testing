@@ -1,32 +1,20 @@
 from __future__ import annotations
 
-import ast
-from pathlib import Path
 import unittest
 
 from gui.workspace.controllers.firmware_integration_controller import FirmwareIntegrationController
-
-
-def _legacy_text_commands() -> list[dict[str, object]]:
-    source = Path("legacy_reference/firmware_integration_test.py").read_text(encoding="utf-8")
-    module = ast.parse(source)
-    for node in module.body:
-        if not isinstance(node, ast.Assign):
-            continue
-        for target in node.targets:
-            if isinstance(target, ast.Name) and target.id == "ALL_TEXT_COMMANDS":
-                return ast.literal_eval(node.value)
-    raise AssertionError("ALL_TEXT_COMMANDS not found")
+from tests.helpers.firmware_catalog_fixtures import load_legacy_text_catalog
 
 
 class FirmwareTextCatalogTests(unittest.TestCase):
     def test_every_legacy_text_command_has_canonical_definition_and_case(self) -> None:
-        legacy_commands = _legacy_text_commands()
+        legacy_catalog = load_legacy_text_catalog()
+        legacy_commands = list(legacy_catalog["entries"])
         controller = FirmwareIntegrationController()
         definitions = controller.manual_text_command_definitions()
         cases = controller.text_fit_case_definitions()
 
-        legacy_command_text = [str(item["cmd"]) for item in legacy_commands]
+        legacy_command_text = [str(item["command"]) for item in legacy_commands]
         definition_command_text = [str(definition.text_command) for definition in definitions]
         case_command_text = [
             str(next(definition for definition in definitions if definition.name == case.command_key).text_command)
@@ -40,6 +28,20 @@ class FirmwareTextCatalogTests(unittest.TestCase):
         self.assertEqual(set(case_command_text), set(legacy_command_text))
         self.assertEqual(len(set(definition.name for definition in definitions)), len(definitions))
         self.assertEqual(len(set(case.case_id for case in cases)), len(cases))
+
+        definitions_by_command = {str(definition.text_command): definition for definition in definitions}
+        for entry in legacy_commands:
+            definition = definitions_by_command[str(entry["command"])]
+            with self.subTest(command=entry["command"]):
+                if entry["type"] == "query":
+                    self.assertTrue(str(definition.text_command).endswith("?"))
+                elif entry["type"] == "set":
+                    self.assertTrue(str(definition.text_command).endswith("="))
+                else:
+                    self.assertFalse(str(definition.text_command).endswith("?"))
+                    self.assertFalse(str(definition.text_command).endswith("="))
+                self.assertEqual(definition.expected_response, entry["expected_prefix"])
+                self.assertEqual(definition.expected_response_description, entry["expected_response"])
 
     def test_every_definition_has_required_metadata(self) -> None:
         controller = FirmwareIntegrationController()

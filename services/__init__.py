@@ -13,6 +13,7 @@ __all__ = [
     "connected_node_ids",
     "ensure_node_status",
     "NodeDiscoveryCoordinator",
+    "NodeMotionCalibrationStore",
     "reset_node_status",
 ]
 
@@ -67,6 +68,10 @@ def __getattr__(name: str):
         from .node_discovery_coordinator import NodeDiscoveryCoordinator
 
         return NodeDiscoveryCoordinator
+    if name == "NodeMotionCalibrationStore":
+        from .node_motion_calibration_store import NodeMotionCalibrationStore
+
+        return NodeMotionCalibrationStore
     if name == "reset_node_status":
         from .node_status_store import reset_node_status
 

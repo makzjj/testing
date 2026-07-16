@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import ast
 import inspect
 import unittest
-from pathlib import Path
 
 import data.binary_cmd_builders as binary_builders
 import data.binary_cmd_parser as binary_parser
@@ -11,28 +9,19 @@ import gui.workspace.controllers.firmware_integration_controller as firmware_con
 import gui.workspace.dialogs.binary_fit_config_dialog as binary_fit_config_dialog_module
 import gui.workspace.dialogs.manual_binary_command_dialog as manual_binary_dialog_module
 from gui.workspace.controllers.firmware_integration_controller import FirmwareIntegrationController
-
-
-def _legacy_binary_rows() -> list[dict[str, object]]:
-    source = Path("legacy_reference/firmware_integration_test.py").read_text(encoding="utf-8")
-    module = ast.parse(source)
-    for node in module.body:
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == "ALL_BINARY_COMMANDS":
-                    return list(ast.literal_eval(node.value))
-    raise AssertionError("ALL_BINARY_COMMANDS not found")
+from tests.helpers.firmware_catalog_fixtures import load_legacy_binary_catalog
 
 
 class FirmwareBinaryCatalogArchitectureTests(unittest.TestCase):
     def test_catalog_count_and_extra_definitions_are_explicitly_justified(self) -> None:
-        legacy = _legacy_binary_rows()
+        legacy_catalog = load_legacy_binary_catalog()
+        legacy = list(legacy_catalog["entries"])
         controller = FirmwareIntegrationController()
         definitions = controller.manual_binary_command_definitions()
         cases = controller.binary_fit_case_definitions()
 
         legacy_signatures = {
-            (int(row["cmd"]) & 0xFF, str(row.get("params_type") or ""), str(row.get("name") or ""))
+            (int(row["opcode"]) & 0xFF, str(row.get("parameter_type") or ""), str(row.get("name") or ""))
             for row in legacy
         }
         extra = [

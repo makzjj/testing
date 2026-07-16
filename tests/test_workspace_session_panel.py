@@ -18,6 +18,7 @@ from gui.workspace.widgets import LiveSessionPanel
 from gui.main_window import MainWindow
 from myconfig.project_models import ProjectDefinition, ProjectFeatures, ProjectUiConfig
 from services import NodeDiscoveryCoordinator
+from services.node_motion_calibration_store import NodeMotionCalibrationStore
 
 try:
     from openpyxl import Workbook
@@ -33,6 +34,7 @@ class _FakeBridge:
             display_name="Demo",
             config_path=Path("demo.yaml"),
         )
+        self.node_motion_calibration_store = NodeMotionCalibrationStore.load_default()
 
     @property
     def project_definition(self) -> ProjectDefinition:

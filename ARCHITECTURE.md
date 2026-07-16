@@ -101,10 +101,16 @@ Runtime-backed state is the authoritative view for shared robot state. Firmware,
 When a responsibility already has a clear owner, new changes should extend that owner instead of creating a second implementation. This applies especially to:
 
 - binary command builders and parsers
+- static machine calibration data loading
 - parameter pipelines
 - workbook serialization
 - runtime state updates
 - bridge-facing runtime access
+
+Machine-specific node motion calibration is static configuration, not runtime truth. The calibration XML is loaded by a narrow store service and consumed through composition; Sampling, popups, and pages must not parse the XML directly.
+
+Sampling owns derived measurement results. Measured range, elapsed time, and speed stay controller-owned, and calibration-backed error values are appended there using `error_counts = measured_range_counts - expected_range_counts` and `error_units = error_counts / abs(counts_per_unit)`. Positive error means overshoot, negative error means undershoot. UI/error-plot rendering remains a later phase.
+The Sampling popup and Error Plot render those controller-owned signed error values only. They do not parse calibration XML, calculate expected ranges, or maintain a second error history.
 
 ### Avoiding Duplicate Implementations
 
@@ -185,7 +191,7 @@ Current state:
 - Automated Text FIT core sequencing now lives in a private `_TextFitWorkflow` under `FirmwareIntegrationController`; policy-specific Text execution and cleanup remain workflow-owned, not UI-owned
 - The complete legacy Text command catalog is represented as controller-owned `FirmwareCommandDefinition` metadata and `FirmwareTestCase` metadata; commands still requiring hardware validation remain visible through policy/unsupported metadata rather than being silently omitted
 - Text FIT configuration and report dialogs are UI-only and render controller-owned state through one read-only snapshot contract rather than owning sequencing, timeout, or result truth
-- The legacy Firmware Integration Test UI is the layout and workflow specification for the refactored Firmware Integration module: main actions, Manual Binary/Text command rows, Binary/Text FIT configuration dialogs, Binary/Text live report dialogs, table columns, and operator flow should match the legacy surface while using the BioBot orange theme. The legacy widget remains reference-only and is not imported or instantiated.
+- Historical Firmware Integration Binary/Text catalog parity is preserved by committed test-only JSON fixtures under `tests/fixtures/firmware_catalogs/`. Runtime code does not import those fixtures, and no legacy FIT widget remains in the repository.
 - `FirmwareFitReport` is the shared run-level reporting contract assembled from completed Binary/Text FIT results, and `FirmwareReportBuilder` owns pure in-memory HTML generation using the legacy report information hierarchy with BioBot orange styling
 - Reports / Export is a shared UI-only dialog for selecting the latest completed Binary/Text FIT report and invoking the export service; Binary/Text live report dialogs may expose the legacy Export button but delegate HTML generation and filesystem writing to `FirmwareReportBuilder` and `FirmwareReportExportService`. `FirmwareReportExportService` owns HTML file writing, filename collision handling, and last-folder persistence through `QSettings("Biobot", "RobotArmTester")` key `report_save_location`.
 - PDF/CSV export, report history, and final hardware validation remain future work

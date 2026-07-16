@@ -27,6 +27,7 @@ Expected contents include:
 
 - `IPQC.exe`
 - `_internal/`
+- `config/node_motion_calibration.xml`
 - `data/logs/`
 - `data/exports/`
 - `data/config/`
@@ -80,6 +81,14 @@ These folders are created automatically on first launch when missing.
 - Writable configuration and copied defaults go under `data/config/`.
 
 The app does not write editable runtime data into PyInstaller `_internal/`.
+
+The bundled node motion calibration file is loaded automatically from:
+
+```text
+config/node_motion_calibration.xml
+```
+
+Negative `CountsPerUnit` values are valid and record encoder polarity metadata. Expected full-range counts use `SoftwareRange * abs(CountsPerUnit)`. Restart the application after editing the XML. Sampling consumption remains future CAL-0B work and UI/error plotting remains future CAL-0C work.
 
 ## Launch
 

@@ -1,31 +1,18 @@
 from __future__ import annotations
 
-import ast
 import inspect
 import unittest
 from collections import Counter
-from pathlib import Path
 
 from data import binary_cmd_builders, binary_cmd_parser
 from gui.workspace.controllers.firmware_integration_controller import FirmwareIntegrationController
-
-
-def _legacy_binary_commands() -> list[dict[str, object]]:
-    source = Path("legacy_reference/firmware_integration_test.py").read_text(encoding="utf-8")
-    module = ast.parse(source)
-    for node in module.body:
-        if not isinstance(node, ast.Assign):
-            continue
-        for target in node.targets:
-            if isinstance(target, ast.Name) and target.id == "ALL_BINARY_COMMANDS":
-                value = ast.literal_eval(node.value)
-                return list(value)
-    raise AssertionError("ALL_BINARY_COMMANDS not found")
+from tests.helpers.firmware_catalog_fixtures import load_legacy_binary_catalog
 
 
 class FirmwareBinaryCatalogTests(unittest.TestCase):
     def test_every_legacy_binary_entry_is_represented_with_metadata(self) -> None:
-        legacy = _legacy_binary_commands()
+        legacy_catalog = load_legacy_binary_catalog()
+        legacy = list(legacy_catalog["entries"])
         controller = FirmwareIntegrationController()
         definitions = controller.manual_binary_command_definitions()
         cases = controller.binary_fit_case_definitions()
@@ -37,7 +24,7 @@ class FirmwareBinaryCatalogTests(unittest.TestCase):
         self.assertEqual(len({case.case_id for case in cases}), len(cases))
 
         legacy_signatures = Counter(
-            (int(row["cmd"]) & 0xFF, str(row.get("params_type") or ""), str(row.get("name") or ""))
+            (int(row["opcode"]) & 0xFF, str(row.get("parameter_type") or ""), str(row.get("name") or ""))
             for row in legacy
         )
         definition_signatures = Counter(
@@ -55,6 +42,26 @@ class FirmwareBinaryCatalogTests(unittest.TestCase):
             in legacy_signatures
         )
         self.assertEqual(definition_signatures, legacy_signatures)
+
+        definition_by_signature = {
+            (
+                int(definition.opcode or 0) & 0xFF,
+                str((definition.validation or {}).get("params_type") or ""),
+                str((definition.validation or {}).get("legacy_name") or ""),
+            ): definition
+            for definition in definitions
+        }
+        for row in legacy:
+            signature = (
+                int(row["opcode"]) & 0xFF,
+                str(row.get("parameter_type") or ""),
+                str(row.get("name") or ""),
+            )
+            definition = definition_by_signature[signature]
+            with self.subTest(signature=signature):
+                self.assertEqual(definition.command_form, row["form"])
+                self.assertEqual(definition.expected_response_description, row["expected_response"])
+                self.assertEqual(definition.manual_prompt, row["manual_verification_prompt"])
 
         for definition in definitions:
             self.assertEqual(definition.mode, "binary")
